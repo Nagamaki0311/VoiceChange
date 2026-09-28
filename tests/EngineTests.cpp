@@ -51,7 +51,6 @@ private:
 
         const float amp = (float) std::pow (10.0, -20.0 / 20.0); // -20dBFS
         constexpr int steadyLen = (int) kFs; // 1秒
-        constexpr int rampSamples = (int) 0.05 * (int) kFs; // 50ms(参考、実際はlround使用)
         const int actualRamp = (int) std::lround (0.05 * kFs);
         constexpr int margin = 2400;
         const int totalLen = steadyLen + actualRamp + margin + steadyLen;
@@ -78,7 +77,6 @@ private:
         const double ratioDb = 20.0 * std::log10 (rmsAfter / rmsBefore);
 
         expectWithinAbsoluteError (ratioDb, 6.0, 0.1);
-        juce::ignoreUnused (rampSamples);
     }
 
     // ----- E2: リミッター -----

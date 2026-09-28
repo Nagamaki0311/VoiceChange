@@ -3,7 +3,9 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
 
+#include "Effects.h"
 #include "Params.h"
+#include "PitchDetector.h"
 #include "PitchShifter.h"
 
 #include <atomic>
@@ -11,10 +13,11 @@
 #include <vector>
 
 // ===== SECTION: Engine =====
-// 音声処理チェーン全体（ピッチシフター + 層1: リバーブ・ゲイン・リミッター）。
+// 音声処理チェーン全体（ピッチ検出 + ピッチシフター + 層2の効果 + 層1: リバーブ・ゲイン・リミッター）。
 // GUI・デバイスに依存しない（vc_core）。docs/spec.md「音声処理チェーン」「層1: 音響卓」、
 // docs/decisions.md D-007・D-008・D-010、docs/plan.md 2.5節「Engine」参照。
-// 層2の効果（エコー/ロボット/トークボックス）とケロケロの補正量計算はT-005で追加する。
+// 層2の効果（エコー/ロボット/トークボックス）の切替は20msのクロスフェード、ケロケロの補正量は
+// ピッチ検出の結果から毎ブロック計算する（docs/spec.md「層2: 特殊効果プリセット」）。
 
 namespace vc
 {
@@ -41,6 +44,9 @@ public:
 
     int getShifterLatencySamples() const noexcept { return shifter.getLatencySamples(); }
 
+    // ケロケロの直前の補正量（半音）。音声スレッド（またはテスト）専用で、UIスレッドからは読まない。
+    float getKerokeroCorrectionSemitones() const noexcept { return kerokeroCorrection; }
+
     // bit0: 非有限値、bit1: 例外（AudioIOが立てる）。
     std::uint32_t getErrorFlags() const noexcept { return errorFlags.load (std::memory_order_relaxed); }
     void clearErrorFlags() noexcept { errorFlags.store (0, std::memory_order_relaxed); }
@@ -51,6 +57,8 @@ public:
 private:
     void processChunk (float* buf, int n) noexcept;
     void processChain (float* buf, int n, int presetIdx, int pitchSemis, float gainDb, float reverbAmt) noexcept;
+    void processLayer2 (float* buf, int n, Effect desired, float carrierHz, float voicing) noexcept;
+    void runEffect (Effect effect, const float* in, float* out, int n, float carrierHz, float voicing) noexcept;
     void processReverb (float* buf, int n, float reverbAmt) noexcept;
     void applyLimiter (float* buf, int n) noexcept;
     void handleNonFinite (float* buf, int n) noexcept;
@@ -60,18 +68,33 @@ private:
 
     AtomicParams atomicParams;
 
+    PitchDetector detector;
     PitchShifter shifter;
+    Echo echo;
+    RingModulator ringMod;
+    Talkbox talkbox;
     juce::Reverb reverb;
     juce::dsp::Compressor<float> compressor;
 
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> gainSmoothed;
     juce::SmoothedValue<float> reverbGainSmoothed;
     bool reverbActive = false;
+    bool reverbParamsStale = true; // 補間中と、prepare/reset後の最初の1回だけreverb.setParametersを呼ぶ
+
+    // 層2の効果の切替状態。fadeFrom != Noneの間は旧効果(fadeFrom)と新効果(activeEffect)を並行処理する。
+    Effect activeEffect = Effect::None;
+    Effect fadeFrom = Effect::None;
+    int fadePos = 0;
+    int fadeLen = 1;
+    bool detectorRunning = false;
+    float kerokeroCorrection = 0.0f; // 直前の補正量（半音）。無声・無音区間はこれを保つ
 
     double sampleRate = 48000.0;
     int maxBlockSamples = 0;
 
     std::vector<float> dryScratch;
+    std::vector<float> fxInScratch;
+    std::vector<float> fxOldScratch;
 
     // 1=チェーン全体を通す、0=完全バイパス。20msでクロスフェードする（D-010）。
     double chainGain = 1.0;

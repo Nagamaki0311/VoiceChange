@@ -12,6 +12,9 @@ namespace
 constexpr double kBypassCrossfadeSeconds = 0.020;
 constexpr double kGainRampSeconds = 0.050;
 constexpr double kReverbRampSeconds = 0.020;
+constexpr double kEffectCrossfadeSeconds = 0.020;
+constexpr float kDefaultCarrierHz = 110.0f; // 一度も有声にならないうちのトークボックスのキャリア
+constexpr float kVoicedThreshold = 0.5f;
 
 bool allFinite (const float* data, int n) noexcept
 {
@@ -29,12 +32,27 @@ void Engine::prepare (const EngineConfig& config)
     maxBlockSamples = config.maxBlock;
 
     dryScratch.assign ((size_t) maxBlockSamples, 0.0f);
+    fxInScratch.assign ((size_t) maxBlockSamples, 0.0f);
+    fxOldScratch.assign ((size_t) maxBlockSamples, 0.0f);
 
     shifter.prepare (sampleRate, maxBlockSamples);
+    detector.prepare (sampleRate, maxBlockSamples);
+    echo.prepare (sampleRate, maxBlockSamples);
+    ringMod.prepare (sampleRate, maxBlockSamples);
+    talkbox.prepare (sampleRate, maxBlockSamples);
+
+    const int presetIdx = juce::jlimit (0, (int) kPresets.size() - 1, atomicParams.preset.load (std::memory_order_relaxed));
+    activeEffect = kPresets[(size_t) presetIdx].effect;
+    fadeFrom = Effect::None;
+    fadePos = 0;
+    fadeLen = std::max (1, (int) std::lround (kEffectCrossfadeSeconds * sampleRate));
+    detectorRunning = false;
+    kerokeroCorrection = 0.0f;
 
     reverb.setSampleRate (sampleRate);
     reverb.reset();
     reverbActive = false;
+    reverbParamsStale = true;
     reverbGainSmoothed.reset (sampleRate, kReverbRampSeconds);
     reverbGainSmoothed.setCurrentAndTargetValue (0.0f);
 
@@ -77,8 +95,16 @@ float Engine::takeInputPeak() noexcept
 void Engine::resetChain() noexcept
 {
     shifter.reset();
+    detector.reset();
+    detectorRunning = false;
+    kerokeroCorrection = 0.0f;
+    echo.reset();
+    ringMod.reset();
+    talkbox.reset();
+    fadeFrom = Effect::None;
     reverb.reset();
     reverbActive = false;
+    reverbParamsStale = true;
     compressor.reset();
 }
 
@@ -109,16 +135,22 @@ void Engine::processReverb (float* buf, int n, float reverbAmt) noexcept
 
     for (int i = 0; i < n; ++i)
     {
+        // setParametersは補間中はサンプルごと、収束後は最初の1回だけ（rが一定なら値は変わらない）。
+        const bool smoothing = reverbGainSmoothed.isSmoothing();
         const float r = reverbGainSmoothed.getNextValue();
 
-        juce::Reverb::Parameters p;
-        p.roomSize = 0.5f;
-        p.damping = 0.5f;
-        p.wetLevel = r / 3.0f;        // D-008: JUCEの内部倍率(×3)を打ち消す
-        p.dryLevel = (1.0f - r) / 2.0f; // D-008: JUCEの内部倍率(×2)を打ち消す
-        p.width = 1.0f;
-        p.freezeMode = 0.0f;
-        reverb.setParameters (p);
+        if (smoothing || reverbParamsStale)
+        {
+            juce::Reverb::Parameters p;
+            p.roomSize = 0.5f;
+            p.damping = 0.5f;
+            p.wetLevel = r / 3.0f;        // D-008: JUCEの内部倍率(×3)を打ち消す
+            p.dryLevel = (1.0f - r) / 2.0f; // D-008: JUCEの内部倍率(×2)を打ち消す
+            p.width = 1.0f;
+            p.freezeMode = 0.0f;
+            reverb.setParameters (p);
+            reverbParamsStale = false;
+        }
 
         reverb.processMono (buf + i, 1);
     }
@@ -127,6 +159,7 @@ void Engine::processReverb (float* buf, int n, float reverbAmt) noexcept
     {
         reverb.reset();
         reverbActive = false;
+        reverbParamsStale = true;
     }
 }
 
@@ -142,19 +175,103 @@ void Engine::applyLimiter (float* buf, int n) noexcept
     juce::FloatVectorOperations::clip (buf, buf, -1.0f, 1.0f, n);
 }
 
+void Engine::runEffect (Effect effect, const float* in, float* out, int n, float carrierHz, float voicing) noexcept
+{
+    switch (effect)
+    {
+        case Effect::None:
+            if (in != out)
+                std::memcpy (out, in, sizeof (float) * (size_t) n);
+            break;
+        case Effect::Echo:     echo.process (in, out, n); break;
+        case Effect::Robot:    ringMod.process (in, out, n); break;
+        case Effect::Talkbox:  talkbox.process (in, out, n, carrierHz, voicing); break;
+    }
+}
+
+// 層2のピッチ以外の効果。効果が変わるときは新効果をreset()し、旧新を20ms並行処理してクロスフェードする。
+// 切替中に来た次の変更は、切替が終わった次のブロックで反映する（保留）。
+void Engine::processLayer2 (float* buf, int n, Effect desired, float carrierHz, float voicing) noexcept
+{
+    if (fadeFrom == Effect::None && desired != activeEffect)
+    {
+        fadeFrom = activeEffect;
+        activeEffect = desired;
+        fadePos = 0;
+
+        switch (activeEffect)
+        {
+            case Effect::Echo:    echo.reset(); break;
+            case Effect::Robot:   ringMod.reset(); break;
+            case Effect::Talkbox: talkbox.reset(); break;
+            case Effect::None:    break;
+        }
+    }
+
+    if (fadeFrom == Effect::None)
+    {
+        runEffect (activeEffect, buf, buf, n, carrierHz, voicing);
+        return;
+    }
+
+    std::memcpy (fxInScratch.data(), buf, sizeof (float) * (size_t) n);
+    runEffect (fadeFrom, fxInScratch.data(), fxOldScratch.data(), n, carrierHz, voicing);
+    runEffect (activeEffect, fxInScratch.data(), buf, n, carrierHz, voicing);
+
+    for (int i = 0; i < n && fadePos < fadeLen; ++i, ++fadePos)
+    {
+        const float g = (float) (fadePos + 1) / (float) fadeLen;
+        buf[i] = fxOldScratch[(size_t) i] * (1.0f - g) + buf[i] * g;
+    }
+
+    if (fadePos >= fadeLen)
+        fadeFrom = Effect::None;
+}
+
 void Engine::processChain (float* buf, int n, int presetIdx, int pitchSemis, float gainDb, float reverbAmt) noexcept
 {
     const auto presetEnum = static_cast<Preset> (presetIdx);
     const auto& spec = kPresets[(size_t) presetIdx];
 
+    // ピッチ検出はケロケロ・トークボックス（切替中の旧効果を含む）のときだけ動かす。加工前の声を検出する。
+    const bool needDetector = spec.needsDetector || activeEffect == Effect::Talkbox || fadeFrom == Effect::Talkbox;
+
+    if (needDetector && ! detectorRunning)
+    {
+        detector.reset();
+        kerokeroCorrection = 0.0f;
+    }
+
+    detectorRunning = needDetector;
+
+    float detectedHz = 0.0f;
+    float voicing = 0.0f;
+
+    if (needDetector)
+    {
+        detector.process (buf, n);
+        detectedHz = detector.getFrequencyHz();
+        voicing = detector.getVoicing();
+
+        // ケロケロの補正量 = round(m) - m（m = 検出音高のMIDIノート番号、A4 = 440Hz）。
+        // 無声・無音区間は直前の補正量を保つ。
+        if (voicing >= kVoicedThreshold && detectedHz > 0.0f)
+        {
+            const float m = 69.0f + 12.0f * std::log2 (detectedHz / 440.0f);
+            kerokeroCorrection = std::round (m) - m;
+        }
+    }
+
     const bool shifterRun = shifterShouldRun (presetEnum, pitchSemis);
-    const float semitonesTotal = (float) pitchSemis + spec.semitones; // ケロケロ補正はT-005
+    const float correction = presetEnum == Preset::Kerokero ? kerokeroCorrection : 0.0f;
+    const float semitonesTotal = (float) pitchSemis + spec.semitones + correction;
 
     shifter.setTarget (shifterRun, semitonesTotal, spec.formant);
     shifter.process (buf, buf, n);
 
-    // 層2のピッチ以外の効果（エコー/ロボット/トークボックス）はT-005で追加する。
-    // T-004時点ではプリセットを選んでも効果なしで通す。
+    // トークボックスのキャリア = 検出f0 × 2^(層1ピッチ/12)。一度も有声にならないうちは既定値を使う。
+    const float carrierHz = (detectedHz > 0.0f ? detectedHz : kDefaultCarrierHz) * std::exp2 ((float) pitchSemis / 12.0f);
+    processLayer2 (buf, n, spec.effect, carrierHz, voicing);
 
     processReverb (buf, n, reverbAmt);
 
