@@ -47,3 +47,7 @@
 
 ### 次回開始位置
 - T-003: `src/core/ResamplingFifo.*`、`src/app/AudioIO.*`（入出力分離・リングバッファ・クロックずれ補正とオフライン模擬テスト）。
+
+### コミット
+- `2aa16a3` T-002: CMake構成・依存固定・Windows/Linux CI・README
+- `df6b870` README: D-011（個人利用のみ、配布なし）の記載を追加
