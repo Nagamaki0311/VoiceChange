@@ -1,5 +1,9 @@
 #include "AudioIO.h"
 
+#include "core/PitchShifter.h"
+
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace vc
@@ -63,6 +67,7 @@ public:
         catch (...)
         {
             owner.errorFlag.store (true, std::memory_order_relaxed);
+            owner.engine.raiseExceptionErrorFlag();
         }
 
         owner.inputCallbackCount.fetch_add (1, std::memory_order_relaxed);
@@ -105,6 +110,7 @@ public:
                 const int chunk = juce::jmin (remaining, scratchSize);
 
                 owner.fifo.pull (mono, chunk, now);
+                owner.engine.process (mono, chunk);
 
                 for (int ch = 0; ch < numOutputChannels; ++ch)
                     if (float* out = outputChannelData[ch])
@@ -116,7 +122,9 @@ public:
         }
         catch (...)
         {
+            // 例外時は無音＋エラーフラグ（bit1）。
             owner.errorFlag.store (true, std::memory_order_relaxed);
+            owner.engine.raiseExceptionErrorFlag();
 
             for (int ch = 0; ch < numOutputChannels; ++ch)
                 if (float* out = outputChannelData[ch])
@@ -301,6 +309,22 @@ bool AudioIO::open (const juce::String& inName, const juce::String& outName)
 
     fifo.prepare (inputInfo.rate, outputInfo.rate, maxInBlock, maxOutBlock, inputInfo.bufferSize, outputInfo.bufferSize);
 
+    // D-003: ブロック長は開いた時点のデバイス遅延・リングバッファ目標から毎回計算する。
+    // デバイス遅延 = getInput/OutputLatencyInSamples()/rate（レビュー指摘3：バッファ長込みなので二重計上しない）。
+    // リング目標 = max(各バッファ長) + 2ms（ResamplingFifoの初期ジッタ余裕と同じ値）。
+    const double deviceLatencyMs = (inputInfo.rate > 0.0 ? (double) inputInfo.latencySamples / inputInfo.rate * 1000.0 : 0.0)
+                                    + (outputInfo.rate > 0.0 ? (double) outputInfo.latencySamples / outputInfo.rate * 1000.0 : 0.0);
+    const double inBlockMs = (double) inputInfo.bufferSize / inputInfo.rate * 1000.0;
+    const double outBlockMs = (double) outputInfo.bufferSize / outputInfo.rate * 1000.0;
+    const double ringTargetMs = std::max (inBlockMs, outBlockMs) + 2.0;
+
+    const auto blockDecision = PitchShifter::decideStretchBlock (deviceLatencyMs, ringTargetMs);
+    blockOverBudget = blockDecision.overBudget;
+
+    const int stretchBlockSamples = juce::jmax (1, (int) std::lround ((double) blockDecision.blockMs / 1000.0 * outputInfo.rate));
+
+    engine.prepare ({ outputInfo.rate, maxOutBlock, stretchBlockSamples });
+
     errorFlag.store (false, std::memory_order_relaxed);
     inputCallbackCount.store (0, std::memory_order_relaxed);
     outputCallbackCount.store (0, std::memory_order_relaxed);
@@ -342,6 +366,7 @@ LatencyBreakdown AudioIO::getLatency() const noexcept
     // レビュー指摘3: getInput/OutputLatencyInSamples()は既に「ストリーム遅延+バッファ長」を
     // 返す（JUCEのWASAPI実装ではlatencyIn = latencySamples + currentBufferSizeSamples）ため、
     // ここでbufferSizeを再加算すると二重計上になる。
+    // 注: Linux（ALSA）ではこの値にバッファ長が含まれない実装差異があるが、Linuxは開発用のため対応しない。
     b.deviceInMs = inputInfo.rate > 0.0
         ? (double) inputInfo.latencySamples / inputInfo.rate * 1000.0
         : 0.0;
@@ -351,7 +376,12 @@ LatencyBreakdown AudioIO::getLatency() const noexcept
         : 0.0;
 
     b.ringBufferMs = fifo.getLatencyMs();
-    b.totalMs = b.deviceInMs + b.deviceOutMs + b.ringBufferMs;
+
+    b.shifterMs = outputInfo.rate > 0.0
+        ? (double) engine.getShifterLatencySamples() / outputInfo.rate * 1000.0
+        : 0.0;
+
+    b.totalMs = b.deviceInMs + b.deviceOutMs + b.ringBufferMs + b.shifterMs;
 
     return b;
 }

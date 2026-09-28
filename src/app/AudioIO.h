@@ -2,6 +2,7 @@
 
 #include <juce_audio_devices/juce_audio_devices.h>
 
+#include "core/Engine.h"
 #include "core/ResamplingFifo.h"
 
 #include <atomic>
@@ -12,7 +13,7 @@
 // 入力・出力デバイスをそれぞれ別のAudioIODeviceとして開き、独立したコールバックスレッドで動かす（D-001）。
 // docs/spec.md「アーキテクチャ」「デバイスタイプ」、docs/plan.md 2.5節「AudioIO」参照。
 // ウォッチドッグ・再接続（ConnectionMonitor）はT-007。ここではコールバック回数のatomicカウンタと
-// エラーフラグだけを置く。Engineが未実装のため、出力はpullした音をそのまま複製する暫定処理。
+// エラーフラグだけを置く。出力コールバックはpullした音をEngineに通してから全チャンネルへ複製する。
 
 namespace vc
 {
@@ -31,6 +32,7 @@ struct LatencyBreakdown
     double deviceInMs = 0.0;
     double deviceOutMs = 0.0;
     double ringBufferMs = 0.0;
+    double shifterMs = 0.0; // ピッチシフター稼働中のみ非0（休止中は0。D-002）
     double totalMs = 0.0;
 };
 
@@ -59,6 +61,16 @@ public:
 
     juce::String getErrorText() const;
 
+    // 層1パラメータ・プリセット・ON/OFF（音声スレッドとはatomicのみでやり取りする、D-001）。
+    AtomicParams& engineParams() noexcept { return engine.params(); }
+
+    std::uint32_t getEngineErrorFlags() const noexcept { return engine.getErrorFlags(); }
+    void clearEngineErrorFlags() noexcept { engine.clearErrorFlags(); }
+    float takeInputPeak() noexcept { return engine.takeInputPeak(); }
+
+    // ブロック長予算が20ms未満でクランプされた場合true（合計が50msを超える。D-003）。
+    bool isBlockOverBudget() const noexcept { return blockOverBudget; }
+
     std::uint64_t getInputCallbackCount() const noexcept { return inputCallbackCount.load (std::memory_order_relaxed); }
     std::uint64_t getOutputCallbackCount() const noexcept { return outputCallbackCount.load (std::memory_order_relaxed); }
     bool hasErrorFlag() const noexcept { return errorFlag.load (std::memory_order_relaxed); }
@@ -85,6 +97,7 @@ private:
     std::unique_ptr<OutputCallback> outputCallback;
 
     ResamplingFifo fifo;
+    Engine engine;
 
     DeviceInfo inputInfo, outputInfo;
     juce::String errorText;
@@ -93,6 +106,7 @@ private:
     std::atomic<std::uint64_t> outputCallbackCount { 0 };
     std::atomic<bool> errorFlag { false };
     std::atomic<float> cpuLoad { 0.0f };
+    bool blockOverBudget = false; // メッセージスレッドのみ（open()で設定、UIから読む想定はT-006）
 
     std::vector<float> monoScratch;      // 出力コールバックの一時バッファ(pull用)。open()内でのみ確保する。
     std::vector<float> inputMonoScratch; // 入力コールバックの一時バッファ(モノラル化用)。open()内でのみ確保する。
