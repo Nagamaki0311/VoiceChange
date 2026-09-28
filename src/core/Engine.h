@@ -81,9 +81,11 @@ private:
     bool reverbActive = false;
     bool reverbParamsStale = true; // 補間中と、prepare/reset後の最初の1回だけreverb.setParametersを呼ぶ
 
-    // 層2の効果の切替状態。fadeFrom != Noneの間は旧効果(fadeFrom)と新効果(activeEffect)を並行処理する。
+    // 層2の効果の切替状態。fading == trueの間は旧効果(fadeFrom)と新効果(activeEffect)を並行処理する。
+    // Effect::Noneは「効果なし」という有効な効果なので、フェード中かどうかはfadingで別に持つ。
     Effect activeEffect = Effect::None;
     Effect fadeFrom = Effect::None;
+    bool fading = false;
     int fadePos = 0;
     int fadeLen = 1;
     bool detectorRunning = false;

@@ -480,89 +480,114 @@ private:
 
     // ----- E9: プリセット切替のクリック -----
     // 8x7=56通りの順序付き切替。判定窓は切替から20ms + 300ms + 20ms。デジタル無音から発声し始める場合も含める。
-    void runE9()
+    // 切替位置は複数の位相（ブロック境界から7・11サンプルずらす）で試す。150Hzの母音は48kHzで320サンプル周期で、
+    // 境界（86400 = 270周期）ちょうどではゼロ交差に一致し、切替の段差を隠してしまうため。
+    struct E9Result
     {
-        beginTest ("E9: 56通りのプリセット切替でクリックなし（連続発声・無音からの発声開始）");
+        int failures = 0;
+        double worstRatio = 0.0;
+        juce::String worstName;
+    };
 
+    // mode 0: 連続発声中の切替、1: 無音からの発声開始（10msアタック、D-017）、2: 同（0msアタック、参考値）。
+    E9Result runE9Mode (int mode, int offset, const std::vector<float>& voice, bool judge)
+    {
         constexpr int settle = (int) (kFs * 0.8);
         constexpr int steady = (int) kFs;
         constexpr int transition = (int) (kFs * 0.34);
-        constexpr int total = settle + steady + transition + settle + steady;
+        constexpr int total = settle + steady + 16 + transition + settle + steady;
 
-        auto voice = vc::test::makeSyntheticVowel (150.0, kFs, total, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.3f);
-        vc::test::addNoiseFloor (voice, -80.0f, 333);
+        E9Result result;
 
-        int failures = 0;
-        double worstSteadyRatio = 0.0;
-        juce::String worstSteadyName;
-
-        for (const bool onset : { false, true })
+        for (int a = 0; a < (int) vc::kPresets.size(); ++a)
         {
-            for (int a = 0; a < (int) vc::kPresets.size(); ++a)
+            for (int b = 0; b < (int) vc::kPresets.size(); ++b)
             {
-                for (int b = 0; b < (int) vc::kPresets.size(); ++b)
+                if (a == b)
+                    continue;
+
+                const int switchPos = settle + steady + offset;
+                std::vector<float> in (voice);
+
+                if (mode != 0)
                 {
-                    if (a == b)
-                        continue;
+                    // デジタル無音 → 切替の瞬間に発声開始。
+                    // 10msの二乗余弦アタック（D-017）: 振幅が瞬時に最大になる位相そろいの合成母音は実際の声を代表せず、
+                    // Signalsmith Stretchを通すとシフター遅延（120ms）の位置に定常の約2倍のピーク・隣接差が出る。
+                    std::fill (in.begin(), in.begin() + switchPos, 0.0f);
+                    const int attack = mode == 1 ? (int) std::lround (0.010 * kFs) : 0;
+                    for (int i = 0; i < attack; ++i)
+                        in[(size_t) (switchPos + i)] *= (float) (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * (double) i / (double) attack));
+                }
 
-                    std::vector<float> in (voice);
+                vc::Engine engine;
+                prepareEngine (engine);
+                engine.params().preset.store (a);
+                std::vector<float> out (in);
 
-                    if (onset)
-                    {
-                        // デジタル無音 → 切替の瞬間に発声開始。立ち上がりは10msの二乗余弦アタック（D-017）。
-                        // 振幅が瞬時に最大になる位相そろいの合成母音は実際の声を代表せず、Signalsmith Stretchを通すと
-                        // シフター遅延（120ms）の位置に定常の約2倍のピーク・隣接差が出る（測定: minion->helium
-                        // 隣接差0.181対定常0.093）ため、アタック付きにして通常基準（1.5倍）で判定する。
-                        std::fill (in.begin(), in.begin() + settle + steady, 0.0f);
-                        const int attack = (int) std::lround (0.010 * kFs);
-                        for (int i = 0; i < attack; ++i)
-                            in[(size_t) (settle + steady + i)] *= (float) (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * (double) i / (double) attack));
-                    }
+                engine.process (out.data(), switchPos);
+                engine.params().preset.store (b);
+                engine.process (out.data() + switchPos, total - switchPos);
 
-                    vc::Engine engine;
-                    prepareEngine (engine);
-                    engine.params().preset.store (a);
-                    std::vector<float> out (in);
+                // 無音からの発声開始では切替前の出力が無音で基準にならないため、基準は加工前の声の定常区間とする。
+                const float* before = mode != 0 ? voice.data() + settle : out.data() + settle;
+                const double beforeDiff = vc::test::maxAdjacentDiff (before, steady);
+                const double afterDiff = vc::test::maxAdjacentDiff (out.data() + total - steady, steady);
+                // 切替の直前のサンプルから数える（切替の瞬間の段差 out[switchPos] - out[switchPos-1] を含める）。
+                const double transDiff = vc::test::maxAdjacentDiff (out.data() + switchPos - 1, transition + 1);
+                const double ratio = transDiff / std::max (beforeDiff, afterDiff);
 
-                    const int switchPos = settle + steady;
-                    engine.process (out.data(), switchPos);
-                    engine.params().preset.store (b);
-                    engine.process (out.data() + switchPos, total - switchPos);
+                if (ratio > result.worstRatio)
+                {
+                    result.worstRatio = ratio;
+                    result.worstName = juce::String (presetName (a)) + "->" + presetName (b);
+                }
 
-                    // 無音からの発声開始では、切替前の定常区間は無音（隣接差0）になり基準にならない。
-                    // 発声開始直後はシフターがPrimingでdry（加工前の声）を出すため、基準は加工前の声の定常区間とする。
-                    const float* before = onset ? voice.data() + settle : out.data() + settle;
-                    const bool ok = vc::test::checkNoClick (before, steady,
-                                                              out.data() + switchPos, transition,
-                                                              out.data() + total - steady);
-
-                    if (! onset)
-                    {
-                        const double ratio = vc::test::maxAdjacentDiff (out.data() + switchPos, transition)
-                                             / std::max (vc::test::maxAdjacentDiff (before, steady), vc::test::maxAdjacentDiff (out.data() + total - steady, steady));
-                        if (ratio > worstSteadyRatio)
-                        {
-                            worstSteadyRatio = ratio;
-                            worstSteadyName = juce::String (presetName (a)) + "->" + presetName (b);
-                        }
-                    }
-
-                    if (! ok)
-                    {
-                        const double beforeDiff = vc::test::maxAdjacentDiff (before, steady);
-                        const double after = vc::test::maxAdjacentDiff (out.data() + total - steady, steady);
-                        const double trans = vc::test::maxAdjacentDiff (out.data() + switchPos, transition);
-                        ++failures;
-                        expect (false, juce::String (onset ? "onset " : "steady ") + presetName (a) + "->" + presetName (b)
-                                           + ": transition diff " + juce::String (trans, 4) + " > 1.5*max(" + juce::String (beforeDiff, 4)
-                                           + ", " + juce::String (after, 4) + ")");
-                    }
+                if (judge && ! vc::test::checkNoClick (before, steady, out.data() + switchPos - 1, transition + 1, out.data() + total - steady))
+                {
+                    ++result.failures;
+                    expect (false, juce::String (mode == 0 ? "steady" : "onset") + " offset " + juce::String (offset) + " "
+                                       + presetName (a) + "->" + presetName (b) + ": transition diff " + juce::String (transDiff, 4)
+                                       + " > 1.5*max(" + juce::String (beforeDiff, 4) + ", " + juce::String (afterDiff, 4) + ") ratio "
+                                       + juce::String (ratio, 2));
                 }
             }
         }
 
-        logMessage ("E9: worst steady-scenario ratio (transition diff / steady diff, limit 1.5) " + juce::String (worstSteadyRatio, 3) + " at " + worstSteadyName);
-        logMessage ("E9: " + juce::String (2 * 56 - failures) + "/112 switches passed");
+        return result;
+    }
+
+    void runE9()
+    {
+        beginTest ("E9: 56通りのプリセット切替でクリックなし（連続発声・無音からの発声開始、複数の切替位相）");
+
+        constexpr int total = (int) (kFs * 0.8) + (int) kFs + 16 + (int) (kFs * 0.34) + (int) (kFs * 0.8) + (int) kFs;
+        auto voice = vc::test::makeSyntheticVowel (150.0, kFs, total, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.3f);
+        vc::test::addNoiseFloor (voice, -80.0f, 333);
+
+        int failures = 0;
+
+        for (const int offset : { 7, 11 })
+        {
+            for (const int mode : { 0, 1 })
+            {
+                const auto r = runE9Mode (mode, offset, voice, true);
+                failures += r.failures;
+                logMessage ("E9: " + juce::String (mode == 0 ? "steady" : "onset(10ms attack)") + " offset " + juce::String (offset)
+                            + " worst ratio (limit 1.5) " + juce::String (r.worstRatio, 3) + " at " + r.worstName);
+            }
+        }
+
+        // 参考値（判定なし）: 0msアタック（瞬時の立ち上がり）の最悪比。D-017参照。offset 0は母音がゼロ交差から
+        // 始まる（入力自体に段差がない）ので、シフターの立ち上がりだけの影響を見られる。offset 7は入力自体に段差がある。
+        for (const int offset : { 0, 7 })
+        {
+            const auto instant = runE9Mode (2, offset, voice, false);
+            logMessage ("E9: onset(0ms attack, reference) offset " + juce::String (offset) + " worst ratio "
+                        + juce::String (instant.worstRatio, 3) + " at " + instant.worstName);
+        }
+
+        logMessage ("E9: " + juce::String (4 * 56 - failures) + "/224 switches passed");
     }
 
     // ----- E10: CPU（参考値、失敗判定なし） -----

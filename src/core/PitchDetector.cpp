@@ -100,7 +100,7 @@ void PitchDetector::estimate() noexcept
     const float* x = frame.data();
 
     // 最新の積分窓のRMS。閾値未満は無声（有声度0）。
-    // 窓を4分割し、区間ごとのRMSが大きく違う（無音への減衰・発声の立ち上がり）フレームは、
+    // 窓を前半・後半の2分割にし、区間ごとのRMSが大きく違う（無音への減衰・発声の立ち上がり）フレームは、
     // 窓に半端な無音が混ざって周期推定が偏るため、推定を更新せず前回の値を保つ。
     constexpr int kSegments = 2;
     const int segLen = windowLen / kSegments;

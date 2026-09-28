@@ -44,6 +44,7 @@ void Engine::prepare (const EngineConfig& config)
     const int presetIdx = juce::jlimit (0, (int) kPresets.size() - 1, atomicParams.preset.load (std::memory_order_relaxed));
     activeEffect = kPresets[(size_t) presetIdx].effect;
     fadeFrom = Effect::None;
+    fading = false;
     fadePos = 0;
     fadeLen = std::max (1, (int) std::lround (kEffectCrossfadeSeconds * sampleRate));
     detectorRunning = false;
@@ -101,7 +102,7 @@ void Engine::resetChain() noexcept
     echo.reset();
     ringMod.reset();
     talkbox.reset();
-    fadeFrom = Effect::None;
+    fading = false;
     reverb.reset();
     reverbActive = false;
     reverbParamsStale = true;
@@ -193,10 +194,11 @@ void Engine::runEffect (Effect effect, const float* in, float* out, int n, float
 // 切替中に来た次の変更は、切替が終わった次のブロックで反映する（保留）。
 void Engine::processLayer2 (float* buf, int n, Effect desired, float carrierHz, float voicing) noexcept
 {
-    if (fadeFrom == Effect::None && desired != activeEffect)
+    if (! fading && desired != activeEffect)
     {
         fadeFrom = activeEffect;
         activeEffect = desired;
+        fading = true;
         fadePos = 0;
 
         switch (activeEffect)
@@ -208,7 +210,7 @@ void Engine::processLayer2 (float* buf, int n, Effect desired, float carrierHz, 
         }
     }
 
-    if (fadeFrom == Effect::None)
+    if (! fading)
     {
         runEffect (activeEffect, buf, buf, n, carrierHz, voicing);
         return;
@@ -225,7 +227,7 @@ void Engine::processLayer2 (float* buf, int n, Effect desired, float carrierHz, 
     }
 
     if (fadePos >= fadeLen)
-        fadeFrom = Effect::None;
+        fading = false;
 }
 
 void Engine::processChain (float* buf, int n, int presetIdx, int pitchSemis, float gainDb, float reverbAmt) noexcept
@@ -234,7 +236,7 @@ void Engine::processChain (float* buf, int n, int presetIdx, int pitchSemis, flo
     const auto& spec = kPresets[(size_t) presetIdx];
 
     // ピッチ検出はケロケロ・トークボックス（切替中の旧効果を含む）のときだけ動かす。加工前の声を検出する。
-    const bool needDetector = spec.needsDetector || activeEffect == Effect::Talkbox || fadeFrom == Effect::Talkbox;
+    const bool needDetector = spec.needsDetector || activeEffect == Effect::Talkbox || (fading && fadeFrom == Effect::Talkbox);
 
     if (needDetector && ! detectorRunning)
     {
