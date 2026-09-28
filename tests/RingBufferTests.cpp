@@ -211,7 +211,7 @@ ScenarioResult runScenario (const ScenarioParams& p)
         if (pendingIn <= pendingOut)
         {
             gen.generate (inBuf.data(), p.bi);
-            fifo.push (inBuf.data(), p.bi);
+            fifo.push (inBuf.data(), p.bi, pendingIn);
 
             const bool crossedMark = p.jitter == ScenarioParams::JitterMode::Special30sDelay15ms
                                       && pendingIn >= nextSpecialMark;
@@ -229,7 +229,7 @@ ScenarioResult runScenario (const ScenarioParams& p)
         }
         else
         {
-            fifo.pull (outBuf.data(), p.bo);
+            fifo.pull (outBuf.data(), p.bo, pendingOut);
 
             for (int i = 0; i < p.bo; ++i)
             {
@@ -336,6 +336,8 @@ private:
 
         TriangleWave gen (rate);
         std::vector<float> inBuf ((size_t) block), outBuf ((size_t) block);
+        double simTime = 0.0;
+        const double halfPeriod = (double) block / rate * 0.5;
 
         bool sawNonZero = false;
         std::vector<float> envelope;
@@ -343,8 +345,10 @@ private:
         for (int iter = 0; iter < 2000 && ! sawNonZero; ++iter)
         {
             gen.generate (inBuf.data(), block);
-            fifo.push (inBuf.data(), block);
-            fifo.pull (outBuf.data(), block);
+            fifo.push (inBuf.data(), block, simTime);
+            simTime += halfPeriod;
+            fifo.pull (outBuf.data(), block, simTime);
+            simTime += halfPeriod;
 
             const bool allZero = std::all_of (outBuf.begin(), outBuf.end(), [] (float v) { return v == 0.0f; });
 
@@ -357,7 +361,9 @@ private:
 
                 for (int extra = 0; extra < 4; ++extra)
                 {
-                    fifo.pull (outBuf.data(), block);
+                    fifo.pull (outBuf.data(), block, simTime);
+                    simTime += halfPeriod;
+
                     for (float v : outBuf)
                         envelope.push_back (std::abs (v));
                 }
@@ -387,12 +393,16 @@ private:
 
         TriangleWave gen (rate);
         std::vector<float> inBuf ((size_t) block), outBuf ((size_t) block);
+        double simTime = 0.0;
+        const double halfPeriod = (double) block / rate * 0.5;
 
         for (int i = 0; i < 400; ++i)
         {
             gen.generate (inBuf.data(), block);
-            fifo.push (inBuf.data(), block);
-            fifo.pull (outBuf.data(), block);
+            fifo.push (inBuf.data(), block, simTime);
+            simTime += halfPeriod;
+            fifo.pull (outBuf.data(), block, simTime);
+            simTime += halfPeriod;
         }
 
         expectEquals ((int) fifo.stats().underruns.load(), 0, "定常運転中に想定外のunderrun");
@@ -404,7 +414,8 @@ private:
         for (int i = 0; i < 200 && ! underrunSeen; ++i)
         {
             const auto before = fifo.stats().underruns.load();
-            fifo.pull (outBuf.data(), block);
+            fifo.pull (outBuf.data(), block, simTime);
+            simTime += (double) block / rate;
 
             if (fifo.stats().underruns.load() != before)
                 underrunSeen = true;
@@ -427,7 +438,8 @@ private:
 
         expect (maxDiff <= threshold, "フェードアウト区間の隣接差が閾値超過");
 
-        fifo.pull (outBuf.data(), block);
+        fifo.pull (outBuf.data(), block, simTime);
+        simTime += (double) block / rate;
         expect (std::all_of (outBuf.begin(), outBuf.end(), [] (float v) { return v == 0.0f; }),
                 "アンダーラン後に0でない出力");
 
@@ -436,8 +448,10 @@ private:
         for (int i = 0; i < 2000 && ! recovered; ++i)
         {
             gen.generate (inBuf.data(), block);
-            fifo.push (inBuf.data(), block);
-            fifo.pull (outBuf.data(), block);
+            fifo.push (inBuf.data(), block, simTime);
+            simTime += halfPeriod;
+            fifo.pull (outBuf.data(), block, simTime);
+            simTime += halfPeriod;
 
             if (std::any_of (outBuf.begin(), outBuf.end(), [] (float v) { return v != 0.0f; }))
                 recovered = true;
@@ -457,13 +471,16 @@ private:
 
         TriangleWave gen (rate);
         std::vector<float> inBuf ((size_t) block), outBuf ((size_t) block);
+        double simTime = 0.0;
+        const double halfPeriod = (double) block / rate * 0.5;
 
         const auto runUntilUnderrun = [&]
         {
             for (int i = 0; i < 400; ++i)
             {
                 const auto before = fifo.stats().underruns.load();
-                fifo.pull (outBuf.data(), block);
+                fifo.pull (outBuf.data(), block, simTime);
+                simTime += (double) block / rate;
 
                 if (fifo.stats().underruns.load() != before)
                     return;
@@ -475,8 +492,10 @@ private:
             for (int i = 0; i < 5000; ++i)
             {
                 gen.generate (inBuf.data(), block);
-                fifo.push (inBuf.data(), block);
-                fifo.pull (outBuf.data(), block);
+                fifo.push (inBuf.data(), block, simTime);
+                simTime += halfPeriod;
+                fifo.pull (outBuf.data(), block, simTime);
+                simTime += halfPeriod;
 
                 if (std::any_of (outBuf.begin(), outBuf.end(), [] (float v) { return v != 0.0f; }))
                     return;
@@ -505,12 +524,17 @@ private:
 
         TriangleWave gen (rate);
         std::vector<float> inBuf ((size_t) block), outBuf ((size_t) block);
+        double simTime = 0.0;
+        const double halfPeriod = (double) block / rate * 0.5;
+        const double blockPeriod = (double) block / rate;
 
         for (int i = 0; i < 2000; ++i)
         {
             gen.generate (inBuf.data(), block);
-            fifo.push (inBuf.data(), block);
-            fifo.pull (outBuf.data(), block);
+            fifo.push (inBuf.data(), block, simTime);
+            simTime += halfPeriod;
+            fifo.pull (outBuf.data(), block, simTime);
+            simTime += halfPeriod;
 
             if (std::any_of (outBuf.begin(), outBuf.end(), [] (float v) { return v != 0.0f; }))
                 break;
@@ -521,13 +545,15 @@ private:
         for (int i = 0; i < stopBlocks; ++i)
         {
             gen.generate (inBuf.data(), block);
-            fifo.push (inBuf.data(), block);
+            fifo.push (inBuf.data(), block, simTime);
+            simTime += blockPeriod;
         }
 
         expect (fifo.stats().overruns.load() > 0, "overrunsが発生しなかった");
 
         const auto discardsBefore = fifo.stats().discards.load();
-        fifo.pull (outBuf.data(), block);
+        fifo.pull (outBuf.data(), block, simTime);
+        simTime += halfPeriod;
         expectEquals ((int) fifo.stats().discards.load(), (int) discardsBefore + 1, "discardsが+1でない");
 
         // ResamplingFifoの公開APIには瞬時の充填量(平滑化前)を返す手段がないため、
@@ -538,8 +564,10 @@ private:
         for (int i = 0; i < 5; ++i)
         {
             gen.generate (inBuf.data(), block);
-            fifo.push (inBuf.data(), block);
-            fifo.pull (outBuf.data(), block);
+            fifo.push (inBuf.data(), block, simTime);
+            simTime += halfPeriod;
+            fifo.pull (outBuf.data(), block, simTime);
+            simTime += halfPeriod;
         }
 
         expectEquals ((int) fifo.stats().discards.load(), (int) discardsAfterFirst,
@@ -551,8 +579,10 @@ private:
         for (int i = 0; i < maxIters && ! converged; ++i)
         {
             gen.generate (inBuf.data(), block);
-            fifo.push (inBuf.data(), block);
-            fifo.pull (outBuf.data(), block);
+            fifo.push (inBuf.data(), block, simTime);
+            simTime += halfPeriod;
+            fifo.pull (outBuf.data(), block, simTime);
+            simTime += halfPeriod;
 
             const double fill = fifo.stats().fillSmoothedSamples.load();
             const double tgt = fifo.stats().targetSamples.load();
@@ -575,12 +605,17 @@ private:
 
         SineWave gen (1000.0, inRate);
         std::vector<float> inBuf ((size_t) bi), outBuf ((size_t) bo);
+        double tPush = 0.0, tPull = 0.0;
+        const double pushPeriod = (double) bi / inRate;
+        const double pullPeriod = (double) bo / outRate;
 
         for (int i = 0; i < 4000; ++i)
         {
             gen.generate (inBuf.data(), bi, 0.5f);
-            fifo.push (inBuf.data(), bi);
-            fifo.pull (outBuf.data(), bo);
+            fifo.push (inBuf.data(), bi, tPush);
+            tPush += pushPeriod;
+            fifo.pull (outBuf.data(), bo, tPull);
+            tPull += pullPeriod;
         }
 
         std::vector<float> collected;
@@ -590,8 +625,10 @@ private:
         while (collected.size() < targetCount)
         {
             gen.generate (inBuf.data(), bi, 0.5f);
-            fifo.push (inBuf.data(), bi);
-            fifo.pull (outBuf.data(), bo);
+            fifo.push (inBuf.data(), bi, tPush);
+            tPush += pushPeriod;
+            fifo.pull (outBuf.data(), bo, tPull);
+            tPull += pullPeriod;
             collected.insert (collected.end(), outBuf.begin(), outBuf.end());
         }
 
@@ -610,6 +647,8 @@ private:
 
         TriangleWave gen (rate);
         std::vector<float> inBuf ((size_t) block), outBuf ((size_t) block);
+        double simTime = 0.0;
+        const double halfPeriod = (double) block / rate * 0.5;
 
         std::size_t count = 0;
 
@@ -619,8 +658,10 @@ private:
             for (int i = 0; i < 3000; ++i)
             {
                 gen.generate (inBuf.data(), block);
-                fifo.push (inBuf.data(), block);
-                fifo.pull (outBuf.data(), block);
+                fifo.push (inBuf.data(), block, simTime);
+                simTime += halfPeriod;
+                fifo.pull (outBuf.data(), block, simTime);
+                simTime += halfPeriod;
             }
 
             count = guard.count();

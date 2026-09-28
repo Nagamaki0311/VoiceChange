@@ -58,7 +58,27 @@ void ResamplingFifo::prepare (double newInRate, double newOutRate, int maxInBloc
     phaseCount = 0;
     gain = 0.0;
 
+    lastPushBlockLen.store (0, std::memory_order_relaxed);
+    lastPushTime.store (0.0, std::memory_order_relaxed);
+
     (void) maxInBlock; // 現状はバッファ容量(1秒)が常に上回るため未使用。将来capacityの下限チェックに使う余地を残す。
+}
+
+// D-012: 生の充填量を「入力が連続的に到着した」とみなす連続換算値へ直す。
+// 直前のpushからnowSecondsまでの経過時間ぶん、直前のブロックが徐々に到着したとみなして按分する。
+double ResamplingFifo::continuousFill (int rawFilled, double nowSeconds) const noexcept
+{
+    const double t = lastPushTime.load (std::memory_order_acquire);
+    const int biLast = lastPushBlockLen.load (std::memory_order_relaxed);
+
+    if (biLast <= 0)
+        return (double) rawFilled;
+
+    const double elapsed = std::max (0.0, nowSeconds - t);
+    const double credit = juce::jlimit (0.0, (double) biLast, inRate * elapsed);
+    const double fillC = (double) rawFilled - (double) biLast + credit;
+
+    return std::max (0.0, fillC);
 }
 
 void ResamplingFifo::recomputeTarget() noexcept
@@ -76,11 +96,11 @@ int ResamplingFifo::neededInput (int outSamples) const noexcept
     return (int) std::ceil (speedRatio * (double) outSamples) + 2;
 }
 
-void ResamplingFifo::updateFillStats (int filledSamples, int outputSamplesElapsed) noexcept
+void ResamplingFifo::updateFillStats (double fillCSamples, int outputSamplesElapsed) noexcept
 {
     const double dt = outputSamplesElapsed > 0 ? (double) outputSamplesElapsed / outRate : 0.0;
     const double alpha = dt > 0.0 ? std::exp (-dt / kSmoothingTauSeconds) : 1.0;
-    fillSmoothed = alpha * fillSmoothed + (1.0 - alpha) * (double) filledSamples;
+    fillSmoothed = alpha * fillSmoothed + (1.0 - alpha) * fillCSamples;
     fifoStats.fillSmoothedSamples.store ((float) fillSmoothed, std::memory_order_relaxed);
 }
 
@@ -126,7 +146,7 @@ void ResamplingFifo::applyRamp (float* out, int chunk, bool ascending) noexcept
     }
 }
 
-void ResamplingFifo::handleUnderrun (float* out, int offset, int remaining, int filled) noexcept
+void ResamplingFifo::handleUnderrun (float* out, int offset, int remaining, int filled, double nowSeconds) noexcept
 {
     int availableOut = 0;
 
@@ -149,7 +169,7 @@ void ResamplingFifo::handleUnderrun (float* out, int offset, int remaining, int 
     if (availableOut < remaining)
         juce::FloatVectorOperations::clear (out + offset + availableOut, remaining - availableOut);
 
-    updateFillStats (fifo.getNumReady(), remaining);
+    updateFillStats (continuousFill (fifo.getNumReady(), nowSeconds), remaining);
 
     fifoStats.underruns.fetch_add (1, std::memory_order_relaxed);
     jitterMarginMs = std::min (kMaxJitterMarginMs, jitterMarginMs + kJitterStepMs);
@@ -161,7 +181,7 @@ void ResamplingFifo::handleUnderrun (float* out, int offset, int remaining, int 
     gain = 0.0;
 }
 
-void ResamplingFifo::pull (float* out, int n) noexcept
+void ResamplingFifo::pull (float* out, int n, double nowSeconds) noexcept
 {
     int produced = 0;
 
@@ -172,9 +192,10 @@ void ResamplingFifo::pull (float* out, int n) noexcept
         if (phase == Phase::Refilling)
         {
             const int filled = fifo.getNumReady();
+            const double fillC = continuousFill (filled, nowSeconds);
             const int needed = neededInput (remaining);
 
-            if ((double) filled >= targetSamples + (double) needed)
+            if (fillC >= targetSamples + (double) needed)
             {
                 phase = Phase::FadeIn;
                 phaseCount = fadeLenSamplesOut;
@@ -183,7 +204,7 @@ void ResamplingFifo::pull (float* out, int n) noexcept
             }
 
             juce::FloatVectorOperations::clear (out + produced, remaining);
-            updateFillStats (filled, remaining);
+            updateFillStats (fillC, remaining);
             produced = n;
             break;
         }
@@ -191,8 +212,9 @@ void ResamplingFifo::pull (float* out, int n) noexcept
         if (phase == Phase::Idle)
         {
             const int filled = fifo.getNumReady();
+            const double fillC = continuousFill (filled, nowSeconds);
 
-            if ((double) filled > kOverrunMultiple * targetSamples)
+            if (fillC > kOverrunMultiple * targetSamples)
             {
                 phase = Phase::OverrunFadeOut;
                 phaseCount = fadeLenSamplesOut;
@@ -203,9 +225,10 @@ void ResamplingFifo::pull (float* out, int n) noexcept
             {
                 const int needed = neededInput (remaining);
 
+                // アンダーラン判定は生の充填量のまま行う(D-012)。
                 if (filled < needed)
                 {
-                    handleUnderrun (out, produced, remaining, filled);
+                    handleUnderrun (out, produced, remaining, filled, nowSeconds);
                     produced = n;
                     break;
                 }
@@ -216,7 +239,7 @@ void ResamplingFifo::pull (float* out, int n) noexcept
         {
             processNormal (out + produced, remaining);
             produced += remaining;
-            updateFillStats (fifo.getNumReady(), remaining);
+            updateFillStats (continuousFill (fifo.getNumReady(), nowSeconds), remaining);
             continue;
         }
 
@@ -229,7 +252,7 @@ void ResamplingFifo::pull (float* out, int n) noexcept
 
         phaseCount -= chunk;
         produced += chunk;
-        updateFillStats (fifo.getNumReady(), chunk);
+        updateFillStats (continuousFill (fifo.getNumReady(), nowSeconds), chunk);
 
         if (phaseCount == 0)
         {
@@ -261,7 +284,7 @@ void ResamplingFifo::pull (float* out, int n) noexcept
     }
 }
 
-void ResamplingFifo::push (const float* mono, int n) noexcept
+void ResamplingFifo::push (const float* mono, int n, double nowSeconds) noexcept
 {
     int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
     fifo.prepareToWrite (n, start1, size1, start2, size2);
@@ -275,13 +298,20 @@ void ResamplingFifo::push (const float* mono, int n) noexcept
 
     if (size1 + size2 < n)
         fifoStats.overruns.fetch_add (1, std::memory_order_relaxed);
+
+    // D-012: 連続換算のため直前のブロック長と時刻を記録する。blockLenを先に書き、timeを
+    // release書きすることで、読み手がtimeの新しい値をacquireで見た時点でblockLenも新しい
+    // 値が見える（対で読める）。nは実際に書けた量ではなく要求量(=物理ブロック長)を使う。
+    lastPushBlockLen.store (n, std::memory_order_relaxed);
+    lastPushTime.store (nowSeconds, std::memory_order_release);
 }
 
 double ResamplingFifo::getLatencyMs() const noexcept
 {
     const double fillMs = (double) fifoStats.fillSmoothedSamples.load (std::memory_order_relaxed) / inRate * 1000.0;
-    const double halfBlockMs = ((double) outBlockSamples * 0.5) / outRate * 1000.0;
-    return fillMs + halfBlockMs;
+    const double inBlockMs = (double) inBlockSamples / inRate * 1000.0;
+    const double outBlockMs = (double) outBlockSamples / outRate * 1000.0;
+    return fillMs + 0.5 * (inBlockMs + outBlockMs);
 }
 
 } // namespace vc

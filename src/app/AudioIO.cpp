@@ -22,6 +22,9 @@ public:
     {
         const juce::ScopedNoDenormals noDenormals;
 
+        // D-012: 連続換算充填量の基準時刻。単調時計（ミリ秒カウンタ）を秒に変換する。
+        const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
         try
         {
             float* const mono = owner.inputMonoScratch.data();
@@ -51,7 +54,7 @@ public:
                     mono[i] = count > 0 ? sum / (float) count : 0.0f;
                 }
 
-                owner.fifo.push (mono, chunk);
+                owner.fifo.push (mono, chunk, now);
 
                 offset += chunk;
                 remaining -= chunk;
@@ -86,6 +89,9 @@ public:
 
         const juce::int64 startTicks = juce::Time::getHighResolutionTicks();
 
+        // D-012: 連続換算充填量の基準時刻。push側と同じ単調時計。
+        const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
+
         try
         {
             float* const mono = owner.monoScratch.data();
@@ -98,7 +104,7 @@ public:
             {
                 const int chunk = juce::jmin (remaining, scratchSize);
 
-                owner.fifo.pull (mono, chunk);
+                owner.fifo.pull (mono, chunk, now);
 
                 for (int ch = 0; ch < numOutputChannels; ++ch)
                     if (float* out = outputChannelData[ch])

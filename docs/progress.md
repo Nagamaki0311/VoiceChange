@@ -19,6 +19,50 @@
 
 ---
 
+## 2026-09-28 T-003 D-012対応: 充填量を連続換算値(fill_c)に変更しS1〜S8全件合格
+
+### 実施内容
+- Manager指示によりD-012（docs/decisions.md参照）を実装。前回報告したS1〜S4・S7の条件c)不合格（Bi≈Bo≈targetの構成で読み出し位相に依存する鋸歯状の揺れが生じる問題）に対し、目標充填量の式・合格条件の閾値は変えず、制御・判定に使う充填量の「測り方」を直した。
+- `src/core/ResamplingFifo.h/.cpp`:
+  - `push`/`pull`に単調時計の時刻`nowSeconds`引数を追加。
+  - `continuousFill(rawFilled, nowSeconds)`を追加: `fill_c = raw − 直前の入力ブロック長 + fs_in×(now − 直前のpush時刻)`（クレジット分は0〜直前ブロック長にクランプ、結果は0以上にクランプ）。
+  - 直前のpush時刻・ブロック長は`std::atomic<double> lastPushTime`・`std::atomic<int> lastPushBlockLen`に保持。`push()`側は`lastPushBlockLen`をrelaxed書き→`lastPushTime`をrelease書きの順で書き、`pull()`側は`lastPushTime`をacquire読み→`lastPushBlockLen`をrelaxed読みの順で読むことで、ロックなしに対として整合させる（release/acquireのhappens-before関係により、新しいtimeが見えた時点で新しいblockLenも見える）。
+  - Refilling完了判定（充填量≥目標+needed）、3倍超過判定（discard発火）、平滑化`updateFillStats`の入力を`fill_c`に変更。**アンダーラン判定（filled<needed）は生の充填量のまま**（D-012の決定どおり）。
+  - `getLatencyMs()`を「平滑化したfill_c + (Bi+Bo)/2（それぞれms換算）」に変更（従来はBo/2のみ）。
+- `src/app/AudioIO.cpp`: 入力・出力コールバックそれぞれで`juce::Time::getMillisecondCounterHiRes()*1e-3`を1回取得し、内部のpush/pullチャンク分割ループ全体で同じ時刻を渡す。
+- `tests/RingBufferTests.cpp`: 模擬ドライバ（`runScenario`）はpush/pullそれぞれの離散イベント時刻（`pendingIn`/`pendingOut`、元々ずれ・ジッタを反映済み）をそのまま`nowSeconds`として渡すよう変更（元々テスト側に必要な情報が揃っていたため追加の仕掛けは不要だった）。R1〜R6は明示的な模擬時計を持たなかったため、各テストに`simTime`（push/pullを半ブロック周期ずつ交互に進める簡易時計、またはR5のようにpush/pull別々の周期で進める）を追加した。
+
+### 結果
+- `cmake --build build --parallel` 成功。
+- `ctest --test-dir build --output-on-failure -L quick`: smoke・ring_buffer(R1〜R6)全件Passed（0.11秒）。
+- `ctest --test-dir build --output-on-failure`（quick+long）: **全件Passed**（実時間30.0秒）。
+- `ring_buffer_long`（S1〜S8）実測値:
+
+| ID | 結果 | avgFillD | avgFillLast10 | avgPpm(期待) | cViolations | underruns/overruns/discards | fViolations |
+|---|---|---|---|---|---|---|---|
+| S1 48k→48k+100ppm 480/480 | 合格 | 633.6 | 633.6 | 100.00(100.00) | 0 | 0/0/0 | 0 |
+| S2 48k→48k-100ppm 480/480 | 合格 | 518.4 | 518.4 | -100.00(-100.00) | 0 | 0/0/0 | 0 |
+| S3 44.1k→48k+100ppm 441/480 | 合格 | 582.1 | 582.1 | 100.00(100.00) | 0 | 0/0/0 | 0 |
+| S4 48k→44.1k-100ppm 480/441 | 合格 | 518.4 | 518.4 | -100.00(-100.00) | 0 | 0/0/0 | 0 |
+| S5 48k→48k+50ppm 128/1024 | 合格 | 1176.0 | 1176.0 | 50.00(50.00) | 0 | 0/0/0 | 0 |
+| S6 44.1k→48k-100ppm 1024/144 | 合格 | 1001.0 | 1001.0 | -100.00(-100.00) | 0 | 0/0/0 | 0 |
+| S7 48k→48k+100ppm ジッタ0-3ms | 合格 | 633.6 | 633.6 | 99.99(100.00) | 0 | 0/0/0 | 0 |
+| S8 30秒毎15ms遅延 | 合格 | 739.2 | 739.2 | 100.00(100.00) | - | 合計1(≤9)/0/0、10分以降underrun=0、jitterMargin=4ms(≤20) | 0 |
+
+  （S1〜S4・S7の平均充填量・速度比補正の実測値は修正前と同一。修正で変わったのは「瞬時値の揺れ幅」のみで、平均的な挙動は変えていないことが確認できる。S8のunderruns合計は乱数シードに依存し前回4→今回1、jitterMarginは前回10ms→今回4msだが、いずれも合格条件（≤9、≤20ms）の範囲内。）
+- `timeout 8 xvfb-run -a build/VoiceChange_artefacts/Release/VoiceChange`: 終了コード124（クラッシュなし、タイムアウトのみ）。
+
+### 計画からの変更点
+- D-012（Manager記録済み、docs/decisions.md参照）どおりに実装。目標充填量の式・S1〜S8/R1〜R6の合格条件の閾値はいずれも変更していない。
+
+### 未解決事項
+- Windows実機・WASAPI固有の挙動は未検証（D-004のとおり）。
+
+### 次回開始位置
+- T-004（`src/core/PitchShifter.*`、`src/core/Engine.*`、`src/core/Params.h`、`src/app/AudioIO.cpp`、`tests/ShifterTests.cpp`、`tests/EngineTests.cpp`）。
+
+---
+
 ## 2026-09-28 T-003 入出力の分離・リングバッファ・クロックずれ補正とオフライン模擬
 
 ### 実施内容
@@ -63,11 +107,11 @@
 - それ以外はdocs/plan.md 2.5節・3章T-003のとおりに実装した。
 
 ### 未解決事項
-- 上記「条件c)不合格の原因分析」のとおり、S1・S2・S3・S4・S7がRingBufferLongで不合格のまま。Manager判断待ち。
+- 上記「条件c)不合格の原因分析」のとおり、S1・S2・S3・S4・S7がRingBufferLongで不合格だった。Manager判断によりD-012（連続換算充填量fill_c）を採用し、後続エントリ（本ファイル先頭「T-003 D-012対応」）で全件合格に修正済み。
 - Windows実機・WASAPI固有の挙動は未検証（D-004のとおり）。
 
 ### 次回開始位置
-- Managerの判断（条件c)またはターゲット充填量の式の扱い）を受けてから T-004（`src/core/PitchShifter.*`、`src/core/Engine.*`）に着手する。
+- （更新: D-012対応後）T-004（`src/core/PitchShifter.*`、`src/core/Engine.*`）。
 
 ### 実施内容
 - `.github/workflows/build.yml`: dumpbin検査ループで`Test-Path`によるexe存在確認、`$LASTEXITCODE`確認、出力に"Image has the following dependencies"が含まれるかの確認を追加し、解析失敗で禁止DLL検査が素通りしないようにした。
