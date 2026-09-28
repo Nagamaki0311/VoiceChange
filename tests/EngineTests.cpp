@@ -3,6 +3,7 @@
 #include "AllocationGuard.h"
 #include "TestSignals.h"
 #include "core/Engine.h"
+#include "core/ResamplingFifo.h"
 
 #include <algorithm>
 #include <array>
@@ -30,6 +31,7 @@ public:
         runE2();
         runE3();
         runE4();
+        runE4c();
         runE5();
         runE6();
         runE7();
@@ -258,6 +260,82 @@ private:
                                                            out.data() + transitionEnd);
             expect (noClick, "click detected on bypass toggle");
         }
+    }
+
+    // ----- E4c: バイパス経路の出力クリップ（D-018） -----
+    // バイパス（完全バイパスと20msクロスフェード）はリミッターを通らないため、ResamplingFifoの補間で
+    // 生じたオーバーシュートやクリップ済み入力がそのまま出るとspecの「出力が0dBFSを超えない」を破る。
+    void runE4c()
+    {
+        beginTest ("E4c: バイパス（完全バイパス・クロスフェード）でもホット入力のピークが1.0以下");
+
+        constexpr int block = 480;
+        constexpr double inRate = 44100.0;
+        constexpr int seconds = 6;
+
+        // 0〜2秒: ±1にクリップした9kHz正弦、2〜4秒: 0dBFS一杯の白色雑音、4〜6秒: 振幅1.5の入力（Engine直の防御確認用）。
+        const int total = (int) inRate * seconds;
+        std::vector<float> src ((size_t) total);
+        juce::Random rng (555);
+        for (int i = 0; i < total; ++i)
+        {
+            const double t = (double) i / inRate;
+            if (t < 2.0)
+                src[(size_t) i] = juce::jlimit (-1.0f, 1.0f, (float) (1.5 * std::sin (juce::MathConstants<double>::twoPi * 9000.0 * t)));
+            else if (t < 4.0)
+                src[(size_t) i] = rng.nextFloat() * 2.0f - 1.0f;
+            else
+                src[(size_t) i] = 1.5f * (rng.nextFloat() * 2.0f - 1.0f);
+        }
+
+        // ResamplingFifo（44.1k→48k）経由。bypassToggleSecondsごとにON/OFFを切り替え、クロスフェード区間も通す。
+        vc::ResamplingFifo fifo;
+        fifo.prepare (inRate, kFs, 4096, 4096, 441, block);
+        vc::Engine engine;
+        engine.params().enabled.store (false);
+        engine.prepare ({ kFs, kMaxBlock });
+
+        std::vector<float> outBuf ((size_t) block);
+        double peakFifoPath = 0.0, peakDirect = 0.0;
+        double simTime = 0.0;
+        const double halfPeriod = 0.005;
+        int pos = 0, outBlocks = 0;
+
+        while (pos + 441 <= 4 * (int) inRate)
+        {
+            fifo.push (src.data() + pos, 441, simTime);
+            pos += 441;
+            simTime += halfPeriod;
+            fifo.pull (outBuf.data(), block, simTime);
+            simTime += halfPeriod;
+
+            if (++outBlocks % 20 == 0)
+                engine.params().enabled.store (! engine.params().enabled.load()); // 200msごとに切替
+
+            engine.process (outBuf.data(), block);
+            peakFifoPath = std::max (peakFifoPath, vc::test::peakAbs (outBuf.data(), block));
+        }
+
+        // Engine直: 振幅1.5の入力を完全バイパスとクロスフェード区間の両方で通す。
+        vc::Engine direct;
+        direct.params().enabled.store (false);
+        direct.prepare ({ kFs, kMaxBlock });
+        std::vector<float> hot (src.begin() + 4 * (int) inRate, src.end());
+        hot.resize ((size_t) (block * 400));
+
+        for (int b = 0; b < 400; ++b)
+        {
+            if (b % 50 == 0)
+                direct.params().enabled.store (! direct.params().enabled.load());
+
+            direct.process (hot.data() + b * block, block);
+            peakDirect = std::max (peakDirect, vc::test::peakAbs (hot.data() + b * block, block));
+        }
+
+        logMessage ("E4c: peak via ResamplingFifo=" + juce::String (peakFifoPath, 4) + ", direct(input 1.5)=" + juce::String (peakDirect, 4));
+        expect (peakFifoPath <= 1.0, "bypass via ResamplingFifo: peak " + juce::String (peakFifoPath, 4) + " exceeds 1.0");
+        expect (peakDirect <= 1.0, "bypass direct with hot input: peak " + juce::String (peakDirect, 4) + " exceeds 1.0");
+        expectEquals ((int) engine.getErrorFlags(), 0);
     }
 
     // ----- E5: NaN/Inf注入 -----

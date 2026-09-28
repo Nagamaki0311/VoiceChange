@@ -308,8 +308,11 @@ void Engine::processChunk (float* buf, int n) noexcept
 
     if (! targetOn && chainGain <= 0.0)
     {
-        // 完全バイパス: チェーン未処理・ビット一致。最終出力の非有限値検査だけは常に行う（D-010）。
-        checkAndHandleFinalNonFinite (buf, n);
+        // 完全バイパス: チェーン未処理。最終出力の非有限値検査（D-010）と±1.0へのクリップだけは常に行う。
+        // クリップはリミッターを通らない入力（補間のオーバーシュート等）が0dBFSを超えないため（D-018）。
+        // |x|<=1ではビット一致。
+        if (checkAndHandleFinalNonFinite (buf, n))
+            juce::FloatVectorOperations::clip (buf, buf, -1.0f, 1.0f, n);
         return;
     }
 
@@ -336,7 +339,9 @@ void Engine::processChunk (float* buf, int n) noexcept
         chainGain = juce::jlimit (0.0, 1.0, chainGain);
     }
 
-    checkAndHandleFinalNonFinite (buf, n);
+    // クロスフェード中は入力（dry）が混ざるので、完全バイパスと同じくクリップする（D-018）。
+    if (checkAndHandleFinalNonFinite (buf, n))
+        juce::FloatVectorOperations::clip (buf, buf, -1.0f, 1.0f, n);
 }
 
 void Engine::process (float* monoInOut, int n) noexcept
