@@ -19,6 +19,28 @@
 
 ---
 
+## 2026-09-28 T-004 D-015追加検証: setFormantBase(真のf0)の効果は否定
+
+### 実施内容
+- Manager指示により、P4不合格（D-015）の仮説「Signalsmith Stretchのフォルマント補償が内部の基本周波数推定（`estimateFrequency()`、自動）に依存しており、低いf0でその推定が外れている」を検証した。
+- 一時テストファイル`tests/FormantBaseExperimentTemp.cpp`（ctest未登録、検証後に削除済み）を追加し、f0=80/100/150Hz×±5半音の組み合わせで、`stretch.setFormantBase(真のf0)`を与えた場合と与えない場合（既定の自動推定）のf0比・包絡スケールsを比較した。
+- 結果は docs/decisions.md D-015に表として記録した。要点: f0比の誤差は`setFormantBase`の有無でほぼ変わらない（ピッチマッピングとフォルマント処理は別経路のため妥当）。包絡スケールsは自動推定の方が良好（150Hzでs=0.995〜1.010とほぼ完璧）で、`setFormantBase`に真のf0を与えるとf0によらずs≈0.75(-5半音)/1.31(+5半音)に張り付き、むしろ悪化した。
+- 以上より当初の仮説を却下し、`PitchShifter`への`setFormantBaseHz`等のAPI追加は行わないことにした（T-005でピッチ検出器の結果をシフターへ配線する作業自体はケロケロ機能に必要なため別途実施するが、P4改善目的では行わない）。docs/decisions.md D-015へ実験結果と却下の判断を追記した。
+
+### 結果
+- 実装変更はテスト・コア側ともになし（一時実験ファイルは削除済み）。`cmake --build build --parallel && ctest --test-dir build --output-on-failure`は前回セッション（コミット297726e）から変化なし: shifterのみ不合格（P4の2ケース、原因はD-015のとおりライブラリの残存特性で解決せず）。
+
+### 計画からの変更点
+- なし。P4の閾値・実装は変更していない。`setFormantBase`案を検討したが効果がないと確認し不採用とした。
+
+### 未解決事項
+- D-015: P4（f0=100Hzの母音、±5半音）が引き続き不合格。原因はSignalsmith Stretchの低域ピッチ量子化誤差で、フォルマント補償の内部f0推定は無関係と判明した。T-005着手前に閾値・設計方針の判断が必要。
+
+### 次回開始位置
+- Manager判断待ち（D-015）。判断確定後、必要ならPitchShifter/Engine/tests/TestSignals.hへ反映。並行してT-005に着手可能。
+
+---
+
 ## 2026-09-28 T-004 D-014対応: ピッチシフターのブロック長を120ms固定に変更
 
 ### 実施内容
@@ -50,6 +72,9 @@
 
 ### 次回開始位置
 - Manager判断待ち（D-015）。判断確定後、必要ならPitchShifter/Engine/tests/TestSignals.hへ反映。並行してT-005（`src/core/Effects.*`、`src/core/PitchDetector.*`、`src/core/Engine.cpp`層2部分、`tests/EffectsTests.cpp`）に着手可能。
+
+### コミット
+- `297726e` T-004: D-014対応（ピッチシフターのブロック長を120ms固定に変更）
 
 ---
 
