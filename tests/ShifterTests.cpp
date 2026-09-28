@@ -42,7 +42,6 @@ public:
             std::vector<float> output (static_cast<size_t> (totalSamples), 0.0f);
 
             const int chunk = blockSamples / 4;
-            bool allFinite = true;
 
             for (int pos = 0; pos + chunk <= totalSamples; pos += chunk)
             {
@@ -51,7 +50,7 @@ public:
                 stretch.process (inChannels, chunk, outChannels, chunk);
             }
 
-            allFinite = vc::test::allFinite (output.data(), totalSamples);
+            const bool allFinite = vc::test::allFinite (output.data(), totalSamples);
             expect (allFinite, "shifter output contained non-finite values");
         }
     }

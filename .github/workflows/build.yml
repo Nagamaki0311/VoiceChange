@@ -50,8 +50,27 @@ jobs:
 
           foreach ($exe in $exes) {
               Write-Host "== $exe =="
+
+              if (-not (Test-Path $exe)) {
+                  Write-Error "$exe not found"
+                  $failed = $true
+                  continue
+              }
+
               $output = & $dumpbin /dependents $exe
               $output | Write-Host
+
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "dumpbin failed on $exe (exit code $LASTEXITCODE)"
+                  $failed = $true
+                  continue
+              }
+
+              if (-not ($output -match "Image has the following dependencies")) {
+                  Write-Error "dumpbin output for $exe did not contain expected dependency listing"
+                  $failed = $true
+                  continue
+              }
 
               if ($output -match $forbidden) {
                   Write-Error "$exe depends on a VC runtime / UCRT DLL"

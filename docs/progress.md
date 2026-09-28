@@ -19,6 +19,18 @@
 
 ---
 
+## 2026-09-28 T-002 レビュー指摘修正（CI dumpbin検査・デッドストア）
+
+### 実施内容
+- `.github/workflows/build.yml`: dumpbin検査ループで`Test-Path`によるexe存在確認、`$LASTEXITCODE`確認、出力に"Image has the following dependencies"が含まれるかの確認を追加し、解析失敗で禁止DLL検査が素通りしないようにした。
+- `tests/ShifterTests.cpp`: `bool allFinite = true;`の宣言直後の上書き（デッドストア）を解消し、`const bool allFinite = ...`の1行にまとめた。
+
+### 結果
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`成功（1件のsmokeテストがPassed）。
+- pwshがLinux環境に無いため、`.github/workflows/build.yml`の変更は目視レビューのみ（既存の`-match`配列判定パターンと整合させた）。
+
+---
+
 ## 2026-09-28 T-002 CMake構成・依存固定・CI・README
 
 ### 実施内容
