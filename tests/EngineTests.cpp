@@ -5,12 +5,13 @@
 #include "core/Engine.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <vector>
 
 // ===== SECTION: EngineTests =====
-// E1〜E7（カテゴリEngine、quick）。docs/plan.md 3章T-004参照。
+// E1〜E10（カテゴリEngine、quick）。docs/plan.md 3章T-004参照。
 
 namespace
 {
@@ -32,6 +33,9 @@ public:
         runE5();
         runE6();
         runE7();
+        runE8();
+        runE9();
+        runE10();
     }
 
 private:
@@ -51,7 +55,6 @@ private:
 
         const float amp = (float) std::pow (10.0, -20.0 / 20.0); // -20dBFS
         constexpr int steadyLen = (int) kFs; // 1秒
-        constexpr int rampSamples = (int) 0.05 * (int) kFs; // 50ms(参考、実際はlround使用)
         const int actualRamp = (int) std::lround (0.05 * kFs);
         constexpr int margin = 2400;
         const int totalLen = steadyLen + actualRamp + margin + steadyLen;
@@ -78,7 +81,6 @@ private:
         const double ratioDb = 20.0 * std::log10 (rmsAfter / rmsBefore);
 
         expectWithinAbsoluteError (ratioDb, 6.0, 0.1);
-        juce::ignoreUnused (rampSamples);
     }
 
     // ----- E2: リミッター -----
@@ -261,8 +263,14 @@ private:
     // ----- E5: NaN/Inf注入 -----
     void runE5()
     {
-        runE5Case (std::numeric_limits<float>::quiet_NaN(), "NaN");
-        runE5Case (std::numeric_limits<float>::infinity(), "Inf");
+        runE5Case (std::numeric_limits<float>::quiet_NaN(), "NaN", vc::Preset::Minion);
+        runE5Case (std::numeric_limits<float>::infinity(), "Inf", vc::Preset::Minion);
+        // ピッチ検出・トークボックス・ケロケロの経路（検出器のIIR状態・補正量・キャリア）も対象に含める。
+        for (const auto preset : { vc::Preset::Kerokero, vc::Preset::Talkbox })
+        {
+            runE5Case (std::numeric_limits<float>::quiet_NaN(), "NaN", preset);
+            runE5Case (std::numeric_limits<float>::infinity(), "Inf", preset);
+        }
 
         beginTest ("E5c: バイパス中のNaN注入で出力0・フラグ");
         {
@@ -279,13 +287,13 @@ private:
         }
     }
 
-    void runE5Case (float badValue, const juce::String& label)
+    void runE5Case (float badValue, const juce::String& label, vc::Preset preset)
     {
-        beginTest ("E5: " + label + "注入(ミニオン稼働中)からの復帰");
+        beginTest ("E5: " + label + "注入(" + juce::String (vc::kPresets[(size_t) preset].id) + "稼働中)からの復帰");
 
         vc::Engine engine;
         prepareEngine (engine);
-        engine.params().preset.store ((int) vc::Preset::Minion);
+        engine.params().preset.store ((int) preset);
         engine.params().pitch.store (0);
 
         auto lead = vc::test::makeSine (220.0, kFs, (int) kFs * 2, 0.3f);
@@ -293,7 +301,7 @@ private:
         engine.process (leadOut.data(), (int) leadOut.size());
 
         const int expectedL = engine.getShifterLatencySamples();
-        expect (expectedL > 0, "shifter should be active for Minion preset");
+        expect ((expectedL > 0) == vc::shifterShouldRun (preset, 0), "shifter activity does not match the preset");
 
         std::vector<float> badBlock ((size_t) kMaxBlock, 0.3f);
         badBlock[10] = badValue;
@@ -369,7 +377,7 @@ private:
     // ----- E7: アロケーション -----
     void runE7()
     {
-        beginTest ("E7: 全プリセット・全遷移でのアロケーション0回");
+        beginTest ("E7: 全プリセット・全56通りの順序付き切替・層1ピッチ・バイパス・リバーブ停止でのアロケーション0回");
 
         vc::Engine engine;
         prepareEngine (engine);
@@ -377,6 +385,29 @@ private:
 
         auto signal = vc::test::makeSine (220.0, kFs, kMaxBlock * 50, 0.3f);
         std::vector<float> buf (signal);
+        std::vector<float> pairBuf (signal.size());
+
+        // 全56通りの順序付き切替（a→b）。各プリセットを約85ms動かしてから切り替え、切替後も約85ms処理する
+        // （効果のフェード20ms、シフターの休止⇔稼働、ピッチ検出の起動・停止を含む）。
+        const auto runAllPairs = [&]
+        {
+            const int segment = kMaxBlock * 8;
+
+            for (int a = 0; a < (int) vc::kPresets.size(); ++a)
+            {
+                for (int b = 0; b < (int) vc::kPresets.size(); ++b)
+                {
+                    if (a == b)
+                        continue;
+
+                    std::copy (signal.begin(), signal.begin() + segment * 2, pairBuf.begin());
+                    engine.params().preset.store (a);
+                    engine.process (pairBuf.data(), segment);
+                    engine.params().preset.store (b);
+                    engine.process (pairBuf.data() + segment, segment);
+                }
+            }
+        };
 
         // ウォームアップ: 各プリセット・ピッチ・バイパスを一通り回し、遅延確保等を先に済ませる。
         for (int p = 0; p < (int) vc::kPresets.size(); ++p)
@@ -390,6 +421,9 @@ private:
                 engine.process (buf.data(), (int) buf.size());
             }
         }
+
+        engine.params().pitch.store (0);
+        runAllPairs();
 
         engine.params().enabled.store (false);
         buf = signal;
@@ -414,6 +448,9 @@ private:
                 }
             }
 
+            engine.params().pitch.store (0);
+            runAllPairs();
+
             engine.params().enabled.store (false);
             engine.process (buf.data(), (int) buf.size());
             engine.params().enabled.store (true);
@@ -426,6 +463,199 @@ private:
         }
 
         expect (totalAllocations == 0, "allocations detected during process(): " + juce::String ((int) totalAllocations));
+    }
+
+    static const char* presetName (int p) { return vc::kPresets[(size_t) p].id; }
+
+    // ----- E8: 全プリセットの異常値 -----
+    // 母音・雑音バースト・無音を含む10秒（-60〜0dBFS）で、NaN/Infなし、ピーク<=1.0、エラーフラグなし。
+    void runE8()
+    {
+        beginTest ("E8: 全プリセットで母音・雑音・無音（-60〜0dBFS、10秒）にNaN/Infなし・ピーク<=1.0");
+
+        constexpr int segLen = (int) (kFs * 0.5);
+        constexpr int numSegs = 20;
+        const std::array<float, 5> levelsDb { -60.0f, -40.0f, -20.0f, -6.0f, 0.0f };
+
+        std::vector<float> signal;
+        juce::Random rng (2024);
+
+        for (int seg = 0; seg < numSegs; ++seg)
+        {
+            const float amp = (float) std::pow (10.0, (double) levelsDb[(size_t) (seg / 3) % levelsDb.size()] / 20.0);
+            const int kind = seg % 3; // 0=母音, 1=雑音バースト, 2=無音
+            std::vector<float> part ((size_t) segLen, 0.0f);
+
+            if (kind == 0)
+                part = vc::test::makeSyntheticVowel (110.0 + 20.0 * (double) seg, kFs, segLen, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, amp);
+            else if (kind == 1)
+                for (auto& v : part)
+                    v = (rng.nextFloat() * 2.0f - 1.0f) * amp;
+
+            signal.insert (signal.end(), part.begin(), part.end());
+        }
+
+        for (int p = 0; p < (int) vc::kPresets.size(); ++p)
+        {
+            vc::Engine engine;
+            prepareEngine (engine);
+            engine.params().preset.store (p);
+            engine.params().pitch.store (p % 2 == 0 ? 0 : -5);
+            engine.params().gainDb.store (10.0f);
+            engine.params().reverb.store (0.3f);
+
+            std::vector<float> out (signal);
+            engine.process (out.data(), (int) out.size());
+
+            expect (vc::test::allFinite (out.data(), (int) out.size()), juce::String (presetName (p)) + ": non-finite output");
+            expect (vc::test::peakAbs (out.data(), (int) out.size()) <= 1.0, juce::String (presetName (p)) + ": peak exceeds 1.0");
+            expect (engine.getErrorFlags() == 0, juce::String (presetName (p)) + ": error flags set");
+        }
+    }
+
+    // ----- E9: プリセット切替のクリック -----
+    // 8x7=56通りの順序付き切替。判定窓は切替から20ms + 300ms + 20ms。デジタル無音から発声し始める場合も含める。
+    // 切替位置は複数の位相（ブロック境界から7・11サンプルずらす）で試す。150Hzの母音は48kHzで320サンプル周期で、
+    // 境界（86400 = 270周期）ちょうどではゼロ交差に一致し、切替の段差を隠してしまうため。
+    struct E9Result
+    {
+        int failures = 0;
+        double worstRatio = 0.0;
+        juce::String worstName;
+    };
+
+    // mode 0: 連続発声中の切替、1: 無音からの発声開始（10msアタック、D-017）、2: 同（0msアタック、参考値）。
+    E9Result runE9Mode (int mode, int offset, const std::vector<float>& voice, bool judge)
+    {
+        constexpr int settle = (int) (kFs * 0.8);
+        constexpr int steady = (int) kFs;
+        constexpr int transition = (int) (kFs * 0.34);
+        constexpr int total = settle + steady + 16 + transition + settle + steady;
+
+        E9Result result;
+
+        for (int a = 0; a < (int) vc::kPresets.size(); ++a)
+        {
+            for (int b = 0; b < (int) vc::kPresets.size(); ++b)
+            {
+                if (a == b)
+                    continue;
+
+                const int switchPos = settle + steady + offset;
+                std::vector<float> in (voice);
+
+                if (mode != 0)
+                {
+                    // デジタル無音 → 切替の瞬間に発声開始。
+                    // 10msの二乗余弦アタック（D-017）: 振幅が瞬時に最大になる位相そろいの合成母音は実際の声を代表せず、
+                    // Signalsmith Stretchを通すとシフター遅延（120ms）の位置に定常の約2倍のピーク・隣接差が出る。
+                    std::fill (in.begin(), in.begin() + switchPos, 0.0f);
+                    const int attack = mode == 1 ? (int) std::lround (0.010 * kFs) : 0;
+                    for (int i = 0; i < attack; ++i)
+                        in[(size_t) (switchPos + i)] *= (float) (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * (double) i / (double) attack));
+                }
+
+                vc::Engine engine;
+                prepareEngine (engine);
+                engine.params().preset.store (a);
+                std::vector<float> out (in);
+
+                engine.process (out.data(), switchPos);
+                engine.params().preset.store (b);
+                engine.process (out.data() + switchPos, total - switchPos);
+
+                // 無音からの発声開始では切替前の出力が無音で基準にならないため、基準は加工前の声の定常区間とする。
+                const float* before = mode != 0 ? voice.data() + settle : out.data() + settle;
+                const double beforeDiff = vc::test::maxAdjacentDiff (before, steady);
+                const double afterDiff = vc::test::maxAdjacentDiff (out.data() + total - steady, steady);
+                // 切替の直前のサンプルから数える（切替の瞬間の段差 out[switchPos] - out[switchPos-1] を含める）。
+                const double transDiff = vc::test::maxAdjacentDiff (out.data() + switchPos - 1, transition + 1);
+                const double ratio = transDiff / std::max (beforeDiff, afterDiff);
+
+                if (ratio > result.worstRatio)
+                {
+                    result.worstRatio = ratio;
+                    result.worstName = juce::String (presetName (a)) + "->" + presetName (b);
+                }
+
+                if (judge && ! vc::test::checkNoClick (before, steady, out.data() + switchPos - 1, transition + 1, out.data() + total - steady))
+                {
+                    ++result.failures;
+                    expect (false, juce::String (mode == 0 ? "steady" : "onset") + " offset " + juce::String (offset) + " "
+                                       + presetName (a) + "->" + presetName (b) + ": transition diff " + juce::String (transDiff, 4)
+                                       + " > 1.5*max(" + juce::String (beforeDiff, 4) + ", " + juce::String (afterDiff, 4) + ") ratio "
+                                       + juce::String (ratio, 2));
+                }
+            }
+        }
+
+        return result;
+    }
+
+    void runE9()
+    {
+        beginTest ("E9: 56通りのプリセット切替でクリックなし（連続発声・無音からの発声開始、複数の切替位相）");
+
+        constexpr int total = (int) (kFs * 0.8) + (int) kFs + 16 + (int) (kFs * 0.34) + (int) (kFs * 0.8) + (int) kFs;
+        auto voice = vc::test::makeSyntheticVowel (150.0, kFs, total, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.3f);
+        vc::test::addNoiseFloor (voice, -80.0f, 333);
+
+        int failures = 0;
+
+        for (const int offset : { 7, 11 })
+        {
+            for (const int mode : { 0, 1 })
+            {
+                const auto r = runE9Mode (mode, offset, voice, true);
+                failures += r.failures;
+                logMessage ("E9: " + juce::String (mode == 0 ? "steady" : "onset(10ms attack)") + " offset " + juce::String (offset)
+                            + " worst ratio (limit 1.5) " + juce::String (r.worstRatio, 3) + " at " + r.worstName);
+            }
+        }
+
+        // 参考値（判定なし）: 0msアタック（瞬時の立ち上がり）の最悪比。D-017参照。offset 0は母音がゼロ交差から
+        // 始まる（入力自体に段差がない）ので、シフターの立ち上がりだけの影響を見られる。offset 7は入力自体に段差がある。
+        for (const int offset : { 0, 7 })
+        {
+            const auto instant = runE9Mode (2, offset, voice, false);
+            logMessage ("E9: onset(0ms attack, reference) offset " + juce::String (offset) + " worst ratio "
+                        + juce::String (instant.worstRatio, 3) + " at " + instant.worstName);
+        }
+
+        logMessage ("E9: " + juce::String (4 * 56 - failures) + "/224 switches passed");
+    }
+
+    // ----- E10: CPU（参考値、失敗判定なし） -----
+    void runE10()
+    {
+        beginTest ("E10: CPU（48kHz・480ブロック・10秒、プリセットごとの処理時間/音声時間）");
+
+        constexpr int block = 480;
+        constexpr int total = (int) kFs * 10;
+
+        auto voice = vc::test::makeSyntheticVowel (150.0, kFs, total, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.1f);
+        vc::test::addNoiseFloor (voice, -60.0f, 444);
+
+        juce::String table = "E10 CPU (processing time / audio time):";
+
+        for (int p = 0; p < (int) vc::kPresets.size(); ++p)
+        {
+            vc::Engine engine;
+            engine.prepare ({ kFs, block });
+            engine.params().preset.store (p);
+            std::vector<float> buf (voice);
+
+            const auto t0 = juce::Time::getHighResolutionTicks();
+            for (int pos = 0; pos < total; pos += block)
+                engine.process (buf.data() + pos, block);
+            const auto t1 = juce::Time::getHighResolutionTicks();
+
+            const double seconds = juce::Time::highResolutionTicksToSeconds (t1 - t0);
+            const double percent = 100.0 * seconds / 10.0;
+            table << "\n  " << juce::String (presetName (p)).paddedRight (' ', 9) << juce::String (percent, 2) << "%";
+        }
+
+        logMessage (table);
     }
 };
 

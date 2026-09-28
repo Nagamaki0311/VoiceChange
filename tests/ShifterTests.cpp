@@ -578,6 +578,9 @@ private:
             const double s = vc::test::measureEnvelopeScale (envIn, envOut);
 
             expect (std::abs (s - 1.0) <= sTolRatio, "envelope scale s=" + juce::String (s) + ", expected ~1.0");
+
+            logMessage (label + " " + juce::String (semis) + "st: f0 ratio " + juce::String (f0Ratio, 4) + " (expected " + juce::String (expectedRatio, 4)
+                        + "), s=" + juce::String (s, 3));
         }
     }
 
