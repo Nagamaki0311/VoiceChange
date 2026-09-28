@@ -31,6 +31,7 @@
 
 ### 結果
 - `cmake --build build --parallel && ctest --test-dir build --output-on-failure -L quick`成功（6件）。`-L long`成功（ring_buffer_long、29秒）。`timeout 8 xvfb-run -a build/VoiceChange_artefacts/Release/VoiceChange`は落ちずに8秒で終了（exit=124）。
+- 最終コミット後に全件（`ctest --test-dir build --output-on-failure`、quick 6件+long 1件）を再実行し、7件すべて成功（合計56.9秒）。
 - D1: 全信号・3レートで有声フレームの100%が±1%以内、中央値誤差は最大0.12%。D2/D4合格。F1〜F3（f0=150Hz）合格: s=1.585/1.375/0.750、f0比1.0000/1.5879/0.7091。K1: 450Hz→441.1Hz、425Hz→416.3Hz、母音150Hz→148.2Hz。X1: 300.00ms・0.600、600.06ms・0.450。X2: 960.15/1040.01Hz、1000Hzは-86.6dB。X3: 出力比-1.8〜+2.9dB、倍音間隔誤差最大0.05%、雑音入力-7.1dB。E10: ノーマル0.04%、トークボックス2.63%。
 
 ### 計画からの変更点
