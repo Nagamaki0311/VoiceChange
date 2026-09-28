@@ -2,7 +2,7 @@
 
 project001はAgent-Reach（[Panniantong/Agent-Reach](https://github.com/Panniantong/Agent-Reach)、MIT License）をOptional Dependencyとして扱う。project001自体はAgent-Reachへの依存を持たず、実行環境にインストールされている場合のみResearcherが活用する。
 
-**現在Tier2（検出のみ）**: 動作未検証のまま複数セッションで`unavailable`が続いているため、`.claude/agents/researcher.md`への振る舞い統合は見送っている（docs/capability-layer.md、D-021参照）。以下は検出・動作確認が取れた際にTier1へ昇格する場合の利用方針として残す。
+**現在Tier2（検出のみ）**: 動作未検証のまま複数セッションで`unavailable`が続いているため、`.claude/agents/researcher.md`への振る舞い統合は見送っている（docs/capability-layer.md、project001テンプレートのD-021参照）。以下は検出・動作確認が取れた際にTier1へ昇格する場合の利用方針として残す。
 
 ## Agent-Reachとは
 

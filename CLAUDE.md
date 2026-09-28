@@ -20,14 +20,14 @@
 
 ## Skills / Capability Layer
 
-project001は、利用可能な外部ツールを自動検出し、あれば優先利用・なければ既存フローへフォールバックする共通規約（Capability Layer）を持つ。project001自体はいずれのツールにも依存しない（本リポジトリに依存の追記はしない）。
+本リポジトリは、利用可能な外部ツールを自動検出し、あれば優先利用・なければ既存フローへフォールバックする共通規約（Capability Layer）を持つ。Capability Layerの対象ツール（下記4つ）への依存は本リポジトリに追記しない。
 
-- 現在Tier1（Agentの振る舞いに統合済み）のCapabilityはない。[Agent-Reach](https://github.com/Panniantong/Agent-Reach)、Code Review Graph、[Context7](https://github.com/upstash/context7)、GitHub CLI `gh`の4つは動作未検証のままTier2（検出のみ）に格下げしている（D-021参照）
+- 現在Tier1（Agentの振る舞いに統合済み）のCapabilityはない。[Agent-Reach](https://github.com/Panniantong/Agent-Reach)、Code Review Graph、[Context7](https://github.com/upstash/context7)、GitHub CLI `gh`の4つは動作未検証のためTier2（検出のみ）とする
 - 検出は`.claude/bootstrap.sh`（案内のみ、インストールは行わない）に集約し、SessionStart Hook経由でManagerへ結果を共有する
 - 検出規約はdocs/capability-layer.mdに、ツール固有の詳細はdocs/agent-reach.md・docs/code-review-graph.md・docs/context7.mdにそれぞれ記載し、他へ複製しない
-- Claude Codeプラグインはproject scopeで既定有効化しない。例外としてFrontend Design（`frontend-design@claude-plugins-official`）はD-025によりproject scopeで有効化済み（詳細はdocs/capability-layer.md・docs/design-workflow.md参照）
+- Claude Codeプラグインはproject scopeで既定有効化しない。例外としてFrontend Design（`frontend-design@claude-plugins-official`）はproject scopeで有効化済み（詳細はdocs/capability-layer.md・docs/design-workflow.md参照）
 
-Skills（`.claude/skills/`配下のSKILL.md）は、再利用可能な具体的ワークフローが確認された時点で追加する。SKILL.md本文はSkillツール呼び出し時のみ読み込まれるが、1行説明は`.claude/skills/`配下の全Skillぶん毎セッション常時ロードされるため、確認を経ず追加したSkillは関連タスクでの起動実績（`/usage`のSkill・subagent・plugin・MCP別内訳で確認できる）を見て刈り込む。現在導入しているのは`design-principles`（UI/UXデザイン品質判断基準。designer/developer/reviewerが使用。D-025参照）の1件のみ。2026年公式監査でデザイン/UI系Skill13件を撤去した経緯があり（D-019）、それとは別に必要性を確認した上で今回追加した。
+Skills（`.claude/skills/`配下のSKILL.md）は、再利用可能な具体的ワークフローが確認された時点で追加する。SKILL.md本文はSkillツール呼び出し時のみ読み込まれるが、1行説明は`.claude/skills/`配下の全Skillぶん毎セッション常時ロードされるため、確認を経ず追加したSkillは関連タスクでの起動実績（`/usage`のSkill・subagent・plugin・MCP別内訳で確認できる）を見て刈り込む。現在導入しているのは`design-principles`（UI/UXデザイン品質判断基準。designer/developer/reviewerが使用）の1件のみ。
 
 ## 進捗の可視化
 

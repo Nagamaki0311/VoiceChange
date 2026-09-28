@@ -2,7 +2,7 @@
 
 project001はContext7（[upstash/context7](https://github.com/upstash/context7)、MIT License）をOptional Dependencyとして扱う。project001自体はContext7への依存を持たず、実行環境にインストールされている場合のみPlanner/Developer/Reviewer/Researcherが活用する。
 
-**現在Tier2（検出のみ）**: 動作未検証（サブコマンド仕様も含む）のまま複数セッションで`unavailable`が続いているため、`.claude/agents/*.md`への振る舞い統合は見送っている（docs/capability-layer.md、D-021参照）。以下は検出・動作確認が取れた際にTier1へ昇格する場合の利用方針として残す。
+**現在Tier2（検出のみ）**: 動作未検証（サブコマンド仕様も含む）のまま複数セッションで`unavailable`が続いているため、`.claude/agents/*.md`への振る舞い統合は見送っている（docs/capability-layer.md、project001テンプレートのD-021参照）。以下は検出・動作確認が取れた際にTier1へ昇格する場合の利用方針として残す。
 
 ## Context7とは
 

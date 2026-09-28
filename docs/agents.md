@@ -45,13 +45,13 @@ SessionStart/PreCompactのHook出力は、常にManager（ルートセッショ�
 - SessionStart Hook → Manager（タスク状況を把握してから Planner を起動）
 - PreCompact Hook → Manager（サイクルの任意の時点で発火。docsへの記録を判断・実行してから圧縮を許容する）
 
-という流れは、Managerをsubagent化しない限りにおいて技術的に自然に成立する。これはD-004でManagerを独立subagentにしなかった判断（公式推奨のオーケストレーション構成）に加え、Hookとの統合という観点からも同じ結論を補強する。
+という流れは、Managerをsubagent化しない限りにおいて技術的に自然に成立する。これはManagerを独立subagentにしなかった判断（公式推奨のオーケストレーション構成。project001テンプレートでの決定）に加え、Hookとの統合という観点からも同じ結論を補強する。
 なお、PreCompact Hookは「Reviewerの後」等の固定ステップではなく、コンテキストサイズに応じて任意のタイミングで発火するイベントである。開発フローの図はあくまで論理的な作業順序を示すものであり、PreCompactは並行して発火し得る点に注意する。
 
 ## 採用しなかったAgent
 
-- **research（過去に不採用、現在はResearcherとして採用）**: D-004時点では「Plannerが調査を兼ねており役割が重複する」として不採用としていた。Agent-Reach対応（D-009）により、GitHub/Web/RSS/YouTube/Reddit/X等の複数チャネルを横断する調査量・重複除去・信頼性評価という、Plannerの設計判断とは異なる作業が明確になったため判断を見直し、Researcherとして採用した。Plannerは「何をどのチャネルで調べるか」を決める（軽微な確認のためのWebFetch/WebSearchは残す）、Researcherは「実際に集めて評価する」に役割を分離しており、重複しない。
-- **UI（過去に不採用、現在はDesignerとして採用）**: project001自体はアプリケーションコードを持たないテンプレートでありUIレビューの対象が存在しないため、当初は個別アプリのリポジトリ側で追加する方針としていた。Design基盤統合（D-025）でユーザーが方針の見直しを選択し、project001自体にDesigner Agentを常設する構成へ変更した。project001自身の開発でDesignerが起動することは通常ないが、個別アプリ側でテンプレートをそのまま使えるよう、常設のAgent定義として保持する。
+- **research（過去に不採用、現在はResearcherとして採用）**: project001テンプレートのD-004時点では「Plannerが調査を兼ねており役割が重複する」として不採用としていた。Agent-Reach対応（project001テンプレートのD-009）により、GitHub/Web/RSS/YouTube/Reddit/X等の複数チャネルを横断する調査量・重複除去・信頼性評価という、Plannerの設計判断とは異なる作業が明確になったため判断を見直し、Researcherとして採用した。Plannerは「何をどのチャネルで調べるか」を決める（軽微な確認のためのWebFetch/WebSearchは残す）、Researcherは「実際に集めて評価する」に役割を分離しており、重複しない。
+- **UI（過去に不採用、現在はDesignerとして採用）**: project001自体はアプリケーションコードを持たないテンプレートでありUIレビューの対象が存在しないため、当初は個別アプリのリポジトリ側で追加する方針としていた。Design基盤統合（project001テンプレートのD-025）でユーザーが方針の見直しを選択し、project001自体にDesigner Agentを常設する構成へ変更した。project001自身の開発でDesignerが起動することは通常ないが、個別アプリ側でテンプレートをそのまま使えるよう、常設のAgent定義として保持する。
 
 ## コード品質ルール
 
@@ -83,7 +83,7 @@ SessionStart/PreCompactは、コード（アプリケーションロジック）
 
 - 検査対象: `.claude/ja-style-rules.json`のNGパターン（「効く」の一語で済ませる曖昧な効果表現、依頼されていない対比構文）、文末表現（ます・です等）の3文以上連続
 - 該当時: `exit code 2`でエージェント自身へ差し戻す。単語だけの置き換えは禁止し、該当文全体の書き直しを求める（グッドパターンの例も併記する）
-- ルールは`.claude/ja-style-rules.json`への追記のみで拡張できる（D-017参照）
+- ルールは`.claude/ja-style-rules.json`への追記のみで拡張できる（project001テンプレートのD-017参照）
 
 project001自体にアプリケーションコードは無いが、AIが生成するdocs/配下のドキュメントという明確な対象がある点でlint/ビルド連携用のPostToolUse Hookとは事情が異なる。lintやビルド連携等、対象コードが存在しないPostToolUse Hookは引き続き導入していない（個別アプリのリポジトリ側で必要になった場合はそちらで追加する）。
 
@@ -94,11 +94,11 @@ project001自体にアプリケーションコードは無いが、AIが生成�
 - `agent_type`が`developer`の場合のみ、`git status --porcelain -- docs/progress.md`でdocs/progress.mdに未コミットの変更があるかを確認し、無ければ`exit code 2`で「完了報告の前にdocs/progress.mdへ記録すること」を差し戻す
 - 他のAgentタイプ（Planner/Reviewer/Researcher）はmatcherを絞らずスクリプト内で`agent_type`を判定し、該当しなければ無反応（`exit code 0`）
 
-「docs/progress.md: 作業履歴、次回開始位置（Developerが記録）」という運用ルール（本ファイル冒頭の参照ドキュメント表）が、指示文だけでなく機械的にも守られるようにする（D-018参照）。
+「docs/progress.md: 作業履歴、次回開始位置（Developerが記録）」という運用ルール（本ファイル冒頭の参照ドキュメント表）が、指示文だけでなく機械的にも守られるようにする（project001テンプレートのD-018参照）。
 
 ### SessionEnd
 
-セッション終了時に、リポジトリ全体で未コミットの変更（`git status --porcelain`）があるかを確認し、あれば「docs/progress.md・docs/tasks.mdへの記録漏れがないか確認しcommit/pushしてください」とリマインドする。未コミットの変更が無ければ無反応。PreCompactは圧縮が発生した場合のみ発火するため、圧縮を経ずにセッションが終了するケース（`/clear`等）を補完する（D-018参照）。
+セッション終了時に、リポジトリ全体で未コミットの変更（`git status --porcelain`）があるかを確認し、あれば「docs/progress.md・docs/tasks.mdへの記録漏れがないか確認しcommit/pushしてください」とリマインドする。未コミットの変更が無ければ無反応。PreCompactは圧縮が発生した場合のみ発火するため、圧縮を経ずにセッションが終了するケース（`/clear`等）を補完する（project001テンプレートのD-018参照）。
 
 ### Stop Hookを不採用とした理由
 
@@ -116,7 +116,7 @@ docs更新のタイミングとしては頻度が高すぎ、毎ターンのリ�
 
 ## Auto Memoryとの役割分担
 
-Claude Codeには、Claude自身が訂正・学習をリポジトリごとの`MEMORY.md`へ自動で記録するAuto Memory機能があり、毎セッション自動でロードされる（project001が明示的に組み込む設定ではなく、Claude Code本体の標準機能）。project001のdocs/tasks.md・docs/progress.md・docs/decisions.mdはこれとは別の、D-001（Auto Memory登場以前）由来の独自運用である。両者は以下のように役割が異なり、置き換え関係ではない。
+Claude Codeには、Claude自身が訂正・学習をリポジトリごとの`MEMORY.md`へ自動で記録するAuto Memory機能があり、毎セッション自動でロードされる（project001が明示的に組み込む設定ではなく、Claude Code本体の標準機能）。project001のdocs/tasks.md・docs/progress.md・docs/decisions.mdはこれとは別の、project001テンプレートのD-001（Auto Memory登場以前）由来の独自運用である。両者は以下のように役割が異なり、置き換え関係ではない。
 
 | | Auto Memory | docs/tasks.md・progress.md・decisions.md |
 |---|---|---|

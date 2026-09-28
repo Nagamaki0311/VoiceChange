@@ -4,7 +4,7 @@ project001はCode Review Graph（[tirth8205/code-review-graph](https://github.co
 
 **混同注意**: Claude Codeのプラグイン一覧に表示されうる「Codegraph」（Colby McHenry作のClaude Codeプラグイン）は、本ドキュメントが対象とするpip配布CLI（tirth8205作）とは無関係の別プロダクトである。検出は`command -v code-review-graph`のみで判定するため、当該プラグインの導入有無はCapability Layerの検出結果に影響しない。
 
-**現在Tier2（検出のみ）**: 動作未検証のまま複数セッションで`unavailable`が続いているため、`.claude/agents/developer.md`・`.claude/agents/reviewer.md`・REVIEW.mdへの振る舞い統合は見送っている（docs/capability-layer.md、D-021参照）。以下は検出・動作確認が取れた際にTier1へ昇格する場合の利用方針として残す。
+**現在Tier2（検出のみ）**: 動作未検証のまま複数セッションで`unavailable`が続いているため、`.claude/agents/developer.md`・`.claude/agents/reviewer.md`・REVIEW.mdへの振る舞い統合は見送っている（docs/capability-layer.md、project001テンプレートのD-021参照）。以下は検出・動作確認が取れた際にTier1へ昇格する場合の利用方針として残す。
 
 ## Code Review Graphとは
 
