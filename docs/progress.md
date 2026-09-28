@@ -29,6 +29,9 @@
 - `cmake --build build --parallel && ctest --test-dir build --output-on-failure`成功（1件のsmokeテストがPassed）。
 - pwshがLinux環境に無いため、`.github/workflows/build.yml`の変更は目視レビューのみ（既存の`-match`配列判定パターンと整合させた）。
 
+### 次回開始位置
+- T-003: `src/core/ResamplingFifo.*`、`src/app/AudioIO.*`（入出力分離・リングバッファ・クロックずれ補正とオフライン模擬テスト）。Windows CIでの今回のdumpbin検査ロジックの実動作確認はMasterへのpush後にManagerが行う。
+
 ---
 
 ## 2026-09-28 T-002 CMake構成・依存固定・CI・README
