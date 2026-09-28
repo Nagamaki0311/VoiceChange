@@ -19,6 +19,67 @@
 
 ---
 
+## 2026-09-28 T-007 レビュー指摘の修正（12件）
+
+### 実施内容
+- `ConnectionMonitor`: 入力・出力それぞれの最終進捗時刻を持ち、どちらか一方でも2秒進まなければ`CloseAndFail`（JUCE 9のWASAPI入力スレッドは無言終了でコールバックを呼ばないため）。健常時の「一覧変更 && 使用中デバイスが一覧に無い」も`CloseAndFail`。開くこと自体の失敗用に`enterFailed()`を追加。
+- `AudioIO`: 日本語のエラー文は`fromUTF8`（生リテラルはLatin-1解釈で文字化けしていた）。失敗側`FailedSide`（None/Input/Output/Both。片方が失敗しても両方試して特定）と、現在のopen()世代でstartまで成功したかのフラグ（`isReconnecting()`は成功済みの世代の異常のみ）。一度も開けていないデバイスは異常状態でもE4のまま、再試行は継続。デバイス名が空（起動時に0件）の場合は既定デバイスが現れた時点で採用して開く（`pickDefault*Name`をMain.cppからAudioIOへ移動）。レート/バッファ長の変化で出力を無音にするatomicフラグ（再オープンで解除）。時計は`getMillisecondCounterHiRes()`由来の64bit値（Main.cppの統計ログ含む）。未使用のgetter3つを削除、根拠にならないplan.md引用コメントを修正。
+- `MainComponent`: E4の文言・赤枠を`FailedSide`で決定（前方一致を廃止）。コンボボックスを一覧・選択名の変化時のみ作り直す（ポップアップ表示中は保留、通知なしで構築）。選択名の出典を`AudioIO::getDesired*Name()`に一本化（コンストラクタ引数を削除）。「n秒経過」入りの文言は秒数を除いたキーで比較して通知。
+- `Main.cpp`: トレイは(on, err, tooltip)が変わったときだけ更新、エラーバッジにE6（入力0件）を追加。起動時は名前が空でも必ず`open()`。終了時は設定保存をclose()より前に実施。
+- テスト: 片方だけ停止（両パターン、2.0秒/1.9秒）、一覧変更×デバイスなし、健常時の一覧変更（デバイスあり・なし）、異常状態中のエラーフラグ、一覧変更による再試行後の+2秒、`enterFailed`。StatsLogはラベルと値の対応も検証。
+- docs: D-016改訂、plan.mdのConnectionMonitor説明、design.md 6.2 E4の文言。
+
+### 結果
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 全6件成功。
+- 実行コマンド: `cmake --build build --parallel`、`ctest --test-dir build --output-on-failure`、`xvfb-run -a -s "-screen 0 1280x1024x24" build/VoiceChange_artefacts/Release/VoiceChange --screenshot <png>`、`timeout 8 xvfb-run -a build/VoiceChange_artefacts/Release/VoiceChange`。
+- `--screenshot`: 終了コード0、460×600。デバイスなし環境で崩れなし（入力・出力とも0件のため両方赤枠、メッセージはE6）。`timeout 8 xvfb-run -a ...`は落ちずにタイムアウト（124）まで生存。
+
+### 再レビューLow2件の修正
+- `openDevices`は入力が開けなければ出力を開かない（失敗側は`getOutputNames().contains(outName)`でInput/Both）。再試行の開き直しは両方の名前が一覧にあるときだけ。`audioDeviceStopped`に関するコメントとD-016決定3を実態（抜去・レート変更の即時検出経路であり、呼ばれないのは入力スレッドの無言終了のみ）に修正し、決定4を追加。
+
+### 次回開始位置
+- Windows実機でのE1〜E4・再接続・コンボボックスの動的更新の確認（README「手動確認手順」）。
+
+---
+
+## 2026-09-28 T-007 トレイ常駐・デバイス切断時の処理・エラー表示・統計ログ
+
+### 実施内容
+- `src/core/ConnectionMonitor.h`（新規）: 純粋ロジック。カウンタ2秒停滞・エラーフラグ・再オープン要求のいずれかで`CloseAndFail`、異常状態では一覧変更通知＋デバイスあり即時、それ以外2秒間隔で`TryReopen`。
+- `src/core/StatsLog.h/.cpp`（新規）: `formatStatsLine`（経過時間・レイテンシ・充填量・アンダーラン/オーバーラン・速度比補正・CPU・メモリの1行整形）と`resetIfLarger`（1MB超で削除＝作り直し）。
+- `src/app/AudioIO.*`: `private juce::Timer`（500ms）と`private juce::AudioIODeviceType::Listener`を追加。(1)`audioDeviceError`/例外、(2)無言終了（`close()`からの意図した`stop()`かどうかを`expectingIntentionalStop`で判定）、(3)`audioDeviceAboutToStart`の2回目以降のレート/バッファ長変化、の3種を検出し`ConnectionMonitor`へ渡す。`open()`に渡した名前は成功・失敗を問わず記憶し、`TryReopen`で同じ名前へ再オープンする（D-009）。Engineのエラーフラグ（bit0/bit1）は本クラスのタイマーだけが読んで消費し、`hasRecentEngineError()`（レベル判定、10秒間）として公開する（MainComponentとトレイの二重消費を避けるため、T-006時点でMainComponentが直接読んでいた方式から変更）。`getFifoStats()`をStatsLog用に追加。
+- `src/app/MainComponent.*`: `isReconnecting()`+`getReconnectElapsedSeconds()`からE1（入力切断）/E2（出力切断）/E3（音声停止、原因特定不可のため両方赤枠）を表示順位1〜2で追加し、E4/E6より優先する。トレイのメニューからのON/OFF切り替えを検知してトグルスイッチ・スライダー・プリセットボタンの見た目を追従させる`refreshEnabledAppearance()`を追加。
+- `src/app/Main.cpp`: `TrayIcon`（`SystemTrayIconComponent`+`private juce::Timer`、2Hzで状態を反映）を追加。アイコンはコード描画（ON/OFF版・エラーバッジ、design.md 7.1節の16グリッド×2）。左クリックでウィンドウ表示、右クリックで`Process::makeForegroundProcess()`後にPopupMenu（ウィンドウを表示/エフェクトON・OFF切替/終了、ウィンドウと同じLookAndFeel）。閉じるボタン（`closeButtonPressed`変更）・Esc（既存の`MainComponent::keyPressed`経由）でトレイへ格納し、初回のみ`showInfoBubble`（済みフラグを設定へ保存）。`VoiceChangeApplication`に`private juce::Timer`（60秒）を追加し、`%APPDATA%\VoiceChange\VoiceChange.log`へ`StatsLog`の行を追記（起動時に1MB超なら`resetIfLarger`で作り直し）。プロセスメモリは`GetProcessMemoryInfo`（Windowsのみ、`psapi`は既存CMakeLists.txtで既にリンク済み）。
+- `src/core/Params.h`: `presetDisplayName()`を追加（プリセットのUI表示名の単一の出典。トレイのツールチップと`MainComponent`のプリセットボタンの両方が参照するよう`kOrder`側のハードコード文字列を置き換えた）。
+- `tests/AppLogicTests.cpp`: `ConnectionMonitor`（2.0秒/1.9秒境界、t=+2/+4/+6秒のTryReopen、一覧変更即時、エラーフラグ即時、再オープン要求即時→スケジュール復帰）と`StatsLog`（全項目を含む整形、符号付きppm、1MB超/以下の`resetIfLarger`）のテストを追加。
+- `README.md`: 「手動確認手順（Windows実機、T-007）」節を追加（トレイの5手順、デバイス抜去・再接続の5手順、ログの書式と1時間判定基準）。
+- `docs/decisions.md`: D-016（E4/E1〜E3の切り分け、Engineエラーフラグの単一消費者化、無言終了の判定方法）を追加。
+
+### 発見した設計上の問題と対応
+- 初期実装では、起動直後に入力・出力デバイスが1件も存在しない場合でも`AudioIO`の500msタイマーがコールバック回数の停滞を検出して`isReconnecting()`をtrueにしてしまい、より具体的なE6（「入力デバイスが見つかりません」）をE3の汎用メッセージで上書きしてしまう不具合があった。`AudioIO::evaluateConnection()`の先頭に「`open()`を一度も試みていない（`desiredInputName`/`desiredOutputName`が両方空）場合は監視自体を行わない」ガードを追加して修正した。
+
+### 結果
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 全6件成功（smoke/ring_buffer/ring_buffer_long/shifter/engine/app_logic）。
+- `xvfb-run -a -s "-screen 0 1280x1024x24" ... --screenshot`: 終了コード0、PNG 460×600（design.mdどおり）。ALSA/デバイスなし環境でE6「入力デバイスが見つかりません」が正しく表示され、入力コンボのみ赤枠（出力は通常色）であることをピクセル値で確認した。
+- `timeout 8 xvfb-run -a ...`（トレイ・ConnectionMonitor・StatsLogを含む一連の初期化）: 終了コード124（タイムアウトによる強制終了のみで、クラッシュなし）。
+- ビルドログに新規ファイル由来の警告なし（既存の`-Wfloat-equal`警告のみ、Params.h:87・MainComponent.cpp:763は変更前から存在。AudioIO.cpp内の新規1件は既存パターンと同種で意図的な等価比較のため許容）。
+- `grep -rnE "mutex|CriticalSection|ScopedLock|SpinLock|DBG\(|Logger::|triggerAsyncUpdate" src/core`: 該当なし。
+
+### 計画からの変更点
+- なし（docs/plan.md 2.5節・3章T-007のとおり）。ConnectionMonitorのpublicインターフェースは`update`/`isFailed`のみ（plan.mdどおり）とし、再オープン成功時の状態リセットは`AudioIO::open()`内で`connectionMonitor = ConnectionMonitor{}`と代入する形にした（`reset()`等のAPIを追加しない、判定ラダー6「1行で書けるか」）。
+
+### 未解決事項（Windows実機でしか確認できない項目）
+- WASAPIの実デバイスでの抜去・再接続・無言終了の実挙動（Linux/Xvfbには対象のデバイスが存在しないため）。
+- トレイアイコンの表示（左クリック/右クリック/ツールチップ/エラーバッジ/初回通知）。Xvfbには実際のシステムトレイが無いため、`SystemTrayIconComponent`がクラッシュしないことのみ確認済み。
+- `GetProcessMemoryInfo`によるメモリ計測値の妥当性（Linuxビルドでは常に0を返す設計）。
+- `audioDeviceAboutToStart`の2回目以降呼び出し（WASAPIのフォーマット変更時の自動再起動）が実際に発生し`reopenRequestedFlag`が意図どおり立つこと。
+- 1時間連続動作でのログの傾向（アンダーラン増加なし・レイテンシ変動2ms以内・メモリ増加1MB以内）はT-008で検証する。
+
+### 次回開始位置
+- T-008（連続動作検証・実機テスト手順）。T-005（層2配線、別worktree）とのマージ後、Engine.cppまわりの競合有無を確認すること。
+
+---
+
 ## 2026-09-28 T-006 修正2回目: レビュー指摘4件（矢印キー・NaN・データ競合・アクセシビリティ）
 
 ### 実施内容

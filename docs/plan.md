@@ -223,7 +223,7 @@ Action update (int64 nowMs, uint64 inCount, uint64 outCount, bool errorFlag, boo
 bool isFailed() const noexcept;
 ```
 
-2秒カウンタが進まない・エラーフラグ・再オープン要求のいずれかで`CloseAndFail`。異常状態の間は、一覧変更通知が来てデバイスがあれば即`TryReopen`、それ以外は2秒ごとに`TryReopen`。片方だけの異常でも両方を閉じ、両方揃ってから両方開き直す（D-009）。
+入力・出力それぞれのコールバックカウンタがどちらか一方でも2秒進まない・エラーフラグ・再オープン要求・「一覧変更通知あり かつ 使用中デバイスが一覧に無い」のいずれかで`CloseAndFail`。異常状態の間は、一覧変更通知が来てデバイスがあれば即`TryReopen`、それ以外は2秒ごとに`TryReopen`。片方だけの異常でも両方を閉じ、両方揃ってから両方開き直す（D-009）。
 
 **StatsLog（core）**: `juce::String formatStatsLine (const StatsSnapshot&)`と`void resetIfLarger (const juce::File&, juce::int64 limitBytes)`。60秒タイマーと追記はMain.cpp。
 

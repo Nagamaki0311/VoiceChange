@@ -14,15 +14,89 @@ bool containsCableInput (const juce::StringArray& deviceNames) noexcept
     return false;
 }
 
+juce::String pickDefaultInputName (const juce::StringArray& names)
+{
+    return names.isEmpty() ? juce::String() : names[0];
+}
+
+juce::String pickDefaultOutputName (const juce::StringArray& names)
+{
+    for (const auto& n : names)
+        if (n.containsIgnoreCase ("CABLE Input"))
+            return n;
+
+    return names.isEmpty() ? juce::String() : names[0];
+}
+
+namespace
+{
+// 32bitのTime::getMillisecondCounter()は約49.7日でラップするため、ラップしない64bit値にして使う。
+juce::int64 monotonicMs() noexcept
+{
+    return (juce::int64) juce::Time::getMillisecondCounterHiRes();
+}
+} // namespace
+
 // ===== SECTION: コールバッククラス =====
+
+// audioDeviceAboutToStart/audioDeviceStoppedの検出はInputCallback・OutputCallbackで共通のため、
+// 小さなヘルパーにまとめる(継承ではなくメンバとして持つ。両クラスの主目的はコールバック処理そのもの)。
+class StartStopWatcher
+{
+public:
+    // 2回目以降のaboutToStartでレート・バッファ長が変化していれば、再オープン要求を立て、出力を無音にする
+    // (docs/plan.md 2.5節「AudioIO」)。
+    void aboutToStart (juce::AudioIODevice* device, std::atomic<bool>& reopenRequestedFlag,
+                       std::atomic<bool>& muteOutputFlag) noexcept
+    {
+        if (device == nullptr)
+            return;
+
+        const double rate = device->getCurrentSampleRate();
+        const int bufferSize = device->getCurrentBufferSizeSamples();
+
+        if (hasStartedOnce && (rate != lastRate || bufferSize != lastBufferSize))
+        {
+            reopenRequestedFlag.store (true, std::memory_order_relaxed);
+            muteOutputFlag.store (true, std::memory_order_relaxed);
+        }
+
+        hasStartedOnce = true;
+        lastRate = rate;
+        lastBufferSize = bufferSize;
+    }
+
+    // こちらからのclose()中のstop()以外でstopped()が呼ばれた場合は異常とみなす。JUCE 9のWASAPIは抜去・
+    // セッション失効・サンプルレート変更でhandleAsyncUpdate()→close()→stop()→stopped()を呼ぶため、
+    // これが即時検出経路になる。入力専用スレッドの1秒タイムアウトによる無言終了では呼ばれず、そちらは
+    // コールバック回数の停滞で検出する(D-016)。
+    static void stopped (const std::atomic<bool>& expectingIntentionalStop, std::atomic<bool>& deviceStoppedFlag) noexcept
+    {
+        if (! expectingIntentionalStop.load (std::memory_order_relaxed))
+            deviceStoppedFlag.store (true, std::memory_order_relaxed);
+    }
+
+private:
+    bool hasStartedOnce = false;
+    double lastRate = 0.0;
+    int lastBufferSize = 0;
+};
 
 class AudioIO::InputCallback final : public juce::AudioIODeviceCallback
 {
 public:
     explicit InputCallback (AudioIO& ownerIn) : owner (ownerIn) {}
 
-    void audioDeviceAboutToStart (juce::AudioIODevice*) override {}
-    void audioDeviceStopped() override {}
+    void audioDeviceAboutToStart (juce::AudioIODevice* device) override
+    {
+        watcher.aboutToStart (device, owner.reopenRequestedFlag, owner.muteOutputFlag);
+    }
+
+    void audioDeviceStopped() override
+    {
+        StartStopWatcher::stopped (owner.expectingIntentionalStop, owner.deviceStoppedFlag);
+    }
+
     void audioDeviceError (const juce::String&) override { owner.errorFlag.store (true, std::memory_order_relaxed); }
 
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels,
@@ -80,6 +154,7 @@ public:
 
 private:
     AudioIO& owner;
+    StartStopWatcher watcher;
 };
 
 class AudioIO::OutputCallback final : public juce::AudioIODeviceCallback
@@ -87,8 +162,16 @@ class AudioIO::OutputCallback final : public juce::AudioIODeviceCallback
 public:
     explicit OutputCallback (AudioIO& ownerIn) : owner (ownerIn) {}
 
-    void audioDeviceAboutToStart (juce::AudioIODevice*) override {}
-    void audioDeviceStopped() override {}
+    void audioDeviceAboutToStart (juce::AudioIODevice* device) override
+    {
+        watcher.aboutToStart (device, owner.reopenRequestedFlag, owner.muteOutputFlag);
+    }
+
+    void audioDeviceStopped() override
+    {
+        StartStopWatcher::stopped (owner.expectingIntentionalStop, owner.deviceStoppedFlag);
+    }
+
     void audioDeviceError (const juce::String&) override { owner.errorFlag.store (true, std::memory_order_relaxed); }
 
     void audioDeviceIOCallbackWithContext (const float* const* /*inputChannelData*/, int /*numInputChannels*/,
@@ -102,7 +185,14 @@ public:
         // D-012: 連続換算充填量の基準時刻。push側と同じ単調時計。
         const double now = juce::Time::getMillisecondCounterHiRes() * 0.001;
 
-        try
+        if (owner.muteOutputFlag.load (std::memory_order_relaxed))
+        {
+            // レート/バッファ長が変わった後は、再オープンされるまで無音（誤ったレートの音を出さない）。
+            for (int ch = 0; ch < numOutputChannels; ++ch)
+                if (float* out = outputChannelData[ch])
+                    juce::FloatVectorOperations::clear (out, numSamples);
+        }
+        else try
         {
             float* const mono = owner.monoScratch.data();
             const int scratchSize = (int) owner.monoScratch.size();
@@ -150,6 +240,7 @@ public:
 
 private:
     AudioIO& owner;
+    StartStopWatcher watcher;
 };
 
 // ===== SECTION: AudioIO =====
@@ -157,10 +248,18 @@ private:
 AudioIO::AudioIO()
 {
     createDeviceTypes();
+    startTimer (500); // ConnectionMonitorの評価(docs/plan.md 2.5節「AudioIO」)。デバイス未オープン中も動かし続ける。
 }
 
 AudioIO::~AudioIO()
 {
+    stopTimer();
+
+    for (auto* t : deviceTypesLowLatency)
+        t->removeListener (this);
+    for (auto* t : deviceTypesShared)
+        t->removeListener (this);
+
     close();
 }
 
@@ -186,6 +285,12 @@ void AudioIO::createDeviceTypes()
         deviceTypesLowLatency.add (types.removeAndReturn (0));
     }
 #endif
+
+    // 一覧変更通知(audioDeviceListChanged)をConnectionMonitorの評価に流す(docs/plan.md 2.5節)。
+    for (auto* t : deviceTypesLowLatency)
+        t->addListener (this);
+    for (auto* t : deviceTypesShared)
+        t->addListener (this);
 }
 
 juce::AudioIODeviceType* AudioIO::nameListType() const
@@ -277,25 +382,50 @@ std::unique_ptr<juce::AudioIODevice> AudioIO::openOneDevice (const juce::String&
 
 bool AudioIO::open (const juce::String& inName, const juce::String& outName)
 {
+    startedThisGeneration = false; // 新しい世代。startに一度も成功していない間の失敗はE4扱い(D-016)
+    return openDevices (inName, outName);
+}
+
+bool AudioIO::openDevices (const juce::String& inName, const juce::String& outName)
+{
     close();
 
-    errorText.clear();
+    // 成功・失敗を問わず記録する(ConnectionMonitorのTryReopenが同じ名前で開き直すため。D-009)。
+    desiredInputName = inName;
+    desiredOutputName = outName;
 
+    errorText.clear();
+    failedSide = FailedSide::None;
+
+    // 入力が失敗したら出力は開かない(再試行のたびに出力デバイスを低遅延モードで開閉しないため)。
+    // その場合の失敗側は、出力名が一覧に無い(または空)ならBoth、あればInput。
+    // 入力が開けて出力が失敗した場合は、成功した入力を閉じてOutput。
     DeviceInfo newInputInfo, newOutputInfo;
     auto newInputDevice = openOneDevice (outName, inName, true, newInputInfo);
+    std::unique_ptr<juce::AudioIODevice> newOutputDevice;
 
-    if (newInputDevice == nullptr)
+    if (newInputDevice != nullptr)
+        newOutputDevice = openOneDevice (outName, inName, false, newOutputInfo);
+
+    if (newInputDevice == nullptr || newOutputDevice == nullptr)
     {
-        errorText = "入力デバイスを開けませんでした: " + inName;
-        return false;
-    }
+        if (newInputDevice != nullptr)
+            newInputDevice->close();
 
-    auto newOutputDevice = openOneDevice (outName, inName, false, newOutputInfo);
+        if (newInputDevice != nullptr)
+            failedSide = FailedSide::Output;
+        else
+            failedSide = (outName.isNotEmpty() && getOutputNames().contains (outName)) ? FailedSide::Input : FailedSide::Both;
 
-    if (newOutputDevice == nullptr)
-    {
-        newInputDevice->close();
-        errorText = "出力デバイスを開けませんでした: " + outName;
+        // 日本語はfromUTF8(生のリテラルはLatin-1として解釈され文字化けする)。
+        const auto inText = juce::String::fromUTF8 ("入力デバイスを開けませんでした: ") + inName;
+        const auto outText = juce::String::fromUTF8 ("出力デバイスを開けませんでした: ") + outName;
+        errorText = failedSide == FailedSide::Input ? inText
+                  : failedSide == FailedSide::Output ? outText
+                  : inText + "\n" + outText;
+
+        // 一度も動いていなくても2秒ごとの再試行は続ける(D-009)。
+        connectionMonitor.enterFailed (monotonicMs());
         return false;
     }
 
@@ -319,6 +449,9 @@ bool AudioIO::open (const juce::String& inName, const juce::String& outName)
     engine.prepare ({ outputInfo.rate, maxOutBlock });
 
     errorFlag.store (false, std::memory_order_relaxed);
+    deviceStoppedFlag.store (false, std::memory_order_relaxed);
+    reopenRequestedFlag.store (false, std::memory_order_relaxed);
+    muteOutputFlag.store (false, std::memory_order_relaxed);
     inputCallbackCount.store (0, std::memory_order_relaxed);
     outputCallbackCount.store (0, std::memory_order_relaxed);
     cpuLoad.store (0.0f, std::memory_order_relaxed);
@@ -329,11 +462,20 @@ bool AudioIO::open (const juce::String& inName, const juce::String& outName)
     inputDevice->start (inputCallback.get());
     outputDevice->start (outputCallback.get());
 
+    // 新しいコールバック回数(0)を基準にウォッチドッグを再開する(D-009: 両方揃ってから開き直す)。
+    connectionMonitor = ConnectionMonitor {};
+    reconnectStartMs = 0;
+    startedThisGeneration = true;
+
     return true;
 }
 
 void AudioIO::close()
 {
+    // stop()自体がaudioDeviceStopped()を呼ぶため、こちらからの意図した停止であることを
+    // 先に伝えておく(異常終了の誤検出を防ぐ。D-016)。
+    expectingIntentionalStop.store (true, std::memory_order_relaxed);
+
     if (inputDevice != nullptr)
     {
         inputDevice->stop();
@@ -350,6 +492,8 @@ void AudioIO::close()
 
     inputCallback.reset();
     outputCallback.reset();
+
+    expectingIntentionalStop.store (false, std::memory_order_relaxed);
 }
 
 LatencyBreakdown AudioIO::getLatency() const noexcept
@@ -382,6 +526,88 @@ LatencyBreakdown AudioIO::getLatency() const noexcept
 juce::String AudioIO::getErrorText() const
 {
     return errorText;
+}
+
+// ===== SECTION: T-007 再接続・エラー表示 =====
+
+double AudioIO::getReconnectElapsedSeconds() const noexcept
+{
+    if (! isReconnecting())
+        return 0.0;
+
+    return juce::jmax (0.0, (double) (monotonicMs() - reconnectStartMs) * 0.001);
+}
+
+bool AudioIO::hasRecentEngineError() const noexcept
+{
+    if (lastEngineErrorMs == 0)
+        return false;
+
+    return (monotonicMs() - lastEngineErrorMs) < 10000;
+}
+
+juce::String AudioIO::getLastEngineErrorTimeText() const noexcept
+{
+    return lastEngineErrorWallClock.formatted ("%H:%M:%S");
+}
+
+void AudioIO::timerCallback()
+{
+    // Engineのエラーフラグ(bit0: 非有限値, bit1: 例外)はここだけが読んで消費する(design.md 6.1節 E5)。
+    if (engine.getErrorFlags() != 0)
+    {
+        engine.clearErrorFlags();
+        lastEngineErrorMs = monotonicMs();
+        lastEngineErrorWallClock = juce::Time::getCurrentTime();
+    }
+
+    evaluateConnection (listChangedFlag.exchange (false, std::memory_order_relaxed));
+}
+
+void AudioIO::evaluateConnection (bool listChangedThisTick)
+{
+    // 起動時にデバイスが0件で名前が決まらなかった側は、既定デバイスが現れた時点で採用して開く
+    // (監視の対象が決まっていないため、ConnectionMonitorの評価より先に扱う)。
+    if (desiredInputName.isEmpty() || desiredOutputName.isEmpty())
+    {
+        const auto inName = desiredInputName.isNotEmpty() ? desiredInputName : pickDefaultInputName (getInputNames());
+        const auto outName = desiredOutputName.isNotEmpty() ? desiredOutputName : pickDefaultOutputName (getOutputNames());
+
+        if (inName.isNotEmpty() && outName.isNotEmpty())
+            openDevices (inName, outName);
+
+        return;
+    }
+
+    // (1)audioDeviceError・例外、(2)こちらのstop()以外でのaudioDeviceStopped(抜去・レート変更の即時検出)を合成して
+    // ConnectionMonitorのerrorFlagにする。
+    const bool combinedError = errorFlag.exchange (false, std::memory_order_relaxed)
+                              || deviceStoppedFlag.exchange (false, std::memory_order_relaxed);
+    const bool reopenReq = reopenRequestedFlag.exchange (false, std::memory_order_relaxed);
+
+    const bool devicesPresent = getInputNames().contains (desiredInputName)
+                               && getOutputNames().contains (desiredOutputName);
+
+    const auto nowMs = monotonicMs();
+
+    const auto action = connectionMonitor.update (nowMs,
+        inputCallbackCount.load (std::memory_order_relaxed),
+        outputCallbackCount.load (std::memory_order_relaxed),
+        combinedError, reopenReq, devicesPresent, listChangedThisTick);
+
+    if (action == ConnectionMonitor::Action::CloseAndFail)
+    {
+        reconnectStartMs = nowMs;
+        close(); // D-009: 片方だけの異常でも両方閉じる(inputDevice/outputDeviceを個別に見ない)
+    }
+    else if (action == ConnectionMonitor::Action::TryReopen)
+    {
+        // D-009: 保存済みデバイスが見つからない間も既定へは切り替えない。開き直しを試すのは両方の名前が
+        // 一覧にあるときだけ(無いときは一覧の変化を待つ。変化すればConnectionMonitorが即TryReopenを返す)。
+        // 世代は進めない(一度動いていたなら、再試行が失敗してもE1〜E3のまま)。
+        if (devicesPresent)
+            openDevices (desiredInputName, desiredOutputName); // 成功時はconnectionMonitorがリセットされる
+    }
 }
 
 } // namespace vc
