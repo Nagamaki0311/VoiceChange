@@ -36,6 +36,7 @@
 
 ### 次回開始位置
 - T-005（`src/core/Effects.*`、`src/core/PitchDetector.*`、`src/core/Engine.cpp`層2部分、`tests/EffectsTests.cpp`）に着手可能。F1〜F3はdocs/plan.mdの更新どおりf0=150Hzを合格基準、f0=100Hzを特性確認とする。
+- T-004はローカル検証（ctest全件合格・xvfb-runでクラッシュなし）まで完了した。docs/tasks.mdの状態更新（実装中→完了）とReviewerによるコードレビューはManager判断で行う。
 
 ---
 
