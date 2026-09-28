@@ -336,6 +336,7 @@ private:
         expect (peakFifoPath <= 1.0, "bypass via ResamplingFifo: peak " + juce::String (peakFifoPath, 4) + " exceeds 1.0");
         expect (peakDirect <= 1.0, "bypass direct with hot input: peak " + juce::String (peakDirect, 4) + " exceeds 1.0");
         expectEquals ((int) engine.getErrorFlags(), 0);
+        expectEquals ((int) direct.getErrorFlags(), 0);
     }
 
     // ----- E5: NaN/Inf注入 -----
