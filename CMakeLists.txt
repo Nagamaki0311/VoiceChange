@@ -118,3 +118,5 @@ function(vc_add_test test_name category)
 endfunction()
 
 vc_add_test(smoke Smoke)
+vc_add_test(ring_buffer RingBuffer)
+vc_add_test(ring_buffer_long RingBufferLong long)

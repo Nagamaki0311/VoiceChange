@@ -1,7 +1,11 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include "AudioIO.h"
+
 // ===== SECTION: MainWindow =====
-// T-002時点では空の固定サイズウィンドウのみ。UI本体はT-006（MainComponent）で追加する。
+// UI本体はT-006（MainComponent）で追加する。T-003時点では起動時に既定の入出力デバイスで
+// AudioIOを開くだけ。Linux（Xvfb環境）ではオーディオデバイスが無いことがあるため、
+// open()が失敗してもクラッシュしない（エラーテキストが残るだけ。表示はT-006/T-007）。
 
 namespace
 {
@@ -50,10 +54,20 @@ public:
     void initialise (const juce::String&) override
     {
         mainWindow = std::make_unique<VoiceChangeMainWindow>();
+
+        // 既定の入力・出力デバイス(一覧の先頭)で開く。開けなくてもクラッシュしない
+        // （Linux/Xvfb環境ではデバイスが無い場合がある。デバイス未検出・保存済み設定からの
+        // 復元・エラー表示はT-006/T-007で扱う）。
+        const auto inputNames = audioIO.getInputNames();
+        const auto outputNames = audioIO.getOutputNames();
+
+        if (! inputNames.isEmpty() && ! outputNames.isEmpty())
+            audioIO.open (inputNames[0], outputNames[0]);
     }
 
     void shutdown() override
     {
+        audioIO.close();
         mainWindow = nullptr;
     }
 
@@ -64,6 +78,7 @@ public:
 
 private:
     std::unique_ptr<VoiceChangeMainWindow> mainWindow;
+    vc::AudioIO audioIO;
 };
 
 START_JUCE_APPLICATION (VoiceChangeApplication)
