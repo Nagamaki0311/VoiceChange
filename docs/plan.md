@@ -127,7 +127,7 @@ void reset() noexcept;                                       // → Resting
 int  getLatencySamples() const noexcept;  // FadingIn / Active / FadingOut のとき inputLatency()+outputLatency()、それ以外0
 State getState() const noexcept;
 struct BlockDecision { int blockMs; bool overBudget; };
-BlockDecision decideStretchBlock (double deviceLatencyMs, double ringTargetMs) noexcept; // clamp(50 − dev − ring − 2, 20, 40)
+// ブロック長は120ms・インターバル30msに固定（D-014。decideStretchBlockは廃止）
 ```
 
 状態遷移（20msのクロスフェード。各ランプは現在のゲイン値から続けて動かし、途中で逆向きに戻しても不連続にしない）:
@@ -210,7 +210,7 @@ String getErrorText() const;
 
 - WASAPIの型インスタンスを2つ（`sharedLowLatency`と`shared`）持ち、両方で`scanForDevices()`。
 - 入力と出力それぞれ、まず低遅延モードで`createDevice` + `open(全ch, rate 0, getAvailableBufferSizes()の最小)`、失敗したら共有モードで開き直す。
-- 開いた後: デバイス遅延 = `getInput/OutputLatencyInSamples()/rate`、リング目標 = max(各バッファ長) + 2ms、`decideStretchBlock`、`Engine::prepare`と`ResamplingFifo::prepare`。その後、入力、出力の順で`start`。
+- 開いた後: デバイス遅延 = `getInput/OutputLatencyInSamples()/rate`、リング目標 = max(各バッファ長) + 2ms、`Engine::prepare`（ブロック長は120ms固定、D-014）と`ResamplingFifo::prepare`。その後、入力、出力の順で`start`。
 - コールバックは入力用と出力用の内部クラスに分ける。どちらも`ScopedNoDenormals`とtry/catch、呼び出し回数のatomicカウンタ。出力は`getHighResolutionTicks`で計時し、pull → Engine → 全チャンネルへ複製。
 - `audioDeviceError`ではatomicフラグだけ立てる。`audioDeviceAboutToStart`の2回目以降でレートやバッファ長が変わっていたら、出力を無音にするフラグと再オープン要求フラグを立てる。
 - Linuxでは`AudioDeviceManager::createAudioDeviceTypes`で得た先頭の型を1つだけ使う。
@@ -311,7 +311,7 @@ S8: underruns合計9以下、10分以降0、ジッタ余裕 ≤ 20ms、b〜fはt
 | P2 | 全遷移のクリック | Resting→Active、Active→Resting、Priming中の中止、FadingIn中の反転、FadingOut中の反転を、200Hz・A=0.3の正弦で判定器にかけて合格 |
 | P3 | 移調精度 | 220Hz正弦、±12、±5、+8、−6半音。FFTピークが 220·2^(s/12) の±1% |
 | P4 | 層1ピッチでフォルマント保持 | 合成母音（f0=100Hz、/a/: F1=730, F2=1090, F3=2440）、±5半音。f0比±1%、包絡スケール s = 1.0±10% |
-| P5 | ブロック長 | (dev10, ring12) → 26ms。(30, 15) → 20ms・overBudget=true。(0, 2) → 40ms |
+| P5 | ブロック長 | 48kHz・44.1kHz・96kHzで inputLatency+outputLatency が120ms×[0.95, 1.05]（D-014） |
 | E1 | ゲイン | 1kHz・-20dBFSで+6dB → 補間完了後のRMSが+6dB±0.1dB。変更時のクリックなし |
 | E2 | リミッター | ゲイン+20dBで0dBFS級の正弦 → 全サンプル |x| ≤ 1.0。-20dBFS・ゲイン0dBでRMS変化 ≤ 0.1dB（透過性） |
 | E3 | リバーブ | r: 0→0.01でRMS変化 ≤ 0.5dB。r=0.5で入力停止後200msのRMSが入力比-40dB超。r→0の補間完了後はリバーブ停止 |
