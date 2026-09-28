@@ -32,6 +32,7 @@
 - 修正前（High1未修正のEngine + 新E9）: E9は224通り中10通り失敗。最悪比（上限1.5）は切替位置7で5.248（normal→robot）、11で7.007（normal→robot）。内訳: normal→robot 5.25/7.01、normal→talkbox 2.87/3.83、helium→robot 4.25/4.07、helium→talkbox 4.25/4.07、kerokero→robot 1.57（位置7）、giant→robot 1.57（位置11）。10msアタックのonsetは1.297/1.292で合格。なお切替位置をずらしても判定窓が切替直後から始まる旧方式では、未修正のEngineでも全件合格して段差を検出できなかった。
 - 修正後: E9は224/224合格。連続発声中の最悪比は位置7で1.295、11で1.289（normal→talkbox）。10msアタックのonsetは1.297/1.292（kerokero→talkbox）。0msアタックの参考値は、offset 0（入力自体に段差なし）で1.944（minion→helium）、offset 7（入力自体に段差あり）で5.847（normal→minion）。D-017の結論は変わらない。
 - E5（ミニオン・ケロケロ・トークボックス、NaN/Inf）とE7（全56通りの切替）も合格。
+- 全件（`ctest --test-dir build --output-on-failure`、quick 6件+long 1件）を実行し7件すべて成功（合計69.2秒）。
 
 ### 次回開始位置
 - T-008。
