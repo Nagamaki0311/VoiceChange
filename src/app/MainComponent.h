@@ -248,6 +248,7 @@ private:
     void applyReverbFromSlider();
 
     void applyToggle();
+    void refreshEnabledAppearance();
 
     void updateStatus (bool slowUpdate);
     void announceIfChanged (const juce::String& newMessage, bool isWarnOrError);
@@ -285,10 +286,6 @@ private:
 
     // W1(VB-CABLE未検出)は起動時にしか判定しない(design.md 6.2節)。
     bool vbCableMissing = false;
-
-    // E5(異常値・例外)は検出後10秒間表示する(design.md 6.1節)。0は非表示。
-    juce::int64 errorUntilMs = 0;
-    juce::String errorTimestampText;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

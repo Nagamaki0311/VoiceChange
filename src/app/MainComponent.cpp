@@ -693,19 +693,20 @@ MainComponent::~MainComponent()
 
 void MainComponent::createPresetButtons()
 {
-    struct PresetUiInfo { Preset preset; const char* label; const char* tooltip; };
+    struct PresetUiInfo { Preset preset; const char* tooltip; };
 
     // design.md 3.3節のレイアウト表どおりの表示順（種類別。内部のPreset/kPresetsの並びとは異なる）。
-    // UI表示名と内部識別子の対照表はsrc/core/Params.hのenum直上コメントを正とする。
+    // UI表示名(ボタンのラベル)はvc::presetDisplayName()を正とする(src/core/Params.h。トレイの
+    // ツールチップと共有)。ここではその並び順とツールチップの説明文だけを持つ。
     static const PresetUiInfo kOrder[8] = {
-        { Preset::Normal,   "ノーマル",       "特殊効果なし（音響卓の設定だけを反映）" },
-        { Preset::Helium,   "ヘリウム",       "音程はそのままで、声質だけを細く軽くする" },
-        { Preset::Minion,   "ミニオン",       "声を高くして、小さなキャラクター風にする" },
-        { Preset::Giant,    "ジャイアント",   "声を低くして、大柄なキャラクター風にする" },
-        { Preset::Echo,     "エコー",         "やまびこのように声が繰り返し響く" },
-        { Preset::Kerokero, "ケロケロ",       "音程を半音単位に吸着させる" },
-        { Preset::Robot,    "ロボット",       "金属的な響きのロボット声にする" },
-        { Preset::Talkbox,  "トークボックス", "声の抑揚をシンセサイザーの音色に乗せる" },
+        { Preset::Normal,   "特殊効果なし（音響卓の設定だけを反映）" },
+        { Preset::Helium,   "音程はそのままで、声質だけを細く軽くする" },
+        { Preset::Minion,   "声を高くして、小さなキャラクター風にする" },
+        { Preset::Giant,    "声を低くして、大柄なキャラクター風にする" },
+        { Preset::Echo,     "やまびこのように声が繰り返し響く" },
+        { Preset::Kerokero, "音程を半音単位に吸着させる" },
+        { Preset::Robot,    "金属的な響きのロボット声にする" },
+        { Preset::Talkbox,  "声の抑揚をシンセサイザーの音色に乗せる" },
     };
 
     constexpr int colX[4] = { 20, 127, 234, 341 };
@@ -714,12 +715,13 @@ void MainComponent::createPresetButtons()
     for (int i = 0; i < 8; ++i)
     {
         const auto& info = kOrder[(size_t) i];
+        const juce::String label = presetDisplayName (info.preset);
 
-        auto button = std::make_unique<juce::TextButton> (juce::String::fromUTF8 (info.label));
+        auto button = std::make_unique<juce::TextButton> (label);
         button->setClickingTogglesState (true);
         button->setRadioGroupId (1001, juce::dontSendNotification);
         button->getProperties().set ("presetIndex", (int) info.preset);
-        button->setTitle (juce::String::fromUTF8 (info.label));
+        button->setTitle (label);
         button->setDescription (juce::String::fromUTF8 (info.tooltip));
         button->setTooltip (juce::String::fromUTF8 (info.tooltip));
         button->setExplicitFocusOrder (6 + i);
@@ -798,6 +800,11 @@ void MainComponent::applyToggle()
     audioIO.engineParams().enabled.store (on, std::memory_order_relaxed);
     settings.setValue ("enabled", on);
 
+    refreshEnabledAppearance();
+}
+
+void MainComponent::refreshEnabledAppearance()
+{
     updateSliderAppearance (gainSlider);
     updateSliderAppearance (pitchSlider);
     updateSliderAppearance (reverbSlider);
@@ -1027,8 +1034,42 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
     // ----- コンボボックスのエラー表示(design.md 3.5節「切断状態」) -----
     const bool inputMissingFromList = currentDesiredInputName.isNotEmpty() && ! inputNames.contains (currentDesiredInputName);
     const bool outputMissingFromList = currentDesiredOutputName.isNotEmpty() && ! outputNames.contains (currentDesiredOutputName);
-    const bool inputError = inputMissingFromList || inputSideFailed || noInputDevices;
-    const bool outputError = outputMissingFromList || outputSideFailed;
+
+    // ----- デバイス切断・再接続中(design.md 6.1節 E1〜E3、6.2節) -----
+    // 保存デバイス名が一覧から消えていれば入力/出力を個別に特定できる(E1/E2)。どちらも一覧にある
+    // (ドライバが無言で止まった等)場合はE3とし、どちらの行が原因か特定できないため両方を赤くする。
+    const bool reconnecting = audioIO.isReconnecting();
+    const int reconnectElapsedSec = (int) audioIO.getReconnectElapsedSeconds();
+    bool reconnectInputRed = false, reconnectOutputRed = false;
+    juce::String reconnectMessage;
+
+    if (reconnecting)
+    {
+        const juce::String elapsedText = juce::String (reconnectElapsedSec) + juce::String::fromUTF8 ("秒経過");
+
+        if (inputMissingFromList)
+        {
+            reconnectMessage = juce::String::fromUTF8 ("入力デバイスが切断されました。再接続を試みています（")
+                               + elapsedText + juce::String::fromUTF8 ("）…");
+            reconnectInputRed = true;
+        }
+        else if (outputMissingFromList)
+        {
+            reconnectMessage = juce::String::fromUTF8 ("出力デバイスが切断されました。再接続を試みています（")
+                               + elapsedText + juce::String::fromUTF8 ("）…");
+            reconnectOutputRed = true;
+        }
+        else
+        {
+            reconnectMessage = juce::String::fromUTF8 ("音声が止まっています。デバイスを開き直しています（")
+                               + elapsedText + juce::String::fromUTF8 ("）…");
+            reconnectInputRed = true;
+            reconnectOutputRed = true;
+        }
+    }
+
+    const bool inputError = inputMissingFromList || inputSideFailed || noInputDevices || reconnectInputRed;
+    const bool outputError = outputMissingFromList || outputSideFailed || reconnectOutputRed;
 
     inputCombo.getProperties().set ("errorState", inputError);
     outputCombo.getProperties().set ("errorState", outputError);
@@ -1040,13 +1081,9 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
         outputError ? juce::Colour (AppLookAndFeel::error) : juce::Colour (AppLookAndFeel::textSecondary));
 
     // ----- E5(異常値・例外): 検出後10秒間表示する(design.md 6.1節) -----
-    if (audioIO.getEngineErrorFlags() != 0)
-    {
-        audioIO.clearEngineErrorFlags();
-        errorUntilMs = (juce::int64) juce::Time::getMillisecondCounter() + 10000;
-        errorTimestampText = juce::Time::getCurrentTime().formatted ("%H:%M:%S");
-    }
-    const bool e5Active = errorUntilMs != 0 && (juce::int64) juce::Time::getMillisecondCounter() < errorUntilMs;
+    // 元のフラグ(Engine::getErrorFlags())はAudioIOの500msタイマーだけが読んで消費する(複数箇所からの
+    // 重複クリアを避けるため。T-007でトレイも同じ情報を必要とするようになった)。
+    const bool e5Active = audioIO.hasRecentEngineError();
 
     const auto latency = audioIO.getLatency();
     const bool shifterResting = latency.shifterMs <= 0.0;
@@ -1072,16 +1109,36 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
     data.inputModeWarn = w2Active && ! inInfo.lowLatency;
     data.outputModeWarn = w2Active && ! outInfo.lowLatency;
 
-    const bool bypassed = ! audioIO.engineParams().enabled.load (std::memory_order_relaxed);
+    const bool engineEnabled = audioIO.engineParams().enabled.load (std::memory_order_relaxed);
+    const bool bypassed = ! engineEnabled;
+
+    // トレイのメニューからON/OFFを切り替えた場合、このウィンドウ側の表示にも反映する(T-007)。
+    // クリック起点の変更はapplyToggle()がその場で反映するため、ここでは食い違いのときだけ追従する。
+    if (toggleButton.getToggleState() != engineEnabled)
+    {
+        toggleButton.setToggleState (engineEnabled, juce::dontSendNotification);
+        refreshEnabledAppearance();
+    }
 
     juce::String message;
     bool isWarnOrError = false;
 
-    if ((! isOpen) && errText.isEmpty() && ! noInputDevices)
+    if ((! isOpen) && errText.isEmpty() && ! noInputDevices && ! reconnecting)
     {
         // 起動中(design.md 6.1節)。Main.cppは起動時に同期的にopen()するため通常はほぼ一瞬で終わる。
         data.delayStarting = true;
         message = juce::String::fromUTF8 ("デバイスを開いています…");
+    }
+    else if (reconnecting)
+    {
+        // E1〜E3(design.md 6.1節・6.2節、優先順位1〜2)。デバイス切断・再接続中は遅延を"—"にする。
+        data.delayAsDash = true;
+        message = reconnectMessage;
+        data.icon = StatusData::IconKind::Error;
+        data.messageBold = true;
+        data.lineColour = juce::Colour (AppLookAndFeel::error);
+        data.messageColour = juce::Colour (AppLookAndFeel::error);
+        isWarnOrError = true;
     }
     else if (noInputDevices)
     {
@@ -1107,7 +1164,7 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
     else if (e5Active)
     {
         message = juce::String::fromUTF8 ("音声処理で異常を検出したため、一瞬無音にして復旧しました（")
-                   + errorTimestampText + juce::String::fromUTF8 ("）");
+                   + audioIO.getLastEngineErrorTimeText() + juce::String::fromUTF8 ("）");
         data.icon = StatusData::IconKind::Error;
         data.messageBold = true;
         data.lineColour = juce::Colour (AppLookAndFeel::error);

@@ -103,6 +103,26 @@ struct SavedSettings
     bool trayNoticeShown = false; // 初回のトレイ格納通知を表示済みか
 };
 
+// プリセットのUI表示名(design.md、対照表は本ファイル冒頭のPreset enum定義直上のコメントを正とする)。
+// MainComponentのプリセットボタン(表示順は種類別。src/app/MainComponent.cppのkOrder参照)と
+// Main.cppのトレイのツールチップ(design.md 7.1節)の両方から参照する、名前の単一の出典。
+inline juce::String presetDisplayName (Preset p) noexcept
+{
+    switch (p)
+    {
+        case Preset::Normal:   return juce::String::fromUTF8 ("ノーマル");
+        case Preset::Echo:     return juce::String::fromUTF8 ("エコー");
+        case Preset::Helium:   return juce::String::fromUTF8 ("ヘリウム");
+        case Preset::Minion:   return juce::String::fromUTF8 ("ミニオン");
+        case Preset::Giant:    return juce::String::fromUTF8 ("ジャイアント");
+        case Preset::Kerokero: return juce::String::fromUTF8 ("ケロケロ");
+        case Preset::Robot:    return juce::String::fromUTF8 ("ロボット");
+        case Preset::Talkbox:  return juce::String::fromUTF8 ("トークボックス");
+    }
+
+    return juce::String::fromUTF8 ("ノーマル");
+}
+
 // 不明なプリセット名はNormalにする。大文字小文字は区別しない
 // （設定ファイルを手で編集された場合でも壊れた状態にしないため）。
 inline Preset presetFromId (const juce::String& id) noexcept

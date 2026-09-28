@@ -325,3 +325,27 @@
 - 低い男性の声（f0=80〜100Hz程度）で層1ピッチ（またはヘリウム・ミニオン・ジャイアント等の移調プリセット）を使うと、声質（フォルマント）がわずかに移調方向へ動く。READMEに既知の制限として記載する。
 - T-005のF1〜F3もP4a/P4bと同じ方針（f0=150Hzを合格基準、f0=100Hzを特性確認）で実装する。
 - `setFormantBase`によるフォルマント補償の改善は選択肢から除外する（実験で効果なしと確認済み）。ピッチ検出器（T-005）の出力をシフターへ渡す配線自体はケロケロ機能に必要なため別途実装するが、P4の改善目的では行わない。
+
+---
+
+## D-016: T-007のエラー分類・単一消費者化・無言終了の判定
+
+- 日付: 2026-09-28
+- 状態: 採用
+
+### 背景
+- plan.md「AudioIO」「ConnectionMonitor」節は監視ロジックの骨格のみを定義しており、実装時に以下3点の判断が必要だった。
+
+### 決定
+1. **E4（デバイスを開けない）とE1〜E3（切断・再接続中）の切り分け**: ConnectionMonitorは両者を区別しない（両方ともCloseAndFail/TryReopenの単純な繰り返し）。UI側（MainComponent・トレイ）で`AudioIO::isReconnecting()`（ConnectionMonitorが異常状態に入っているか）を最優先の判定にし、まだ異常状態に入っていない起動直後・デバイス変更直後の一瞬だけE4を表示する。異常状態に入った後は、保存デバイス名が一覧から消えていればE1/E2、消えていなければ（ドライバが一覧に残ったまま無言で止まった場合等）E3として両方の行を赤くする。
+2. **Engineのエラーフラグ（bit0非有限値・bit1例外）は`AudioIO`の500msタイマーだけが読んで消費する**: T-006まではMainComponentが直接`engine.getErrorFlags()`/`clearErrorFlags()`を読んで10秒間のE5表示を管理していたが、T-007でトレイのバッジ・ツールチップも同じ情報を必要とするようになった。2箇所が同じedge-triggeredフラグを消費すると早いもの勝ちで取りこぼす。`AudioIO`が唯一の消費者になり、`hasRecentEngineError()`（レベル判定）と`getLastEngineErrorTimeText()`を公開する形に変更した。
+3. **無言終了の検出**: `audioDeviceStopped()`はこちらから`stop()`を呼んだ場合にも呼ばれる。`AudioIO::close()`内で`stop()`を呼ぶ直前だけ`expectingIntentionalStop`を立て、それ以外で`audioDeviceStopped()`が呼ばれた場合だけ無言終了とみなす。
+
+### 理由
+- 1: ConnectionMonitorのインターフェース（`update`/`isFailed`のみ）を変えずに済み、UIごとに異なる文言の使い分けを実現できる。
+- 2: エラーフラグの消費者を1つに絞ることで、取りこぼし・二重クリアの競合を構造的に防げる。
+- 3: JUCEの`AudioIODeviceCallback`契約上、意図した停止と異常停止を区別する手段が`audioDeviceStopped()`自体にはないため。
+
+### 影響
+- MainComponentの`errorUntilMs`/`errorTimestampText`は削除し、`AudioIO`側の値を読むだけにした。
+- 実機でのデバイス抜去・再接続時のE1〜E3表示の切り替わりはWindows実機でのみ確認できる（README「手動確認手順」参照）。
