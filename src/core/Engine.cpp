@@ -175,8 +175,12 @@ void Engine::processChain (float* buf, int n, int presetIdx, int pitchSemis, flo
 
 void Engine::processChunk (float* buf, int n) noexcept
 {
-    const float gainDb = atomicParams.gainDb.load (std::memory_order_relaxed);
-    const float reverbAmt = atomicParams.reverb.load (std::memory_order_relaxed);
+    // 防御: 主対策はParams::sanitize()（設定読み込み時）。ここは読み出し側での最終防御
+    // （レビュー指摘2）で、非有限値が紛れ込んでも初期値として扱い恒久的な無音化を防ぐ。
+    const float rawGainDb = atomicParams.gainDb.load (std::memory_order_relaxed);
+    const float rawReverbAmt = atomicParams.reverb.load (std::memory_order_relaxed);
+    const float gainDb = std::isfinite (rawGainDb) ? rawGainDb : 0.0f;
+    const float reverbAmt = std::isfinite (rawReverbAmt) ? rawReverbAmt : 0.0f;
     const int pitchSemis = atomicParams.pitch.load (std::memory_order_relaxed);
     const int presetIdx = juce::jlimit (0, (int) kPresets.size() - 1, atomicParams.preset.load (std::memory_order_relaxed));
     const bool targetOn = atomicParams.enabled.load (std::memory_order_relaxed);

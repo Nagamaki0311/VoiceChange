@@ -19,6 +19,29 @@
 
 ---
 
+## 2026-09-28 T-006 修正2回目: レビュー指摘4件（矢印キー・NaN・データ競合・アクセシビリティ）
+
+### 実施内容
+- 【High】`src/app/MainComponent.h`: `DeviceComboBox`（`juce::ComboBox`の薄いサブクラス）を追加し`inputCombo`/`outputCombo`をこの型に変更。JUCE既定の`ComboBox::keyPressed()`が上下左右矢印キーで`nudgeSelectedItem()`（選択を直接変更→`onChange`→`audioIO.open()`）を呼んでいたのを、矢印キーは`isPopupActive()`を見て`showPopup()`を呼ぶだけ（選択は変えない）に変更。`showPopupIfNotActive()`はprivateのため`isPopupActive()`ガード付き`showPopup()`で代替。Space/Enter/Alt+↓は基底クラスの既定動作のまま。
+- 【High】`src/core/Params.h`の`sanitize()`: `juce::jlimit`はNaNをそのまま返す（`NaN<lo`も`NaN>hi`もfalseのため）ため、`std::isfinite`チェックを範囲チェックの前に追加し、非有限値は初期値(0.0f)へ丸める。`src/core/Engine.cpp`の`processChunk()`にも同種の防御を1行追加（`atomicParams.gainDb/reverb`の読み出し値が非有限なら0として扱う）。`tests/AppLogicTests.cpp`にNaN/Infの4ケース（gainDb単独NaN、gainDb単独+Inf、reverb単独-Inf、gainDb/reverb同時NaN）を追加。
+- 【Medium】`src/core/PitchShifter.h/.cpp`: `getLatencySamples()`が非atomicな`state`からUIスレッド（`AudioIO::getLatency()`経由）に無同期に読まれていたデータ競合を修正。`std::atomic<int> latencySamplesForUi`を追加し、`process()`の最後と`reset()`内で音声スレッドがrelaxed storeする`updateLatencyForUi()`を呼ぶ。`getLatencySamples()`はそのatomicをloadするだけに変更（`Engine::getShifterLatencySamples()`は変更不要、`shifter.getLatencySamples()`への委譲のまま新しい実装を使う）。
+- 【Low】`src/app/MainComponent.h/.cpp`: `statusPanel`のアクセシビリティ用`setDescription()`を、可視の数値更新（8フレーム≈267ms）とは別に30フレーム（30fps想定で約1秒）ごとに更新する`buildStatusSummary()`を追加。文言はdesign.md 5章の例「遅延 38.4ミリ秒、CPU 0.8パーセント、入力 低遅延、出力 低遅延、正常に動作しています」に合わせた。`updateStatus()`が末尾で`lastStatusData`へキャッシュし、`timerCallback()`の新しい30フレームカウンタからそれを使って組み立てる。
+
+### 結果
+- `cmake --build build --parallel`: 成功（警告は既存コードと同種の`-Wfloat-equal`のみ）。
+- `ctest --test-dir build --output-on-failure`: **全件成功**（smoke, ring_buffer, ring_buffer_long(28.3秒), shifter, engine, app_logic の6件。shifterのP1系レイテンシ表示テストも含めatomic化後に合格を確認）。
+- `xvfb-run -a -s "-screen 0 1280x1024x24" ... --screenshot`: 終了コード0、PNG 460×600。目視で崩れがないことを確認（入出力デバイス0件のE6表示、スライダー単位表示とも従前どおり）。
+- `grep -rnE "mutex|CriticalSection|ScopedLock|SpinLock|DBG\(|Logger::|triggerAsyncUpdate" src/core`: 該当なし。
+
+### 計画からの変更点・環境上の制約
+- Managerからは統合済みブランチ`claude/keen-thompson-ikze8z`（`/home/user/VoiceChange`、T-006はcommit 8e5800bとして取り込み済み）での作業を指示されたが、本エージェントはworktree（`.claude/worktrees/agent-a285f01f6cc97e8b6`）に隔離されており、Edit/Write/Bashのgit操作のいずれも`/home/user/VoiceChange`を対象にすると拒否される（ツールのサンドボックス制約、権限の相談では解除不可）。そのため本修正は同内容を自分のブランチ`t006-ui`（このworktree、T-006本体のcommit 37d8834/26de56d/dfb87d7の続き）に適用した。Manager側で統合済みブランチへの反映（cherry-pick等）が必要。
+- `src/core/Effects.*`・`PitchDetector.*`には触れていない（このworktreeにはT-005がまだ含まれておらず、そもそも存在しない）。
+
+### 次回開始位置
+- Managerが統合済みブランチへ本修正を反映後、T-007（トレイ常駐・切断時の再接続・統計ログ）。
+
+---
+
 ## 2026-09-28 T-006 補足: レビュー往復の最終確認
 
 ### 実施内容

@@ -969,6 +969,15 @@ void MainComponent::timerCallback()
         frameCounter = 0;
         updateStatus (true);
     }
+
+    // design.md 5章「状態パネル: 要約文を1秒に1回まで更新」。可視の数値(8フレーム=約267ms)より
+    // 遅い周期でアクセシビリティの要約文だけを更新する（レビュー指摘4）。
+    ++accessibilityFrameCounter;
+    if (accessibilityFrameCounter >= 30)
+    {
+        accessibilityFrameCounter = 0;
+        statusPanel.setDescription (buildStatusSummary (lastStatusData));
+    }
 }
 
 void MainComponent::announceIfChanged (const juce::String& newMessage, bool isWarnOrError)
@@ -984,6 +993,24 @@ void MainComponent::announceIfChanged (const juce::String& newMessage, bool isWa
 
     lastAnnouncedMessage = newMessage;
     juce::AccessibilityHandler::postAnnouncement (newMessage, juce::AccessibilityHandler::AnnouncementPriority::high);
+}
+
+// design.md 5章の要約例「遅延 38.4ミリ秒、CPU 0.8パーセント、入力 低遅延、出力 低遅延、
+// 正常に動作しています」に合わせた文言を組み立てる（レビュー指摘4）。
+juce::String MainComponent::buildStatusSummary (const StatusData& d) const
+{
+    juce::String delayText;
+
+    if (d.delayStarting)
+        delayText = "--.-";
+    else if (d.delayAsDash)
+        delayText = juce::String::fromUTF8 ("\xE2\x80\x94");
+    else
+        delayText = juce::String (d.delayMs, 1);
+
+    return juce::String::fromUTF8 ("遅延 ") + delayText + juce::String::fromUTF8 ("ミリ秒、CPU ")
+           + juce::String (d.cpuPercent, 1) + juce::String::fromUTF8 ("パーセント、入力 ") + d.inputModeText
+           + juce::String::fromUTF8 ("、出力 ") + d.outputModeText + juce::String::fromUTF8 ("、") + d.message;
 }
 
 void MainComponent::updateStatus (bool /*slowUpdate*/)
@@ -1120,6 +1147,7 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
 
     data.message = message;
     statusPanel.setData (data);
+    lastStatusData = data; // buildStatusSummary()（1秒に1回のアクセシビリティ更新）用
 
     // ----- メーターの数値(design.md 3.5節) -----
     juce::String meterText;

@@ -4,6 +4,7 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
 
 // ===== SECTION: Params =====
 // 層1・層2の共通パラメータ定義。GUI・デバイスに依存しない（vc_core）。
@@ -115,8 +116,17 @@ inline Preset presetFromId (const juce::String& id) noexcept
 
 // 範囲外の値を範囲の端へ丸める。プリセットの文字列からのデコードは呼び出し側で
 // presetFromId()を通してから渡す（このため引数のpresetは常に有効な値として扱う）。
+// レビュー指摘2: juce::jlimitはNaNをそのまま返す（NaN < loもNaN > hiも false のため）。
+// 設定ファイルが手編集等で"nan"を含んでいた場合にAtomicParamsへNaNが伝播すると、
+// Engineが毎ブロック非有限値検査に落ちて恒久的に無音になるため、範囲チェックの前に
+// 非有限値を初期値へ丸める。
 inline SavedSettings sanitize (SavedSettings s) noexcept
 {
+    if (! std::isfinite (s.gainDb))
+        s.gainDb = 0.0f;
+    if (! std::isfinite (s.reverb))
+        s.reverb = 0.0f;
+
     s.gainDb = juce::jlimit (-20.0f, 20.0f, s.gainDb);
     s.pitch = juce::jlimit (-12, 12, s.pitch);
     s.reverb = juce::jlimit (0.0f, 1.0f, s.reverb);

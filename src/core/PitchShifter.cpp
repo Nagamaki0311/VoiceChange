@@ -77,14 +77,16 @@ void PitchShifter::reset() noexcept
     state = State::Resting;
     gain = 0.0;
     primedSamples = 0;
+    updateLatencyForUi();
 }
 
-int PitchShifter::getLatencySamples() const noexcept
+// 音声スレッドのみが呼ぶ。`state`から計算した値をUI向けatomicへrelaxed storeする（レビュー指摘3）。
+void PitchShifter::updateLatencyForUi() noexcept
 {
-    if (state == State::FadingIn || state == State::Active || state == State::FadingOut)
-        return stretch.inputLatency() + stretch.outputLatency();
-
-    return 0;
+    const int latency = (state == State::FadingIn || state == State::Active || state == State::FadingOut)
+                             ? stretch.inputLatency() + stretch.outputLatency()
+                             : 0;
+    latencySamplesForUi.store (latency, std::memory_order_relaxed);
 }
 
 void PitchShifter::process (const float* in, float* out, int n) noexcept
@@ -190,6 +192,8 @@ void PitchShifter::process (const float* in, float* out, int n) noexcept
             break;
         }
     }
+
+    updateLatencyForUi();
 }
 
 } // namespace vc

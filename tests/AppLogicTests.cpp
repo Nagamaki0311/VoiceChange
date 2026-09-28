@@ -2,6 +2,9 @@
 
 #include "core/Params.h"
 
+#include <cmath>
+#include <limits>
+
 // ===== SECTION: AppLogicTests =====
 // カテゴリAppLogic（quick）。docs/plan.md 3章T-006「テスト AppLogic（設定）」参照。
 // sanitize()・presetFromId()はvc_core（GUI・デバイス非依存）にあるため、ここで直接検証できる。
@@ -64,6 +67,38 @@ private:
 
             s.reverb = -1.0f;
             expectEquals (vc::sanitize (s).reverb, 0.0f);
+        }
+
+        beginTest ("sanitize: gainDb/reverbがNaN/Infなら初期値へ丸められる（レビュー指摘2）");
+        {
+            const float nan = std::numeric_limits<float>::quiet_NaN();
+            const float inf = std::numeric_limits<float>::infinity();
+
+            vc::SavedSettings s;
+            s.gainDb = nan;
+            s.reverb = 0.4f;
+            auto out = vc::sanitize (s);
+            expect (std::isfinite (out.gainDb), "gainDb=NaNが有限値に丸められていない");
+            expectEquals (out.gainDb, 0.0f);
+
+            s = vc::SavedSettings();
+            s.gainDb = inf;
+            out = vc::sanitize (s);
+            expect (std::isfinite (out.gainDb), "gainDb=+Infが有限値に丸められていない");
+            expectEquals (out.gainDb, 0.0f);
+
+            s = vc::SavedSettings();
+            s.reverb = -inf;
+            out = vc::sanitize (s);
+            expect (std::isfinite (out.reverb), "reverb=-Infが有限値に丸められていない");
+            expectEquals (out.reverb, 0.0f);
+
+            s = vc::SavedSettings();
+            s.gainDb = nan;
+            s.reverb = nan;
+            out = vc::sanitize (s);
+            expect (std::isfinite (out.gainDb) && std::isfinite (out.reverb),
+                    "gainDb/reverbが同時にNaNのとき有限値に丸められていない");
         }
 
         beginTest ("sanitize: キーがない場合(初期値のSavedSettings)は初期値のまま");

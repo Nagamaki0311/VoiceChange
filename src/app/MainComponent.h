@@ -88,6 +88,36 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppLookAndFeel)
 };
 
+// ===== SECTION: DeviceComboBox =====
+// design.md 2章「デバイスのコンボボックスは上下矢印キーで選択を直接切り替えない」対応。
+// JUCEの既定のComboBox::keyPressed()は上下左右矢印キーでnudgeSelectedItem()を呼び、
+// 選択を直接変更してonChangeを発火させる（配信中に矢印キーで誤ってデバイスが切り替わる。
+// レビュー指摘1）。矢印キーだけを消費してポップアップを開くのみにし、Space/Enter/Alt+↓は
+// 既定の挙動（showPopupIfNotActive()相当）に委ねる。
+class DeviceComboBox final : public juce::ComboBox
+{
+public:
+    using juce::ComboBox::ComboBox;
+
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        using juce::KeyPress;
+
+        if (key == KeyPress::upKey || key == KeyPress::downKey
+            || key == KeyPress::leftKey || key == KeyPress::rightKey)
+        {
+            if (! isPopupActive()) // showPopupIfNotActive()相当（同メソッドはprivateのため公開APIで代替）
+                showPopup();
+            return true;
+        }
+
+        return juce::ComboBox::keyPressed (key);
+    }
+
+private:
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DeviceComboBox)
+};
+
 // ===== SECTION: LevelMeter =====
 // design.md 3.5節「入力レベルメーター（自前描画）」。バーの上昇は即時、下降は20dB/秒。
 // ピークホールド値(数値表示用)は1.0秒保持した後20dB/秒で落とす。
@@ -221,6 +251,9 @@ private:
 
     void updateStatus (bool slowUpdate);
     void announceIfChanged (const juce::String& newMessage, bool isWarnOrError);
+    // design.md 5章「状態パネル: 要約文を1秒に1回まで更新」。可視の8フレーム更新より遅い
+    // 周期（30fps想定で30フレーム=約1秒）でsetDescription()を更新する（レビュー指摘4）。
+    juce::String buildStatusSummary (const StatusData& d) const;
 
     AudioIO& audioIO;
     juce::PropertiesFile& settings;
@@ -229,7 +262,7 @@ private:
     juce::TooltipWindow tooltipWindow { this, 500 };
 
     juce::Label inputLabel, outputLabel, levelLabel, gainLabel, pitchLabel, reverbLabel;
-    juce::ComboBox inputCombo, outputCombo;
+    DeviceComboBox inputCombo, outputCombo;
 
     LevelMeter levelMeter;
     juce::Label levelValueLabel;
@@ -243,7 +276,9 @@ private:
     StatusPanel statusPanel;
 
     int frameCounter = 0;
+    int accessibilityFrameCounter = 0; // 30fps想定で30回=約1秒ごとにstatusPanelのdescriptionを更新
     juce::String lastAnnouncedMessage;
+    StatusData lastStatusData; // buildStatusSummary()用に直近の状態を保持する
 
     juce::StringArray inputComboRealNames, outputComboRealNames;
     juce::String currentDesiredInputName, currentDesiredOutputName;

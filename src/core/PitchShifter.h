@@ -3,6 +3,7 @@
 #include <juce_core/juce_core.h>
 #include <signalsmith-stretch/signalsmith-stretch.h>
 
+#include <atomic>
 #include <vector>
 
 // ===== SECTION: PitchShifter =====
@@ -53,12 +54,16 @@ public:
     void reset() noexcept;
 
     // FadingIn / Active / FadingOutのとき inputLatency()+outputLatency()、それ以外0。
-    int getLatencySamples() const noexcept;
+    // レビュー指摘3: UIスレッド（AudioIO::getLatency()経由）が音声スレッドの`state`を
+    // 無同期に読むデータ競合があったため、音声スレッドがprocess()/reset()内でrelaxed store
+    // したatomicの値を返すだけにする（UIスレッドはloadのみ）。
+    int getLatencySamples() const noexcept { return latencySamplesForUi.load (std::memory_order_relaxed); }
 
     State getState() const noexcept { return state; }
 
 private:
     void warmUp();
+    void updateLatencyForUi() noexcept;
 
     signalsmith::stretch::SignalsmithStretch<float> stretch;
 
@@ -77,6 +82,9 @@ private:
 
     double sampleRate = 48000.0;
     int maxBlockSamples = 0;
+
+    // 音声スレッドのみが書く（process()/reset()内）。UIスレッドはgetLatencySamples()でloadのみ。
+    std::atomic<int> latencySamplesForUi { 0 };
 };
 
 } // namespace vc
