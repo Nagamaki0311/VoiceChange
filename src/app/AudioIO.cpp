@@ -63,6 +63,7 @@ public:
         catch (...)
         {
             owner.errorFlag.store (true, std::memory_order_relaxed);
+            owner.engine.raiseExceptionErrorFlag();
         }
 
         owner.inputCallbackCount.fetch_add (1, std::memory_order_relaxed);
@@ -105,6 +106,7 @@ public:
                 const int chunk = juce::jmin (remaining, scratchSize);
 
                 owner.fifo.pull (mono, chunk, now);
+                owner.engine.process (mono, chunk);
 
                 for (int ch = 0; ch < numOutputChannels; ++ch)
                     if (float* out = outputChannelData[ch])
@@ -116,7 +118,9 @@ public:
         }
         catch (...)
         {
+            // 例外時は無音＋エラーフラグ（bit1）。
             owner.errorFlag.store (true, std::memory_order_relaxed);
+            owner.engine.raiseExceptionErrorFlag();
 
             for (int ch = 0; ch < numOutputChannels; ++ch)
                 if (float* out = outputChannelData[ch])
@@ -301,6 +305,10 @@ bool AudioIO::open (const juce::String& inName, const juce::String& outName)
 
     fifo.prepare (inputInfo.rate, outputInfo.rate, maxInBlock, maxOutBlock, inputInfo.bufferSize, outputInfo.bufferSize);
 
+    // D-014: ピッチシフターのブロック長は120ms固定（PitchShifter::prepare内部でpresetDefault
+    // 相当を使う）。デバイス遅延から毎回計算する方式(D-003・decideStretchBlock)は廃止した。
+    engine.prepare ({ outputInfo.rate, maxOutBlock });
+
     errorFlag.store (false, std::memory_order_relaxed);
     inputCallbackCount.store (0, std::memory_order_relaxed);
     outputCallbackCount.store (0, std::memory_order_relaxed);
@@ -342,6 +350,7 @@ LatencyBreakdown AudioIO::getLatency() const noexcept
     // レビュー指摘3: getInput/OutputLatencyInSamples()は既に「ストリーム遅延+バッファ長」を
     // 返す（JUCEのWASAPI実装ではlatencyIn = latencySamples + currentBufferSizeSamples）ため、
     // ここでbufferSizeを再加算すると二重計上になる。
+    // 注: Linux（ALSA）ではこの値にバッファ長が含まれない実装差異があるが、Linuxは開発用のため対応しない。
     b.deviceInMs = inputInfo.rate > 0.0
         ? (double) inputInfo.latencySamples / inputInfo.rate * 1000.0
         : 0.0;
@@ -351,7 +360,12 @@ LatencyBreakdown AudioIO::getLatency() const noexcept
         : 0.0;
 
     b.ringBufferMs = fifo.getLatencyMs();
-    b.totalMs = b.deviceInMs + b.deviceOutMs + b.ringBufferMs;
+
+    b.shifterMs = outputInfo.rate > 0.0
+        ? (double) engine.getShifterLatencySamples() / outputInfo.rate * 1000.0
+        : 0.0;
+
+    b.totalMs = b.deviceInMs + b.deviceOutMs + b.ringBufferMs + b.shifterMs;
 
     return b;
 }

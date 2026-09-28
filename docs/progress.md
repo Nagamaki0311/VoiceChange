@@ -19,6 +19,120 @@
 
 ---
 
+## 2026-09-28 T-004 D-015確定: P4をP4a/P4b（合格基準/低域の特性確認）に分割
+
+### 実施内容
+- Manager判断（ユーザーがSignalsmith Stretch継続を選択）により、D-015を「採用」で確定。P4を2本に分割した: P4a（f0=150Hz、合格基準、閾値は従来どおりf0比±1%・s=1.0±10%）、P4b（f0=100Hz、低い声の特性確認、f0比±2%・s=1.0±25%、実測基準値をコメントに明記して回帰検出）。
+- `tests/ShifterTests.cpp`: `runP4()`を共通ヘルパー`runFormantPreservationCase(label, f0, f0TolRatio, sTolRatio)`に切り出し、P4a/P4bをそれぞれ呼び出す形にした。
+- `docs/decisions.md`: D-015を「状態: 採用」にし、決定・理由・影響をP4a/P4b分割の内容で書き直した。
+- `docs/plan.md`: T-004のP4行をP4a/P4bに分割し、T-005のF1〜F3にも同じ方針（f0=150Hzを合格基準、f0=100Hzを特性確認）である旨を追記した。
+
+### 結果
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: **全件合格**（smoke, ring_buffer, ring_buffer_long, shifter, engine）。
+- 実測値（デバッグ用printfで確認後に削除済み）: P4a(f0=150Hz) +5半音 f0比誤差+0.741%・s=1.010、-5半音 誤差-0.216%・s=0.995。P4b(f0=100Hz) +5半音 誤差+0.643%・s=1.165、-5半音 誤差+1.409%・s=0.795。いずれもD-015に記録した閾値内。
+
+### 計画からの変更点
+- なし（Manager判断どおりに実装した）。
+
+### 次回開始位置
+- T-005（`src/core/Effects.*`、`src/core/PitchDetector.*`、`src/core/Engine.cpp`層2部分、`tests/EffectsTests.cpp`）に着手可能。F1〜F3はdocs/plan.mdの更新どおりf0=150Hzを合格基準、f0=100Hzを特性確認とする。
+- T-004はローカル検証（ctest全件合格・xvfb-runでクラッシュなし）まで完了した。docs/tasks.mdの状態更新（実装中→完了）とReviewerによるコードレビューはManager判断で行う。
+
+---
+
+## 2026-09-28 T-004 D-015追加検証: setFormantBase(真のf0)の効果は否定
+
+### 実施内容
+- Manager指示により、P4不合格（D-015）の仮説「Signalsmith Stretchのフォルマント補償が内部の基本周波数推定（`estimateFrequency()`、自動）に依存しており、低いf0でその推定が外れている」を検証した。
+- 一時テストファイル`tests/FormantBaseExperimentTemp.cpp`（ctest未登録、検証後に削除済み）を追加し、f0=80/100/150Hz×±5半音の組み合わせで、`stretch.setFormantBase(真のf0)`を与えた場合と与えない場合（既定の自動推定）のf0比・包絡スケールsを比較した。
+- 結果は docs/decisions.md D-015に表として記録した。要点: f0比の誤差は`setFormantBase`の有無でほぼ変わらない（ピッチマッピングとフォルマント処理は別経路のため妥当）。包絡スケールsは自動推定の方が良好（150Hzでs=0.995〜1.010とほぼ完璧）で、`setFormantBase`に真のf0を与えるとf0によらずs≈0.75(-5半音)/1.31(+5半音)に張り付き、むしろ悪化した。
+- 以上より当初の仮説を却下し、`PitchShifter`への`setFormantBaseHz`等のAPI追加は行わないことにした（T-005でピッチ検出器の結果をシフターへ配線する作業自体はケロケロ機能に必要なため別途実施するが、P4改善目的では行わない）。docs/decisions.md D-015へ実験結果と却下の判断を追記した。
+
+### 結果
+- 実装変更はなし（一時実験ファイルは削除済み）。`cmake --build build --parallel && ctest --test-dir build --output-on-failure`は変化なし: shifterのみ不合格（P4の2ケース、原因はD-015のとおりライブラリの残存特性で解決せず）。
+
+### 計画からの変更点
+- なし。P4の閾値・実装は変更していない。`setFormantBase`案を検討したが効果がないと確認し不採用とした。
+
+### 未解決事項
+- D-015: P4（f0=100Hzの母音、±5半音）が引き続き不合格。原因はSignalsmith Stretchの低域ピッチ量子化誤差で、フォルマント補償の内部f0推定は無関係と判明した。Manager判断によりP4a/P4bへの分割で対応（後続エントリ参照）。
+
+### 次回開始位置
+- 後続エントリ（P4a/P4b分割）参照。
+
+---
+
+## 2026-09-28 T-004 D-014対応: ピッチシフターのブロック長を120ms固定に変更
+
+### 実施内容
+- Manager指示（D-014: ユーザー決定、docs/decisions.md・docs/spec.md・docs/design.md・docs/plan.mdを更新済み）により、ピッチシフターのブロック長を120ms・インターバル30ms（Signalsmith Stretchの`presetDefault`相当）に固定した。
+- `src/core/PitchShifter.h/.cpp`: `BlockDecision`/`decideStretchBlock`を削除。`prepare(sampleRate, maxBlockSamples)`から`stretchBlockSamples`引数を削除し、内部で`stretch.presetDefault(1, (float) sampleRate)`を呼ぶように変更。
+- `src/core/Engine.h/.cpp`: `EngineConfig`から`stretchBlockSamples`フィールドを削除し、`shifter.prepare(sampleRate, maxBlockSamples)`に合わせた。
+- `src/app/AudioIO.cpp/.h`: デバイス遅延・リング目標からブロック長を計算する処理（D-003・decideStretchBlock）を削除し、`engine.prepare({ outputInfo.rate, maxOutBlock })`のみに簡略化。使われなくなった`isBlockOverBudget()`/`blockOverBudget`も削除した。`LatencyBreakdown`（deviceInMs/deviceOutMs/ringBufferMs/shifterMs）は既存のまま据え置き、T-006/T-007のUI遅延超過判定（シフター分を除く遅延48ms超）に必要な値（device+ringとshifterを分離した値）が既に取得できることを確認した。
+- `tests/ShifterTests.cpp`: 全箇所の`stretchBlock`ローカル定数・`shifter.prepare(fs, maxBlock, stretchBlock)`呼び出しを整理。P1の期待値（`expectedLatency`/`expectedFadeLen`）は元々`signalsmith::stretch::SignalsmithStretch`のインスタンスから動的に算出しシフターの報告レイテンシと突き合わせる設計だったため、`presetDefault(1, fs)`呼び出しへ差し替えるだけで対応できることを確認した。P5を「48kHz・44.1kHz・96kHzでinputLatency+outputLatencyが120ms×[0.95, 1.05]」に全面差し替え（PitchShifterを実際にActiveまで進めて`getLatencySamples()`を確認する形）。
+- `tests/EngineTests.cpp`: `kStretchBlock`定数と`engine.prepare({kFs, kMaxBlock, kStretchBlock})`の3引数呼び出しを整理し2引数に統一。
+- P4（合成母音、f0=100Hz、±5半音）の不合格についてManagerの指示で測定器側の問題を疑い、独立の再現コード（PitchShifter/Engine・tests/TestSignals.hのいずれも介さない、生のSignalsmith Stretch直接呼び出し + 高精度ゼロクロス法）で検証した（`/tmp/.../scratchpad/probe2/probe6〜8.cpp`）。結果はP4の測定値とほぼ一致する値を独立に再現でき、tests/TestSignals.hの測定コードは妥当でライブラリの残存特性が原因と判断した（詳細はdocs/decisions.md D-015）。
+- `docs/decisions.md`: D-015（120ms化後もP4の低い基本周波数側で±1%を満たさない、未解決・報告のみ）を追加。
+
+### 結果
+- `cmake --build build --parallel`: 成功（既存の`-Wfloat-equal`警告のみ）。
+- `ctest --test-dir build --output-on-failure`（quick+long、実時間約32秒）: **shifterのみ不合格**（P4の2ケース、下記参照）。smoke・ring_buffer・ring_buffer_long・engineは全件合格。P1・P2・P3・P5は全件合格。
+- `timeout 8 xvfb-run -a build/VoiceChange_artefacts/Release/VoiceChange`: 終了コード124（タイムアウトのみ、クラッシュなし）。
+- 実測値（P1, デバッグ用printfで確認後に削除済み）: `primingToFadingInAt=5760` = `expectedLatency=5760`（48kHz・120ms、誤差0）。`fadeLenMeasured=960` = `expectedFadeLen=960`（誤差0サンプル）。
+- 実測値（P3、220Hz正弦、block=120ms、デバッグ用printfで確認後に削除済み）: +12半音 誤差+0.038%、-12半音 +0.479%、+5半音 +0.361%、-5半音 +0.261%、+8半音 +0.466%、-6半音 +0.848%。**全件±1%以内で合格**（D-013解決）。
+- 実測値（P4、合成母音f0=100Hz、block=120ms）: +5半音 f0比は合格・包絡スケールs=1.165（許容[0.9,1.1]超過で不合格）。-5半音 f0比0.759707(期待0.749154、誤差+1.41%で不合格)・s=0.795（不合格）。
+- 独立再現コード（library直接呼び出し、高精度ゼロクロス法）: 100Hz純音-5半音で+1.395%誤差（P4の測定値75.9Hzとほぼ一致する75.96Hz）。150Hz(-5半音)+0.111%、220Hz(-5半音)+0.252%、100Hz(+5半音)+0.637%。基本周波数が低いほど誤差が大きい傾向を確認。
+- 参考CPU（一時ファイルで測定後削除、48kHz・480ブロック・10秒）: ノーマル 0.043%、ヘリウム 1.379%、ミニオン 1.453%（spec.mdの要件を満たす、旧ブロック長20msでの実測値とほぼ同水準でブロック長非依存という設計どおりの結果）。
+
+### 計画からの変更点
+- なし（D-014の決定どおりに実装した）。P4が不合格のままだが、これはD-015として報告済みで、閾値・実装は変更していない。
+
+### 未解決事項
+- D-015: P4（f0=100Hzの母音、±5半音）が不合格。T-005着手前に閾値・設計方針の判断が必要（docs/decisions.md D-015参照）。T-005のF1〜F3も同じf0=100Hzの母音を使う想定のため、同種の問題が再燃する可能性が高い。
+- Windows実機・WASAPI固有の挙動は未検証（D-004のとおり）。
+
+### 次回開始位置
+- Manager判断待ち（D-015）。判断確定後、必要ならPitchShifter/Engine/tests/TestSignals.hへ反映。並行してT-005（`src/core/Effects.*`、`src/core/PitchDetector.*`、`src/core/Engine.cpp`層2部分、`tests/EffectsTests.cpp`）に着手可能。
+
+---
+
+## 2026-09-28 T-004 層1・ピッチシフター休止・ブロック長決定
+
+### 実施内容
+- `src/core/Params.h`: `AtomicParams`（gainDb/reverb/pitch/preset/enabled、すべてatomic）、`shifterShouldRun(Preset, int)`（ケロケロは常時稼働、それ以外は移調≠0またはフォルマント≠1またはpitch≠0）を追加。`static_assert(std::atomic<float>::is_always_lock_free)`。
+- `src/core/PitchShifter.h/.cpp`（新規）: Signalsmith Stretchラッパ。状態機械`Resting/Priming/FadingIn/Active/FadingOut`を実装。クロスフェードは0〜1の連続値`gain`をブロック内で1サンプルずつ増減させる方式にし、途中で向きが反転しても現在値から続けて動く（別途カウンタを持たない）ため反転時の不連続を構造的に避けた。`decideStretchBlock`はstatic関数（`clamp(50-dev-ring-2, 20, 40)`、予算<20msで`overBudget=true`）。`prepare()`の最後に、Engineで実際に使う範囲（層1ピッチ±12 + プリセット移調-6〜+8）を広めにカバーする移調・フォルマントの組み合わせ（7×4=28通り）で白色雑音を数ブロックずつ空回しするウォームアップを実装（Stretchの`peaks`等の遅延確保対策、E7で0回を確認）。
+- `src/core/Engine.h/.cpp`（新規）: ブロック単位で 入力ピーク記録 → シフター（プリセットの移調・フォルマント + 層1ピッチ、層2効果はT-005で素通し） → リバーブ（自前の`SmoothedValue`で1サンプルずつrを補間、D-008の変換式、r=0かつ補間完了で処理を止め`reset()`） → ゲイン（`SmoothedValue` Multiplicative 50ms） → 非有限値検査 → リミッター（D-007: `dsp::Compressor`+クリップ） → 非有限値検査、の順で処理。バイパスは`chainGain`（0〜1の連続値、Engine側でも同じ「反転しても続けて動く」方式）で20msクロスフェードし、完全バイパス確定後（`!enabled && chainGain<=0`）はチェーンを一切呼ばずビット一致で素通しする。最終出力の非有限値検査はバイパス中も含め常に行う（D-010）。`process()`は`maxBlock`ごとに内部で分割するため、外部から呼ぶ側は分割の有無を意識しなくてよい（E6で一致を確認）。
+- `src/app/AudioIO.cpp/.h`: `Engine`をメンバに追加し、出力コールバックで`pull → Engine::process → 全チャンネル複製`に変更。`open()`内でデバイス遅延・リング目標(ms)を計算し`PitchShifter::decideStretchBlock`でブロック長を決め、`Engine::prepare`に渡す。`LatencyBreakdown`に`shifterMs`を追加。両コールバックの`catch(...)`で`engine.raiseExceptionErrorFlag()`（bit1）を追加。Linux(ALSA)でのデバイス遅延の差異は`getLatency()`の既存コメントに1行追記のみ（対応不要、plan.mdの指示どおり）。
+- `tests/TestSignals.h`: クリック判定器（`checkNoClick`、隣接差の最大値ベース）、合成母音（`makeSyntheticVowel`、2極共振器3個の積で加算合成、docs/plan.md T-005節の方式を先行実装）、平均振幅スペクトル・倍音ピーク検出・対数対数包絡・包絡スケール探索（`measureFundamentalHz`/`measureFormantEnvelope`/`measureEnvelopeScale`、P4用にT-005の測定法を先行実装）を追加。
+- `tests/ShifterTests.cpp`: クリック判定器の自己テスト2件（位相跳躍の単純連結→検出、20ms二乗余弦クロスフェード→合格）、P1（a:Priming→FadingInの送り込み量とレイテンシ表示、b:FadingIn長20ms±1サンプル、c:Resting/PrimingでL=0）、P2（a〜e:5遷移すべてのクリック判定）、P3（6半音条件の移調精度）、P4（±5半音のフォルマント保持）、P5（ブロック長決定の3ケース）をカテゴリ`Shifter`に実装。
+- `tests/EngineTests.cpp`（新規）: E1（ゲイン+6dB）、E2（a:リミッターで0dBFS超なし、b:-20dBFS透過性）、E3（a:r 0→0.01の透過性、b:r=0.5の残響持続、c:r→0後のリバーブ停止）、E4（a:完全バイパスのビット一致、b:ON/OFFクリックなし）、E5（NaN/Inf注入からの復帰、バイパス中のNaN）、E6（分割処理の一致）、E7（全プリセット×ピッチ×バイパス遷移でのアロケーション0回、リバーブ実処理経路も対象に含めた）をカテゴリ`Engine`に実装。
+- `CMakeLists.txt`: `shifter`(Shifter, quick)・`engine`(Engine, quick)をctestに登録。
+- `docs/tasks.md`: T-003を完了、T-004を実装中に更新。
+- `docs/decisions.md`: D-013（Signalsmith Stretchの移調精度がD-003のブロック長では±1%を保証できない、未解決）を追加。
+
+### 結果
+- `cmake --build build --parallel`: 成功（警告のみ、`-Wfloat-equal`。既存コードにも同種の警告があり許容範囲）。
+- `ctest --test-dir build --output-on-failure`（quick+long、実時間約36秒）: **shifterのみ不合格**（P3の6ケース・P4の2ケース×2項目、下記参照）。smoke・ring_buffer・ring_buffer_long・engineは全件合格。
+- `timeout 8 xvfb-run -a build/VoiceChange_artefacts/Release/VoiceChange`: 終了コード124（タイムアウトのみ、クラッシュなし）。
+- 実測値（P1, デバッグ用printfで確認後に削除済み）: P1a `primingToFadingInAt=960` = `expectedLatency=960`（誤差0、許容は±480=1ブロック）。P1b `fadeLenMeasured=960` = `expectedFadeLen=960`（誤差0サンプル、許容は±1）。
+- 実測値（P3、220Hz正弦、block=960/20ms）: +12半音 453.01Hz(期待440、誤差+2.96%)、-12半音 114.598Hz(期待110、+4.18%)、+5半音 304.702Hz(期待293.665、+3.76%)、-5半音 169.711Hz(期待164.814、+2.97%)、+8半音 358.932Hz(期待349.228、+2.78%)、-6半音 161.555Hz(期待155.563、+3.85%)。全件±1%を超過。
+- 実測値（P4、合成母音f0=100Hz、block=960）: +5半音 f0比1.38789(期待1.33484、誤差+3.98%)・包絡スケールs=1.335(期待~1.0)、-5半音 f0比0.667191(期待0.749154、誤差-10.9%)・s=2.0(期待~1.0)。いずれも不合格。
+- E2a実測ピーク（ゲイン+20dB、0.9振幅正弦、デバッグ用printfで確認後に削除済み）: 0.914545（≤1.0を満たす）。
+- 参考CPU（一時ファイル`tests/CpuProbeTemp.cpp`で測定後、T-004のファイル範囲外のため削除。48kHz・480ブロック・10秒、1コアあたり処理時間÷音声時間）: ノーマル 0.045%、ヘリウム 1.247%、ミニオン 1.427%（いずれもdocs/spec.mdの要件「ノーマル1%未満・重い効果5%以下」を満たす）。
+
+### 計画からの変更点
+- P3・P4が不合格。原因はSignalsmith Stretch単体（PitchShifter/Engineを介さない直接呼び出し）でも再現する周波数量子化誤差で、ブロック長のFFTビン幅に対する入力周波数のビン整合度に依存する（D-013に詳細と再現コードの場所を記録）。閾値・実装は変更していない。Manager判断待ち。
+- それ以外（Params.h、PitchShifter、Engine、AudioIO統合、E1〜E7、P1・P2・P5）はdocs/plan.md 2.5節・3章T-004のとおりに実装した。
+
+### 未解決事項
+- D-013: P3・P4の不合格。T-005着手前に閾値・設計方針の判断が必要（詳細はdocs/decisions.md D-013参照）。
+- Windows実機・WASAPI固有の挙動は未検証（D-004のとおり）。
+
+### 次回開始位置
+- Manager判断待ち（D-013）。判断確定後、必要ならPitchShifter/Engineへ反映。並行してT-005（`src/core/Effects.*`、`src/core/PitchDetector.*`、`src/core/Engine.cpp`層2部分、`tests/EffectsTests.cpp`）に着手可能。
+
+---
+
 ## 2026-09-28 T-003 レビュー指摘3件修正
 
 ### 実施内容

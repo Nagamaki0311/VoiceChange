@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 
 // ===== SECTION: Params =====
 // 層1・層2の共通パラメータ定義。GUI・デバイスに依存しない（vc_core）。
@@ -60,7 +61,31 @@ constexpr std::array<PresetSpec, 8> kPresets { {
     { "talkbox",  0.0f, 1.00f, Effect::Talkbox, true  },
 } };
 
-// AtomicParams / SavedSettings / sanitize / presetFromId / shifterShouldRun は
-// T-004以降（層1・ピッチシフター実装時）に追加する（docs/plan.md 3章 T-004参照）。
+// UIスレッドと音声スレッド間で受け渡す層1パラメータ。すべてatomicのみ（音声スレッドはロックしない）。
+struct AtomicParams
+{
+    std::atomic<float> gainDb { 0.0f };  // -20〜+20dB
+    std::atomic<float> reverb { 0.0f };  // 0〜1（0〜100%）
+    std::atomic<int> pitch { 0 };        // -12〜+12半音（層1ピッチ、1半音刻み）
+    std::atomic<int> preset { 0 };       // Presetのint値
+    std::atomic<bool> enabled { true };  // 全体ON/OFF（false = バイパス）
+};
+
+static_assert (std::atomic<float>::is_always_lock_free);
+
+// ピッチシフターを稼働させるかどうか（docs/spec.md「ピッチシフターの休止」）。
+// 合計移調量が0かつフォルマント係数が1のとき（層1ピッチも0）は休止する。
+// ケロケロは補正量が0付近でも常に稼働させ、休止と稼働の往復を防ぐ（docs/plan.md 2.5節）。
+inline bool shifterShouldRun (Preset preset, int layer1PitchSemitones) noexcept
+{
+    if (preset == Preset::Kerokero)
+        return true;
+
+    const auto& spec = kPresets[(size_t) preset];
+    return spec.semitones != 0.0f || spec.formant != 1.0f || layer1PitchSemitones != 0;
+}
+
+// SavedSettings / sanitize / presetFromId はT-006（UI結合・設定保存）で追加する
+// （docs/plan.md 3章 T-006参照）。
 
 } // namespace vc
