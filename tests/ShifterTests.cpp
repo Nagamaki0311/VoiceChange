@@ -167,10 +167,10 @@ private:
     void runP1()
     {
         constexpr double fs = 48000.0;
-        constexpr int stretchBlock = 960; // 20ms
 
+        // D-014: ブロック長は120ms・インターバル30ms固定（presetDefault相当）。
         signalsmith::stretch::SignalsmithStretch<float> ref;
-        ref.configure (1, stretchBlock, stretchBlock / 4);
+        ref.presetDefault (1, (float) fs);
         const int expectedLatency = ref.inputLatency() + ref.outputLatency();
         const int expectedFadeLen = (int) std::lround (0.020 * fs);
 
@@ -179,7 +179,7 @@ private:
             constexpr int maxBlock = 480;
 
             vc::PitchShifter shifter;
-            shifter.prepare (fs, maxBlock, stretchBlock);
+            shifter.prepare (fs, maxBlock);
 
             expect (shifter.getState() == vc::PitchShifter::State::Resting);
             expect (shifter.getLatencySamples() == 0);
@@ -210,7 +210,7 @@ private:
             constexpr int maxBlock = 1; // サンプル精度で測るためブロック長を1にする
 
             vc::PitchShifter shifter;
-            shifter.prepare (fs, maxBlock, stretchBlock);
+            shifter.prepare (fs, maxBlock);
             shifter.setTarget (true, 8.0f, 1.4f);
 
             auto signal = vc::test::makeSine (220.0, fs, expectedLatency + expectedFadeLen + 4000, 0.3f);
@@ -240,7 +240,7 @@ private:
         {
             constexpr int maxBlock = 480;
             vc::PitchShifter shifter;
-            shifter.prepare (fs, maxBlock, stretchBlock);
+            shifter.prepare (fs, maxBlock);
 
             auto signal = vc::test::makeSine (220.0, fs, maxBlock * 4, 0.3f);
             vc::test::addNoiseFloor (signal);
@@ -273,7 +273,6 @@ private:
     {
         constexpr double fs = 48000.0;
         constexpr int maxBlock = 480;
-        constexpr int stretchBlock = 960;
         constexpr float semis = 8.0f;
         constexpr float formant = 1.4f;
         constexpr double toneFreq = 200.0;
@@ -285,7 +284,7 @@ private:
         beginTest ("P2a: Resting→Active");
         {
             vc::PitchShifter shifter;
-            shifter.prepare (fs, maxBlock, stretchBlock);
+            shifter.prepare (fs, maxBlock);
 
             auto signal = vc::test::makeSine (toneFreq, fs, totalLen, toneAmp);
             vc::test::addNoiseFloor (signal);
@@ -314,7 +313,7 @@ private:
         beginTest ("P2b: Active→Resting");
         {
             vc::PitchShifter shifter;
-            shifter.prepare (fs, maxBlock, stretchBlock);
+            shifter.prepare (fs, maxBlock);
 
             auto signal = vc::test::makeSine (toneFreq, fs, totalLen, toneAmp);
             vc::test::addNoiseFloor (signal);
@@ -349,7 +348,7 @@ private:
         beginTest ("P2c: Priming中の中止");
         {
             vc::PitchShifter shifter;
-            shifter.prepare (fs, maxBlock, stretchBlock);
+            shifter.prepare (fs, maxBlock);
 
             auto signal = vc::test::makeSine (toneFreq, fs, totalLen, toneAmp);
             vc::test::addNoiseFloor (signal);
@@ -384,7 +383,7 @@ private:
         beginTest ("P2d: FadingIn中の反転");
         {
             vc::PitchShifter shifter;
-            shifter.prepare (fs, maxBlock, stretchBlock);
+            shifter.prepare (fs, maxBlock);
 
             auto signal = vc::test::makeSine (toneFreq, fs, totalLen, toneAmp);
             vc::test::addNoiseFloor (signal);
@@ -428,7 +427,7 @@ private:
         beginTest ("P2e: FadingOut中の反転");
         {
             vc::PitchShifter shifter;
-            shifter.prepare (fs, maxBlock, stretchBlock);
+            shifter.prepare (fs, maxBlock);
 
             auto signal = vc::test::makeSine (toneFreq, fs, totalLen, toneAmp);
             vc::test::addNoiseFloor (signal);
@@ -480,7 +479,6 @@ private:
     {
         constexpr double fs = 48000.0;
         constexpr int maxBlock = 480;
-        constexpr int stretchBlock = 960;
         constexpr double toneFreq = 220.0;
         constexpr int steadyLen = (int) fs; // 1秒
         constexpr int guard = 4000;
@@ -492,7 +490,7 @@ private:
             beginTest ("P3: 移調精度 " + juce::String (semis) + "半音");
 
             vc::PitchShifter shifter;
-            shifter.prepare (fs, maxBlock, stretchBlock);
+            shifter.prepare (fs, maxBlock);
 
             const int totalLen = (int) fs * 2 + guard + steadyLen;
             auto signal = vc::test::makeSine (toneFreq, fs, totalLen, 0.3f);
@@ -525,7 +523,6 @@ private:
     {
         constexpr double fs = 48000.0;
         constexpr int maxBlock = 480;
-        constexpr int stretchBlock = 960;
         constexpr double f0 = 100.0;
         constexpr int analysisLen = (int) (fs * 1.5); // 1.5秒（1秒以上）
         constexpr int guard = 4000;
@@ -543,7 +540,7 @@ private:
             beginTest ("P4: フォルマント保持 " + juce::String (semis) + "半音");
 
             vc::PitchShifter shifter;
-            shifter.prepare (fs, maxBlock, stretchBlock);
+            shifter.prepare (fs, maxBlock);
 
             const int totalLen = 20000 + analysisLen * 2;
             auto vowel = vc::test::makeSyntheticVowel (f0, fs, totalLen, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.3f);
@@ -569,6 +566,7 @@ private:
 
             const double f0Ratio = f0Out / f0In;
             const double expectedRatio = std::pow (2.0, (double) semis / 12.0);
+
             expect (std::abs (f0Ratio - expectedRatio) / expectedRatio <= 0.01,
                     "f0 ratio " + juce::String (f0Ratio) + ", expected " + juce::String (expectedRatio));
 
@@ -579,22 +577,35 @@ private:
         }
     }
 
-    // ----- P5: ブロック長 -----
+    // ----- P5: ブロック長（D-014。120ms固定、48k/44.1k/96kHzで確認） -----
     void runP5()
     {
-        beginTest ("P5: ブロック長の決定");
+        const double rates[] = { 48000.0, 44100.0, 96000.0 };
+
+        for (const double fs : rates)
         {
-            const auto a = vc::PitchShifter::decideStretchBlock (10.0, 12.0);
-            expect (a.blockMs == 26, "expected 26ms, got " + juce::String (a.blockMs));
-            expect (! a.overBudget);
+            beginTest ("P5: ブロック長120ms " + juce::String (fs, 0) + "Hz");
 
-            const auto b = vc::PitchShifter::decideStretchBlock (30.0, 15.0);
-            expect (b.blockMs == 20, "expected 20ms, got " + juce::String (b.blockMs));
-            expect (b.overBudget);
+            constexpr int maxBlock = 256;
 
-            const auto c = vc::PitchShifter::decideStretchBlock (0.0, 2.0);
-            expect (c.blockMs == 40, "expected 40ms, got " + juce::String (c.blockMs));
-            expect (! c.overBudget);
+            vc::PitchShifter shifter;
+            shifter.prepare (fs, maxBlock);
+            shifter.setTarget (true, 0.0f, 1.0f);
+
+            auto signal = vc::test::makeSine (220.0, fs, (int) fs * 2, 0.3f);
+            vc::test::addNoiseFloor (signal);
+            std::vector<float> out (signal.size(), 0.0f);
+
+            feedUntil (shifter, signal.data(), out.data(), maxBlock, 0, (int) signal.size(),
+                [&] (int) { return shifter.getState() == vc::PitchShifter::State::Active; });
+
+            expect (shifter.getState() == vc::PitchShifter::State::Active, "did not reach Active");
+
+            const int latency = shifter.getLatencySamples();
+            const double expected = fs * 0.12;
+
+            expect (latency >= (int) (expected * 0.95) && latency <= (int) (expected * 1.05),
+                    "latency " + juce::String (latency) + " out of expected range (expected " + juce::String (expected) + ")");
         }
     }
 };

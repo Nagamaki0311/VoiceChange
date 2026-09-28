@@ -1,9 +1,5 @@
 #include "AudioIO.h"
 
-#include "core/PitchShifter.h"
-
-#include <algorithm>
-#include <cmath>
 #include <cstring>
 
 namespace vc
@@ -309,21 +305,9 @@ bool AudioIO::open (const juce::String& inName, const juce::String& outName)
 
     fifo.prepare (inputInfo.rate, outputInfo.rate, maxInBlock, maxOutBlock, inputInfo.bufferSize, outputInfo.bufferSize);
 
-    // D-003: ブロック長は開いた時点のデバイス遅延・リングバッファ目標から毎回計算する。
-    // デバイス遅延 = getInput/OutputLatencyInSamples()/rate（レビュー指摘3：バッファ長込みなので二重計上しない）。
-    // リング目標 = max(各バッファ長) + 2ms（ResamplingFifoの初期ジッタ余裕と同じ値）。
-    const double deviceLatencyMs = (inputInfo.rate > 0.0 ? (double) inputInfo.latencySamples / inputInfo.rate * 1000.0 : 0.0)
-                                    + (outputInfo.rate > 0.0 ? (double) outputInfo.latencySamples / outputInfo.rate * 1000.0 : 0.0);
-    const double inBlockMs = (double) inputInfo.bufferSize / inputInfo.rate * 1000.0;
-    const double outBlockMs = (double) outputInfo.bufferSize / outputInfo.rate * 1000.0;
-    const double ringTargetMs = std::max (inBlockMs, outBlockMs) + 2.0;
-
-    const auto blockDecision = PitchShifter::decideStretchBlock (deviceLatencyMs, ringTargetMs);
-    blockOverBudget = blockDecision.overBudget;
-
-    const int stretchBlockSamples = juce::jmax (1, (int) std::lround ((double) blockDecision.blockMs / 1000.0 * outputInfo.rate));
-
-    engine.prepare ({ outputInfo.rate, maxOutBlock, stretchBlockSamples });
+    // D-014: ピッチシフターのブロック長は120ms固定（PitchShifter::prepare内部でpresetDefault
+    // 相当を使う）。デバイス遅延から毎回計算する方式(D-003・decideStretchBlock)は廃止した。
+    engine.prepare ({ outputInfo.rate, maxOutBlock });
 
     errorFlag.store (false, std::memory_order_relaxed);
     inputCallbackCount.store (0, std::memory_order_relaxed);

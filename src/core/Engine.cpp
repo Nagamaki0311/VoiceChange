@@ -30,7 +30,7 @@ void Engine::prepare (const EngineConfig& config)
 
     dryScratch.assign ((size_t) maxBlockSamples, 0.0f);
 
-    shifter.prepare (sampleRate, maxBlockSamples, config.stretchBlockSamples);
+    shifter.prepare (sampleRate, maxBlockSamples);
 
     reverb.setSampleRate (sampleRate);
     reverb.reset();

@@ -17,7 +17,6 @@ namespace
 
 constexpr double kFs = 48000.0;
 constexpr int kMaxBlock = 512;
-constexpr int kStretchBlock = 960; // 20ms
 
 class EngineTests final : public juce::UnitTest
 {
@@ -39,7 +38,7 @@ private:
     // Engineはstd::atomicメンバを持つためコピー・ムーブ不可。呼び出し側で構築し、これで準備する。
     static void prepareEngine (vc::Engine& engine)
     {
-        engine.prepare ({ kFs, kMaxBlock, kStretchBlock });
+        engine.prepare ({ kFs, kMaxBlock });
     }
 
     // ----- E1: ゲイン -----
@@ -212,7 +211,7 @@ private:
         {
             vc::Engine engine;
             engine.params().enabled.store (false); // prepare前に設定 → chainGainが0から始まる
-            engine.prepare ({ kFs, kMaxBlock, kStretchBlock });
+            engine.prepare ({ kFs, kMaxBlock });
 
             auto signal = vc::test::makeSine (300.0, kFs, (int) kFs, 0.4f);
             std::vector<float> out (signal);
@@ -269,7 +268,7 @@ private:
         {
             vc::Engine engine;
             engine.params().enabled.store (false);
-            engine.prepare ({ kFs, kMaxBlock, kStretchBlock });
+            engine.prepare ({ kFs, kMaxBlock });
 
             std::vector<float> block ((size_t) kMaxBlock, 0.3f);
             block[5] = std::numeric_limits<float>::quiet_NaN();

@@ -23,7 +23,6 @@ struct EngineConfig
 {
     double sampleRate = 48000.0;
     int maxBlock = 0;
-    int stretchBlockSamples = 0;
 };
 
 class Engine

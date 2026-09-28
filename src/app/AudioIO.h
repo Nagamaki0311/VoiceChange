@@ -68,9 +68,6 @@ public:
     void clearEngineErrorFlags() noexcept { engine.clearErrorFlags(); }
     float takeInputPeak() noexcept { return engine.takeInputPeak(); }
 
-    // ブロック長予算が20ms未満でクランプされた場合true（合計が50msを超える。D-003）。
-    bool isBlockOverBudget() const noexcept { return blockOverBudget; }
-
     std::uint64_t getInputCallbackCount() const noexcept { return inputCallbackCount.load (std::memory_order_relaxed); }
     std::uint64_t getOutputCallbackCount() const noexcept { return outputCallbackCount.load (std::memory_order_relaxed); }
     bool hasErrorFlag() const noexcept { return errorFlag.load (std::memory_order_relaxed); }
@@ -106,7 +103,6 @@ private:
     std::atomic<std::uint64_t> outputCallbackCount { 0 };
     std::atomic<bool> errorFlag { false };
     std::atomic<float> cpuLoad { 0.0f };
-    bool blockOverBudget = false; // メッセージスレッドのみ（open()で設定、UIから読む想定はT-006）
 
     std::vector<float> monoScratch;      // 出力コールバックの一時バッファ(pull用)。open()内でのみ確保する。
     std::vector<float> inputMonoScratch; // 入力コールバックの一時バッファ(モノラル化用)。open()内でのみ確保する。

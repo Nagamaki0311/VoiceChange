@@ -19,6 +19,40 @@
 
 ---
 
+## 2026-09-28 T-004 D-014対応: ピッチシフターのブロック長を120ms固定に変更
+
+### 実施内容
+- Manager指示（D-014: ユーザー決定、docs/decisions.md・docs/spec.md・docs/design.md・docs/plan.mdを更新済み）により、ピッチシフターのブロック長を120ms・インターバル30ms（Signalsmith Stretchの`presetDefault`相当）に固定した。
+- `src/core/PitchShifter.h/.cpp`: `BlockDecision`/`decideStretchBlock`を削除。`prepare(sampleRate, maxBlockSamples)`から`stretchBlockSamples`引数を削除し、内部で`stretch.presetDefault(1, (float) sampleRate)`を呼ぶように変更。
+- `src/core/Engine.h/.cpp`: `EngineConfig`から`stretchBlockSamples`フィールドを削除し、`shifter.prepare(sampleRate, maxBlockSamples)`に合わせた。
+- `src/app/AudioIO.cpp/.h`: デバイス遅延・リング目標からブロック長を計算する処理（D-003・decideStretchBlock）を削除し、`engine.prepare({ outputInfo.rate, maxOutBlock })`のみに簡略化。使われなくなった`isBlockOverBudget()`/`blockOverBudget`も削除した。`LatencyBreakdown`（deviceInMs/deviceOutMs/ringBufferMs/shifterMs）は既存のまま据え置き、T-006/T-007のUI遅延超過判定（シフター分を除く遅延48ms超）に必要な値（device+ringとshifterを分離した値）が既に取得できることを確認した。
+- `tests/ShifterTests.cpp`: 全箇所の`stretchBlock`ローカル定数・`shifter.prepare(fs, maxBlock, stretchBlock)`呼び出しを整理。P1の期待値（`expectedLatency`/`expectedFadeLen`）は元々`signalsmith::stretch::SignalsmithStretch`のインスタンスから動的に算出しシフターの報告レイテンシと突き合わせる設計だったため、`presetDefault(1, fs)`呼び出しへ差し替えるだけで対応できることを確認した。P5を「48kHz・44.1kHz・96kHzでinputLatency+outputLatencyが120ms×[0.95, 1.05]」に全面差し替え（PitchShifterを実際にActiveまで進めて`getLatencySamples()`を確認する形）。
+- `tests/EngineTests.cpp`: `kStretchBlock`定数と`engine.prepare({kFs, kMaxBlock, kStretchBlock})`の3引数呼び出しを整理し2引数に統一。
+- P4（合成母音、f0=100Hz、±5半音）の不合格についてManagerの指示で測定器側の問題を疑い、独立の再現コード（PitchShifter/Engine・tests/TestSignals.hのいずれも介さない、生のSignalsmith Stretch直接呼び出し + 高精度ゼロクロス法）で検証した（`/tmp/.../scratchpad/probe2/probe6〜8.cpp`）。結果はP4の測定値とほぼ一致する値を独立に再現でき、tests/TestSignals.hの測定コードは妥当でライブラリの残存特性が原因と判断した（詳細はdocs/decisions.md D-015）。
+- `docs/decisions.md`: D-015（120ms化後もP4の低い基本周波数側で±1%を満たさない、未解決・報告のみ）を追加。
+
+### 結果
+- `cmake --build build --parallel`: 成功（既存の`-Wfloat-equal`警告のみ）。
+- `ctest --test-dir build --output-on-failure`（quick+long、実時間約32秒）: **shifterのみ不合格**（P4の2ケース、下記参照）。smoke・ring_buffer・ring_buffer_long・engineは全件合格。P1・P2・P3・P5は全件合格。
+- `timeout 8 xvfb-run -a build/VoiceChange_artefacts/Release/VoiceChange`: 終了コード124（タイムアウトのみ、クラッシュなし）。
+- 実測値（P1, デバッグ用printfで確認後に削除済み）: `primingToFadingInAt=5760` = `expectedLatency=5760`（48kHz・120ms、誤差0）。`fadeLenMeasured=960` = `expectedFadeLen=960`（誤差0サンプル）。
+- 実測値（P3、220Hz正弦、block=120ms、デバッグ用printfで確認後に削除済み）: +12半音 誤差+0.038%、-12半音 +0.479%、+5半音 +0.361%、-5半音 +0.261%、+8半音 +0.466%、-6半音 +0.848%。**全件±1%以内で合格**（D-013解決）。
+- 実測値（P4、合成母音f0=100Hz、block=120ms）: +5半音 f0比は合格・包絡スケールs=1.165（許容[0.9,1.1]超過で不合格）。-5半音 f0比0.759707(期待0.749154、誤差+1.41%で不合格)・s=0.795（不合格）。
+- 独立再現コード（library直接呼び出し、高精度ゼロクロス法）: 100Hz純音-5半音で+1.395%誤差（P4の測定値75.9Hzとほぼ一致する75.96Hz）。150Hz(-5半音)+0.111%、220Hz(-5半音)+0.252%、100Hz(+5半音)+0.637%。基本周波数が低いほど誤差が大きい傾向を確認。
+- 参考CPU（一時ファイルで測定後削除、48kHz・480ブロック・10秒）: ノーマル 0.043%、ヘリウム 1.379%、ミニオン 1.453%（spec.mdの要件を満たす、旧ブロック長20msでの実測値とほぼ同水準でブロック長非依存という設計どおりの結果）。
+
+### 計画からの変更点
+- なし（D-014の決定どおりに実装した）。P4が不合格のままだが、これはD-015として報告済みで、閾値・実装は変更していない。
+
+### 未解決事項
+- D-015: P4（f0=100Hzの母音、±5半音）が不合格。T-005着手前に閾値・設計方針の判断が必要（docs/decisions.md D-015参照）。T-005のF1〜F3も同じf0=100Hzの母音を使う想定のため、同種の問題が再燃する可能性が高い。
+- Windows実機・WASAPI固有の挙動は未検証（D-004のとおり）。
+
+### 次回開始位置
+- Manager判断待ち（D-015）。判断確定後、必要ならPitchShifter/Engine/tests/TestSignals.hへ反映。並行してT-005（`src/core/Effects.*`、`src/core/PitchDetector.*`、`src/core/Engine.cpp`層2部分、`tests/EffectsTests.cpp`）に着手可能。
+
+---
+
 ## 2026-09-28 T-004 層1・ピッチシフター休止・ブロック長決定
 
 ### 実施内容

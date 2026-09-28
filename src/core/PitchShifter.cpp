@@ -10,22 +10,16 @@ namespace
 constexpr double kFadeSeconds = 0.020;
 } // namespace
 
-PitchShifter::BlockDecision PitchShifter::decideStretchBlock (double deviceLatencyMs, double ringTargetMs) noexcept
+void PitchShifter::prepare (double newSampleRate, int newMaxBlockSamples)
 {
-    const double budget = 50.0 - deviceLatencyMs - ringTargetMs - 2.0;
-    const bool overBudget = budget < 20.0;
-    const double clamped = juce::jlimit (20.0, 40.0, budget);
-    return { (int) std::lround (clamped), overBudget };
-}
-
-void PitchShifter::prepare (double newSampleRate, int newMaxBlockSamples, int stretchBlockSamples)
-{
-    jassert (newSampleRate > 0.0 && newMaxBlockSamples > 0 && stretchBlockSamples > 0);
+    jassert (newSampleRate > 0.0 && newMaxBlockSamples > 0);
 
     sampleRate = newSampleRate;
     maxBlockSamples = newMaxBlockSamples;
 
-    stretch.configure (1, stretchBlockSamples, juce::jmax (1, stretchBlockSamples / 4));
+    // D-014: ブロック長120ms・インターバル30ms固定（Signalsmith Stretchの`presetDefault`相当。
+    // デバイス遅延から毎回計算する方式(D-003・decideStretchBlock)は廃止した）。
+    stretch.presetDefault (1, (float) sampleRate);
 
     wetScratch.assign ((size_t) maxBlockSamples, 0.0f);
 

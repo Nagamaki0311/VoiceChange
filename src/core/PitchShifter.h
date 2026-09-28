@@ -6,9 +6,13 @@
 #include <vector>
 
 // ===== SECTION: PitchShifter =====
-// Signalsmith Stretchラッパ + 休止⇔稼働の状態遷移 + ブロック長決定関数。
+// Signalsmith Stretchラッパ + 休止⇔稼働の状態遷移。
 // docs/spec.md「音声処理チェーン」「ピッチシフターの休止」「ブロック長の決定」、
-// docs/decisions.md D-002・D-003、docs/plan.md 2.5節「PitchShifter」参照。
+// docs/decisions.md D-002・D-014、docs/plan.md 2.5節「PitchShifter」参照。
+//
+// D-014: ブロック長は120ms・インターバル30ms（`stretch.presetDefault(1, fs)`相当）に固定する。
+// デバイス遅延から毎回計算する方式（D-003・decideStretchBlock）は廃止した。50msの遅延目標は
+// シフター休止時の経路にのみ適用し、稼働中は約120ms + デバイス・リングバッファ分になる。
 //
 // 状態遷移（20msクロスフェード。gainは0=dry/1=wetの連続値で、途中で向きが反転しても
 // 現在値から続けて動くため不連続にならない）:
@@ -36,18 +40,8 @@ public:
         FadingOut
     };
 
-    struct BlockDecision
-    {
-        int blockMs;
-        bool overBudget;
-    };
-
-    // デバイス遅延・リングバッファ目標(ms)からブロック長(ms)を決める（D-003）。
-    // clamp(50 - dev - ring - 2, 20, 40)。overBudgetはクランプ前の予算が20ms未満のとき true。
-    static BlockDecision decideStretchBlock (double deviceLatencyMs, double ringTargetMs) noexcept;
-
-    // メッセージスレッドのみ。デバイス停止中に呼ぶ。configure(1, b, b/4) + ウォームアップ。
-    void prepare (double sampleRate, int maxBlockSamples, int stretchBlockSamples);
+    // メッセージスレッドのみ。デバイス停止中に呼ぶ。presetDefault(1, fs)相当の設定 + ウォームアップ。
+    void prepare (double sampleRate, int maxBlockSamples);
 
     // 音声スレッドのみ。稼働判定・移調量・フォルマント係数の目標値を設定する。
     void setTarget (bool run, float semitones, float formantFactor) noexcept;
