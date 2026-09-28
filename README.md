@@ -77,6 +77,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 
 - JUCE 9はAGPLv3と商用ライセンスのデュアルライセンス。本アプリの.exeを配布する場合、ソースコード全体をAGPLv3で公開するか、JUCEの商用ライセンスを取得する必要がある。
 - Signalsmith Stretch / signalsmith-linearはMITライセンス。
+- 現時点の利用形態は個人利用のみで、.exeの配布は行わない（D-011）。配布する場合はこの判断とライセンス条件を見直す。
 
 ## ドキュメント
 
