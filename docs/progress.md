@@ -19,6 +19,26 @@
 
 ---
 
+## 2026-09-28 T-004 D-015確定: P4をP4a/P4b（合格基準/低域の特性確認）に分割
+
+### 実施内容
+- Manager判断（ユーザーがSignalsmith Stretch継続を選択）により、D-015を「採用」で確定。P4を2本に分割した: P4a（f0=150Hz、合格基準、閾値は従来どおりf0比±1%・s=1.0±10%）、P4b（f0=100Hz、低い声の特性確認、f0比±2%・s=1.0±25%、実測基準値をコメントに明記して回帰検出）。
+- `tests/ShifterTests.cpp`: `runP4()`を共通ヘルパー`runFormantPreservationCase(label, f0, f0TolRatio, sTolRatio)`に切り出し、P4a/P4bをそれぞれ呼び出す形にした。
+- `docs/decisions.md`: D-015を「状態: 採用」にし、決定・理由・影響をP4a/P4b分割の内容で書き直した。
+- `docs/plan.md`: T-004のP4行をP4a/P4bに分割し、T-005のF1〜F3にも同じ方針（f0=150Hzを合格基準、f0=100Hzを特性確認）である旨を追記した。
+
+### 結果
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: **全件合格**（smoke, ring_buffer, ring_buffer_long, shifter, engine）。
+- 実測値（デバッグ用printfで確認後に削除済み）: P4a(f0=150Hz) +5半音 f0比誤差+0.741%・s=1.010、-5半音 誤差-0.216%・s=0.995。P4b(f0=100Hz) +5半音 誤差+0.643%・s=1.165、-5半音 誤差+1.409%・s=0.795。いずれもD-015に記録した閾値内。
+
+### 計画からの変更点
+- なし（Manager判断どおりに実装した）。
+
+### 次回開始位置
+- T-005（`src/core/Effects.*`、`src/core/PitchDetector.*`、`src/core/Engine.cpp`層2部分、`tests/EffectsTests.cpp`）に着手可能。F1〜F3はdocs/plan.mdの更新どおりf0=150Hzを合格基準、f0=100Hzを特性確認とする。
+
+---
+
 ## 2026-09-28 T-004 D-015追加検証: setFormantBase(真のf0)の効果は否定
 
 ### 実施内容
@@ -28,17 +48,16 @@
 - 以上より当初の仮説を却下し、`PitchShifter`への`setFormantBaseHz`等のAPI追加は行わないことにした（T-005でピッチ検出器の結果をシフターへ配線する作業自体はケロケロ機能に必要なため別途実施するが、P4改善目的では行わない）。docs/decisions.md D-015へ実験結果と却下の判断を追記した。
 
 ### 結果
-- 実装変更はテスト・コア側ともになし（一時実験ファイルは削除済み）。`cmake --build build --parallel && ctest --test-dir build --output-on-failure`は前回セッション（コミット297726e）から変化なし: shifterのみ不合格（P4の2ケース、原因はD-015のとおりライブラリの残存特性で解決せず）。
-- 本セッションのコミット（d062d0d）には、前回セッション末に本ファイルへ追記した「コミット: 297726e」の1行（当時は`git add -A`前提の未コミット差分として残していたもの）も合わせて含まれている。以後は各エントリの本文にコミットハッシュを埋め込まず、コミット自体は`git log`で追える情報として扱う。
+- 実装変更はなし（一時実験ファイルは削除済み）。`cmake --build build --parallel && ctest --test-dir build --output-on-failure`は変化なし: shifterのみ不合格（P4の2ケース、原因はD-015のとおりライブラリの残存特性で解決せず）。
 
 ### 計画からの変更点
 - なし。P4の閾値・実装は変更していない。`setFormantBase`案を検討したが効果がないと確認し不採用とした。
 
 ### 未解決事項
-- D-015: P4（f0=100Hzの母音、±5半音）が引き続き不合格。原因はSignalsmith Stretchの低域ピッチ量子化誤差で、フォルマント補償の内部f0推定は無関係と判明した。T-005着手前に閾値・設計方針の判断が必要。
+- D-015: P4（f0=100Hzの母音、±5半音）が引き続き不合格。原因はSignalsmith Stretchの低域ピッチ量子化誤差で、フォルマント補償の内部f0推定は無関係と判明した。Manager判断によりP4a/P4bへの分割で対応（後続エントリ参照）。
 
 ### 次回開始位置
-- Manager判断待ち（D-015）。判断確定後、必要ならPitchShifter/Engine/tests/TestSignals.hへ反映。並行してT-005に着手可能。
+- 後続エントリ（P4a/P4b分割）参照。
 
 ---
 
@@ -73,9 +92,6 @@
 
 ### 次回開始位置
 - Manager判断待ち（D-015）。判断確定後、必要ならPitchShifter/Engine/tests/TestSignals.hへ反映。並行してT-005（`src/core/Effects.*`、`src/core/PitchDetector.*`、`src/core/Engine.cpp`層2部分、`tests/EffectsTests.cpp`）に着手可能。
-
-### コミット
-- `297726e` T-004: D-014対応（ピッチシフターのブロック長を120ms固定に変更）
 
 ---
 
