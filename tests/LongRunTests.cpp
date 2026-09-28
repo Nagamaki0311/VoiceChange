@@ -187,6 +187,9 @@ public:
 
         // CPU参考値（Engine::processの実時間 ÷ 音声時間）。プリセット別にも集計する。
         std::array<double, 8> cpuSecondsByPreset {}, audioSecondsByPreset {};
+
+        // プリセット別の出力RMS（非バイパス区間のみ）。あるプリセットが沈黙したら落とすため。
+        std::array<double, 8> sumSquaresByPreset {}, samplesByPreset {};
         double cpuSeconds = 0.0;
         const auto wallStart = juce::Time::getHighResolutionTicks();
 
@@ -267,9 +270,17 @@ public:
             if (peak > 1.0)
                 ++overPeakBlocks;
 
+            const bool bypassed = ! engine.params().enabled.load();
             for (const float v : outBuf)
+            {
                 outSumSquares += (double) v * (double) v;
+
+                if (! bypassed)
+                    sumSquaresByPreset[presetIdx] += (double) v * (double) v;
+            }
             outSamples += (std::uint64_t) kBo;
+            if (! bypassed)
+                samplesByPreset[presetIdx] += (double) kBo;
 
             const double fillSmoothed = fifo.stats().fillSmoothedSamples.load (std::memory_order_relaxed);
             const double target = fifo.stats().targetSamples.load (std::memory_order_relaxed);
@@ -336,11 +347,20 @@ public:
                     + ", changes preset=" + juce::String (presetChanges) + " pitch=" + juce::String (pitchChanges)
                     + " bypass=" + juce::String (bypassChanges));
 
-        juce::String cpuText ("LongRun: CPU (process time / audio time) total=" + juce::String (100.0 * cpuSeconds / kDurationSeconds, 2) + "%");
+        juce::String cpuText ("LongRun: CPU approx. (process time / audio time) total=" + juce::String (100.0 * cpuSeconds / kDurationSeconds, 2) + "%");
         for (size_t p = 0; p < 8; ++p)
             if (audioSecondsByPreset[p] > 0.0)
                 cpuText << ", " << vc::kPresets[p].id << "=" << juce::String (100.0 * cpuSecondsByPreset[p] / audioSecondsByPreset[p], 2) << "%";
         logMessage (cpuText);
+
+        juce::String rmsText ("LongRun: output RMS (non-bypass)");
+        std::array<double, 8> rmsByPreset {};
+        for (size_t p = 0; p < 8; ++p)
+        {
+            rmsByPreset[p] = samplesByPreset[p] > 0.0 ? std::sqrt (sumSquaresByPreset[p] / samplesByPreset[p]) : 0.0;
+            rmsText << (p == 0 ? " " : ", ") << vc::kPresets[p].id << "=" << juce::String (rmsByPreset[p], 4);
+        }
+        logMessage (rmsText);
         logMessage (juce::String ("LongRun: wall time=") + juce::String (wallSeconds, 1) + "s");
 
         expectEquals ((int) nonFiniteBlocks, 0, "NaN/Infを含む出力ブロックがある");
@@ -351,6 +371,8 @@ public:
         expectEquals ((int) engine.getErrorFlags(), 0, "エラーフラグが立った");
         expectEquals ((int) allocations, 0, "push/pull/processでアロケーションが発生した");
         expect (outRms > 1.0e-3, "出力がほぼ無音（信号経路が生きていない）");
+        for (size_t p = 0; p < 8; ++p)
+            expect (rmsByPreset[p] > 1.0e-3, juce::String (vc::kPresets[p].id) + ": 非バイパス区間の出力RMSが無音（" + juce::String (rmsByPreset[p], 5) + "）");
         expect (presetChanges >= 360 && pitchChanges >= 514 && bypassChanges == 59, "制御の切替回数が想定と異なる");
 
         expectEquals ((int) cViolations, 0, "c) 平滑充填が目標±25%を外れた区間がある");
