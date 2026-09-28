@@ -19,9 +19,11 @@
 // 両方をopen()し直す（D-009。この対称性はConnectionMonitorではなくここで保証する）。
 // 監視対象は3つ: (1)コールバック回数の停滞（入力・出力それぞれ。主軸）、(2)audioDeviceError・例外、
 // (3)audioDeviceAboutToStartの2回目以降でレート/バッファ長が変化した場合。
-// JUCE 9のWASAPIはデバイス側の無言終了（入力スレッドの1秒タイムアウト等）でaudioDeviceStopped()を
-// 呼ばない（呼ばれるのはこちらからのstop()だけ。D-016）ため、無言終了の検出はコールバック回数のみに頼る。
-// audioDeviceStopped()がこちらのstop()以外で呼ばれた場合(他のデバイス型)は補助的にerrorFlag側へ合成する。
+// JUCE 9のWASAPIは、デバイス抜去・セッション失効(flagShutdown)やサンプルレート変更を検出すると
+// handleAsyncUpdate() → close() → stop() → audioDeviceStopped() をメッセージスレッドで呼ぶ。こちらの
+// stop()以外でaudioDeviceStopped()が呼ばれたらdeviceStoppedFlagを立て、抜去・レート変更の即時検出経路にする。
+// 呼ばれないのは入力専用スレッドの1秒タイムアウトによる無言終了だけで、それはコールバック回数の停滞
+// （入力・出力それぞれ2秒）で検出する（D-016）。
 
 namespace vc
 {
@@ -163,7 +165,7 @@ private:
     std::atomic<std::uint64_t> inputCallbackCount { 0 };
     std::atomic<std::uint64_t> outputCallbackCount { 0 };
     std::atomic<bool> errorFlag { false };          // audioDeviceErrorまたは例外
-    std::atomic<bool> deviceStoppedFlag { false };  // こちらからのstop()以外でaudioDeviceStoppedが呼ばれた（補助。WASAPIでは呼ばれない）
+    std::atomic<bool> deviceStoppedFlag { false };  // こちらのstop()以外でaudioDeviceStoppedが呼ばれた（WASAPIの抜去・レート変更の即時検出。無言終了では立たない）
     std::atomic<bool> muteOutputFlag { false };     // レート/バッファ長の変化後、再オープンまで出力を無音にする
     std::atomic<bool> reopenRequestedFlag { false }; // audioDeviceAboutToStartの2回目以降でレート/バッファ長が変化
     std::atomic<bool> expectingIntentionalStop { false }; // close()内でstop()を呼ぶ間だけtrue

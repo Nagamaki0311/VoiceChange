@@ -31,7 +31,11 @@
 
 ### 結果
 - `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 全6件成功。
+- 実行コマンド: `cmake --build build --parallel`、`ctest --test-dir build --output-on-failure`、`xvfb-run -a -s "-screen 0 1280x1024x24" build/VoiceChange_artefacts/Release/VoiceChange --screenshot <png>`、`timeout 8 xvfb-run -a build/VoiceChange_artefacts/Release/VoiceChange`。
 - `--screenshot`: 終了コード0、460×600。デバイスなし環境で崩れなし（入力・出力とも0件のため両方赤枠、メッセージはE6）。`timeout 8 xvfb-run -a ...`は落ちずにタイムアウト（124）まで生存。
+
+### 再レビューLow2件の修正
+- `openDevices`は入力が開けなければ出力を開かない（失敗側は`getOutputNames().contains(outName)`でInput/Both）。再試行の開き直しは両方の名前が一覧にあるときだけ。`audioDeviceStopped`に関するコメントとD-016決定3を実態（抜去・レート変更の即時検出経路であり、呼ばれないのは入力スレッドの無言終了のみ）に修正し、決定4を追加。
 
 ### 次回開始位置
 - Windows実機でのE1〜E4・再接続・コンボボックスの動的更新の確認（README「手動確認手順」）。

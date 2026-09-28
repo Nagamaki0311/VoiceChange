@@ -66,8 +66,10 @@ public:
         lastBufferSize = bufferSize;
     }
 
-    // こちらからのclose()中のstop()以外でstopped()が呼ばれた場合は異常とみなす(補助。JUCE 9のWASAPIは
-    // デバイス側の無言終了でこれを呼ばないため、主たる検出はコールバック回数の停滞。D-016)。
+    // こちらからのclose()中のstop()以外でstopped()が呼ばれた場合は異常とみなす。JUCE 9のWASAPIは抜去・
+    // セッション失効・サンプルレート変更でhandleAsyncUpdate()→close()→stop()→stopped()を呼ぶため、
+    // これが即時検出経路になる。入力専用スレッドの1秒タイムアウトによる無言終了では呼ばれず、そちらは
+    // コールバック回数の停滞で検出する(D-016)。
     static void stopped (const std::atomic<bool>& expectingIntentionalStop, std::atomic<bool>& deviceStoppedFlag) noexcept
     {
         if (! expectingIntentionalStop.load (std::memory_order_relaxed))
@@ -395,20 +397,25 @@ bool AudioIO::openDevices (const juce::String& inName, const juce::String& outNa
     errorText.clear();
     failedSide = FailedSide::None;
 
-    // 失敗した側を正確に特定するため、片方が失敗しても両方を試す(どちらかが失敗すれば成功した側も閉じる)。
+    // 入力が失敗したら出力は開かない(再試行のたびに出力デバイスを低遅延モードで開閉しないため)。
+    // その場合の失敗側は、出力名が一覧に無い(または空)ならBoth、あればInput。
+    // 入力が開けて出力が失敗した場合は、成功した入力を閉じてOutput。
     DeviceInfo newInputInfo, newOutputInfo;
     auto newInputDevice = openOneDevice (outName, inName, true, newInputInfo);
-    auto newOutputDevice = openOneDevice (outName, inName, false, newOutputInfo);
+    std::unique_ptr<juce::AudioIODevice> newOutputDevice;
+
+    if (newInputDevice != nullptr)
+        newOutputDevice = openOneDevice (outName, inName, false, newOutputInfo);
 
     if (newInputDevice == nullptr || newOutputDevice == nullptr)
     {
         if (newInputDevice != nullptr)
             newInputDevice->close();
-        if (newOutputDevice != nullptr)
-            newOutputDevice->close();
 
-        failedSide = newInputDevice == nullptr ? (newOutputDevice == nullptr ? FailedSide::Both : FailedSide::Input)
-                                               : FailedSide::Output;
+        if (newInputDevice != nullptr)
+            failedSide = FailedSide::Output;
+        else
+            failedSide = (outName.isNotEmpty() && getOutputNames().contains (outName)) ? FailedSide::Input : FailedSide::Both;
 
         // 日本語はfromUTF8(生のリテラルはLatin-1として解釈され文字化けする)。
         const auto inText = juce::String::fromUTF8 ("入力デバイスを開けませんでした: ") + inName;
@@ -572,7 +579,7 @@ void AudioIO::evaluateConnection (bool listChangedThisTick)
         return;
     }
 
-    // (1)audioDeviceError・例外、(2)こちらのstop()以外でのaudioDeviceStopped(補助)を合成して
+    // (1)audioDeviceError・例外、(2)こちらのstop()以外でのaudioDeviceStopped(抜去・レート変更の即時検出)を合成して
     // ConnectionMonitorのerrorFlagにする。
     const bool combinedError = errorFlag.exchange (false, std::memory_order_relaxed)
                               || deviceStoppedFlag.exchange (false, std::memory_order_relaxed);
@@ -595,9 +602,11 @@ void AudioIO::evaluateConnection (bool listChangedThisTick)
     }
     else if (action == ConnectionMonitor::Action::TryReopen)
     {
-        // D-009: 保存済みデバイスが見つからない間も同じ名前で再試行を続ける(既定へは切り替えない)。
+        // D-009: 保存済みデバイスが見つからない間も既定へは切り替えない。開き直しを試すのは両方の名前が
+        // 一覧にあるときだけ(無いときは一覧の変化を待つ。変化すればConnectionMonitorが即TryReopenを返す)。
         // 世代は進めない(一度動いていたなら、再試行が失敗してもE1〜E3のまま)。
-        openDevices (desiredInputName, desiredOutputName); // 成功時はconnectionMonitorがリセットされる
+        if (devicesPresent)
+            openDevices (desiredInputName, desiredOutputName); // 成功時はconnectionMonitorがリセットされる
     }
 }
 

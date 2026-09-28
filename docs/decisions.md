@@ -339,12 +339,13 @@
 ### 決定
 1. **E4（デバイスを開けない）とE1〜E3（切断・再接続中）の切り分け**: `AudioIO`が「現在の`open()`世代で一度でもstartまで成功したか」を持つ。`open()`（起動時・手動選択時）が世代を進め、ConnectionMonitorのTryReopenによる再試行は世代を進めない。一度もstartに成功していない世代の失敗は、時間が経ってもE4（`AudioIO::getFailedSide()`が返す失敗側None/Input/Output/Bothの行を赤枠、文言も失敗側で決める。文言の前方一致には頼らない）。startに成功した後の異常だけがE1〜E3で、保存デバイス名が一覧から消えていればE1/E2、消えていなければ（ドライバが一覧に残ったまま無言で止まった場合等）E3として両方の行を赤くする。再接続の再試行はどちらの場合も2秒ごとに続ける（開くこと自体の失敗は`ConnectionMonitor::enterFailed()`で異常状態へ入れる）。
 2. **Engineのエラーフラグ（bit0非有限値・bit1例外）は`AudioIO`の500msタイマーだけが読んで消費する**: T-006まではMainComponentが直接`engine.getErrorFlags()`/`clearErrorFlags()`を読んで10秒間のE5表示を管理していたが、T-007でトレイのバッジ・ツールチップも同じ情報を必要とするようになった。2箇所が同じedge-triggeredフラグを消費すると早いもの勝ちで取りこぼす。`AudioIO`が唯一の消費者になり、`hasRecentEngineError()`（レベル判定）と`getLastEngineErrorTimeText()`を公開する形に変更した。
-3. **無言終了の検出はコールバック回数の停滞のみに頼る**: JUCE 9のWASAPIは、入力スレッドが1秒のイベント待ちタイムアウトで通知なしに終了しても`audioDeviceStopped()`を呼ばない（`audioDeviceStopped()`が呼ばれるのはこちらの`stop()`だけ）。このため、ConnectionMonitorは入力・出力それぞれの最終進捗時刻を持ち、どちらか一方でも2秒進まなければ異常とする（片方だけ止まる異常を、もう一方が進んでいることで見逃さない）。`audioDeviceStopped()`は`close()`内の意図した`stop()`（`expectingIntentionalStop`）以外で呼ばれた場合にだけ、他のデバイス型向けの補助としてエラーフラグへ合成する。
+3. **異常の検出経路は2つ（即時経路とコールバック回数の停滞）**: JUCE 9のWASAPIは、デバイス抜去・セッション失効（`flagShutdown`）やサンプルレート変更を検出すると`handleAsyncUpdate()` → `close()` → `stop()` → `audioDeviceStopped()`をメッセージスレッドで呼ぶ。`AudioIO::close()`内の意図した`stop()`（`expectingIntentionalStop`）以外で`audioDeviceStopped()`が呼ばれた場合は`deviceStoppedFlag`を立ててエラーフラグへ合成し、抜去・レート変更を即時に検出する。呼ばれないのは、入力専用スレッドが1秒のイベント待ちタイムアウトで通知なしに終了する無言終了だけである。これはコールバック回数の停滞で検出する。ConnectionMonitorは入力・出力それぞれの最終進捗時刻を持ち、どちらか一方でも2秒進まなければ異常とする（片方だけ止まる異常を、もう一方が進んでいることで見逃さない）。
+4. **開き直しの試行は最小限にする**: `openDevices()`は入力が開けなければ出力を開かない（失敗側は出力名が一覧にあるかでInput/Bothを決める）。再試行（TryReopen）で開き直すのは、両方の名前が一覧にあるときだけで、無いときは一覧の変化（即TryReopen）を待つ。入力切断中に2秒ごとに出力デバイス（低遅延モード）を開閉しないため。
 
 ### 理由
 - 1: E4は「今すぐ別のデバイスを選ぶ必要がある」状態、E1〜E3は「待てば戻る」状態であり、一度も動いていないデバイスに「再接続中」と出すのは誤り。世代のフラグにより、ConnectionMonitorのインターフェースを大きく変えずにdesign.mdの表と一致させられる。
 - 2: エラーフラグの消費者を1つに絞ることで、取りこぼし・二重クリアの競合を構造的に防げる。
-- 3: 実際のJUCE 9のソース（`juce_WASAPI_windows.cpp`）で、無言終了時にコールバックが呼ばれないことを確認した。検出できる情報はコールバックが進んでいるかだけである。
+- 3: 実際のJUCE 9のソース（`juce_WASAPI_windows.cpp`の`handleAsyncUpdate()`・`stop()`・入力スレッドの1秒タイムアウト）で、抜去・レート変更ではコールバックが呼ばれ、入力スレッドの無言終了では呼ばれないことを確認した。後者で検出できる情報はコールバックが進んでいるかだけである。
 
 ### 影響
 - MainComponentの`errorUntilMs`/`errorTimestampText`は削除し、`AudioIO`側の値を読むだけにした。
