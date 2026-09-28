@@ -66,10 +66,18 @@ void ResamplingFifo::prepare (double newInRate, double newOutRate, int maxInBloc
 
 // D-012: 生の充填量を「入力が連続的に到着した」とみなす連続換算値へ直す。
 // 直前のpushからnowSecondsまでの経過時間ぶん、直前のブロックが徐々に到着したとみなして按分する。
-double ResamplingFifo::continuousFill (int rawFilled, double nowSeconds) const noexcept
+//
+// レビュー指摘1: 生の充填量を先に読んでからtime/blockLenを読むと、その間にpushが割り込んだ
+// 場合「rawは古い(pushが反映される前)のにtimeは新しい」組み合わせになり、fill_cが1ブロック分
+// 過小になり得る。time(acquire)→blockLen(relaxed)→raw の順に読めば、push側がblockLenを
+// relaxed書き→timeをrelease書きする順序と対になり、release-acquireのhappens-before関係により
+// 「timeの新しい値が見えた以上、それ以前(blockLen書き込み含む)にpush側が行った全ての書き込み
+// （リングバッファへの書き込み含む）は、この後で読むrawに必ず反映されている」が保証される。
+double ResamplingFifo::continuousFill (double nowSeconds) const noexcept
 {
     const double t = lastPushTime.load (std::memory_order_acquire);
     const int biLast = lastPushBlockLen.load (std::memory_order_relaxed);
+    const int rawFilled = fifo.getNumReady();
 
     if (biLast <= 0)
         return (double) rawFilled;
@@ -169,7 +177,7 @@ void ResamplingFifo::handleUnderrun (float* out, int offset, int remaining, int 
     if (availableOut < remaining)
         juce::FloatVectorOperations::clear (out + offset + availableOut, remaining - availableOut);
 
-    updateFillStats (continuousFill (fifo.getNumReady(), nowSeconds), remaining);
+    updateFillStats (continuousFill (nowSeconds), remaining);
 
     fifoStats.underruns.fetch_add (1, std::memory_order_relaxed);
     jitterMarginMs = std::min (kMaxJitterMarginMs, jitterMarginMs + kJitterStepMs);
@@ -191,8 +199,7 @@ void ResamplingFifo::pull (float* out, int n, double nowSeconds) noexcept
 
         if (phase == Phase::Refilling)
         {
-            const int filled = fifo.getNumReady();
-            const double fillC = continuousFill (filled, nowSeconds);
+            const double fillC = continuousFill (nowSeconds);
             const int needed = neededInput (remaining);
 
             if (fillC >= targetSamples + (double) needed)
@@ -211,8 +218,7 @@ void ResamplingFifo::pull (float* out, int n, double nowSeconds) noexcept
 
         if (phase == Phase::Idle)
         {
-            const int filled = fifo.getNumReady();
-            const double fillC = continuousFill (filled, nowSeconds);
+            const double fillC = continuousFill (nowSeconds);
 
             if (fillC > kOverrunMultiple * targetSamples)
             {
@@ -225,7 +231,10 @@ void ResamplingFifo::pull (float* out, int n, double nowSeconds) noexcept
             {
                 const int needed = neededInput (remaining);
 
-                // アンダーラン判定は生の充填量のまま行う(D-012)。
+                // アンダーラン判定用の生の充填量は、continuousFill()呼び出し後に別途読む
+                // (D-012、レビュー指摘1: continuousFill内部の読み取り順序と混ぜない)。
+                const int filled = fifo.getNumReady();
+
                 if (filled < needed)
                 {
                     handleUnderrun (out, produced, remaining, filled, nowSeconds);
@@ -239,7 +248,7 @@ void ResamplingFifo::pull (float* out, int n, double nowSeconds) noexcept
         {
             processNormal (out + produced, remaining);
             produced += remaining;
-            updateFillStats (continuousFill (fifo.getNumReady(), nowSeconds), remaining);
+            updateFillStats (continuousFill (nowSeconds), remaining);
             continue;
         }
 
@@ -252,7 +261,7 @@ void ResamplingFifo::pull (float* out, int n, double nowSeconds) noexcept
 
         phaseCount -= chunk;
         produced += chunk;
-        updateFillStats (continuousFill (fifo.getNumReady(), nowSeconds), chunk);
+        updateFillStats (continuousFill (nowSeconds), chunk);
 
         if (phaseCount == 0)
         {

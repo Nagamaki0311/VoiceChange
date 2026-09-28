@@ -19,6 +19,23 @@
 
 ---
 
+## 2026-09-28 T-003 レビュー指摘3件修正
+
+### 実施内容
+- 【Medium】`continuousFill`の読み取り順序のレース: 引数を`nowSeconds`のみにし、関数内部で`lastPushTime`(acquire)→`lastPushBlockLen`(relaxed)→`fifo.getNumReady()`の順に読むよう変更（release-acquireのhappens-before関係により、rawが読んだ時刻のpush以降の状態を必ず含むことを保証する）。呼び出し4箇所（Refilling判定・Idle内の3倍超過判定・Idle通常経路・フェード区間、いずれも`src/core/ResamplingFifo.cpp`の`pull()`/`handleUnderrun()`）を置き換えた。アンダーラン判定用の生の充填量は`continuousFill()`呼び出し後に別途`fifo.getNumReady()`で読む。
+- 【Low】R1・R4の直接検証: `ResamplingFifo`にテスト専用の`debugRawFilled()`/`debugFillC(nowSeconds)`を追加（音声スレッドの本処理からは使わない旨をコメント）。R1は「fill_c ≥ 目標+needed になるまで出力は全て0」、R4は「破棄直後の充填量 ≤ 目標+1ブロック」を計画どおりの数値判定に戻した（既存の間接確認は置き換え）。
+- 【バグ】`AudioIO::getLatency`のデバイス遅延二重計上: `getInput/OutputLatencyInSamples()`は既に「ストリーム遅延+バッファ長」を返すため、`bufferSize`の再加算を削除し`latencySamples / rate`のみにした。
+
+### 結果
+- `cmake --build build --parallel` 成功。
+- `ctest --test-dir build --output-on-failure`: 全件Passed（smoke, ring_buffer(R1〜R6), ring_buffer_long(S1〜S8)。実時間約31秒）。
+- `timeout 8 xvfb-run -a build/VoiceChange_artefacts/Release/VoiceChange`: 終了コード124（クラッシュなし）。
+
+### 次回開始位置
+- T-004（`src/core/PitchShifter.*`、`src/core/Engine.*`）。
+
+---
+
 ## 2026-09-28 T-003 D-012対応: 充填量を連続換算値(fill_c)に変更しS1〜S8全件合格
 
 ### 実施内容

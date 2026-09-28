@@ -339,12 +339,15 @@ LatencyBreakdown AudioIO::getLatency() const noexcept
 {
     LatencyBreakdown b;
 
+    // レビュー指摘3: getInput/OutputLatencyInSamples()は既に「ストリーム遅延+バッファ長」を
+    // 返す（JUCEのWASAPI実装ではlatencyIn = latencySamples + currentBufferSizeSamples）ため、
+    // ここでbufferSizeを再加算すると二重計上になる。
     b.deviceInMs = inputInfo.rate > 0.0
-        ? ((double) inputInfo.latencySamples + (double) inputInfo.bufferSize) / inputInfo.rate * 1000.0
+        ? (double) inputInfo.latencySamples / inputInfo.rate * 1000.0
         : 0.0;
 
     b.deviceOutMs = outputInfo.rate > 0.0
-        ? ((double) outputInfo.latencySamples + (double) outputInfo.bufferSize) / outputInfo.rate * 1000.0
+        ? (double) outputInfo.latencySamples / outputInfo.rate * 1000.0
         : 0.0;
 
     b.ringBufferMs = fifo.getLatencyMs();

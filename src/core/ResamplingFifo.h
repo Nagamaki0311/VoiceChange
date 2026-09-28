@@ -52,6 +52,10 @@ public:
     // 平滑化したfill_c + (Bi + Bo)/2（それぞれms換算して合算）。D-006・D-012。
     double getLatencyMs() const noexcept;
 
+    // テスト専用（レビュー指摘2）。音声スレッドの本処理からは使わない。瞬時値をそのまま返す。
+    int debugRawFilled() const noexcept { return fifo.getNumReady(); }
+    double debugFillC (double nowSeconds) const noexcept { return continuousFill (nowSeconds); }
+
 private:
     enum class Phase
     {
@@ -66,7 +70,7 @@ private:
     int neededInput (int outSamples) const noexcept;
     void recomputeTarget() noexcept;
     void updateFillStats (double fillCSamples, int outputSamplesElapsed) noexcept;
-    double continuousFill (int rawFilled, double nowSeconds) const noexcept;
+    double continuousFill (double nowSeconds) const noexcept;
     void updateSpeedRatio() noexcept;
     void processNormal (float* out, int chunk) noexcept;
     void handleUnderrun (float* out, int offset, int remaining, int filled, double nowSeconds) noexcept;

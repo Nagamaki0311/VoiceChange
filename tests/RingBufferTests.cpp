@@ -339,7 +339,16 @@ private:
         double simTime = 0.0;
         const double halfPeriod = (double) block / rate * 0.5;
 
+        // レビュー指摘2: 計画どおり「充填量(fill_c) ≥ 目標+needed になるまで出力は全て0」を
+        // 直接検証する。起動直後(Refilling中)はupdateSpeedRatio()が一度も呼ばれないため
+        // speedRatioはprepare()直後のnominalRatio(=1、rate:rate)のまま変わらず、
+        // needed = ceil(1.0×block)+2 = block+2 と厳密に一致する。
+        const double target = fifo.stats().targetSamples.load();
+        const int needed = block + 2;
+        const double threshold = target + (double) needed;
+
         bool sawNonZero = false;
+        bool zeroHeldUntilThreshold = true;
         std::vector<float> envelope;
 
         for (int iter = 0; iter < 2000 && ! sawNonZero; ++iter)
@@ -347,10 +356,16 @@ private:
             gen.generate (inBuf.data(), block);
             fifo.push (inBuf.data(), block, simTime);
             simTime += halfPeriod;
+
+            const double fillCBeforePull = fifo.debugFillC (simTime);
+
             fifo.pull (outBuf.data(), block, simTime);
             simTime += halfPeriod;
 
             const bool allZero = std::all_of (outBuf.begin(), outBuf.end(), [] (float v) { return v == 0.0f; });
+
+            if (fillCBeforePull < threshold && ! allZero)
+                zeroHeldUntilThreshold = false;
 
             if (! allZero)
             {
@@ -370,6 +385,7 @@ private:
             }
         }
 
+        expect (zeroHeldUntilThreshold, "充填量(fill_c)が目標+needed未満なのに出力が0でなかった");
         expect (sawNonZero, "再充填が完了しなかった");
 
         const int fadeSamples = (int) std::lround (0.002 * rate);
@@ -556,22 +572,13 @@ private:
         simTime += halfPeriod;
         expectEquals ((int) fifo.stats().discards.load(), (int) discardsBefore + 1, "discardsが+1でない");
 
-        // ResamplingFifoの公開APIには瞬時の充填量(平滑化前)を返す手段がないため、
-        // 「破棄後の充填量が目標付近まで戻っている」ことを、直後の数回のpull()で
-        // 追加の破棄が起きない（=3倍を超えていない）ことで間接的に確認する。
-        const auto discardsAfterFirst = fifo.stats().discards.load();
-
-        for (int i = 0; i < 5; ++i)
-        {
-            gen.generate (inBuf.data(), block);
-            fifo.push (inBuf.data(), block, simTime);
-            simTime += halfPeriod;
-            fifo.pull (outBuf.data(), block, simTime);
-            simTime += halfPeriod;
-        }
-
-        expectEquals ((int) fifo.stats().discards.load(), (int) discardsAfterFirst,
-                       "破棄直後にさらに破棄が起きている(充填量が目標付近まで戻っていない)");
+        // レビュー指摘2: 計画どおり「破棄直後の充填量 ≤ 目標+1ブロック」を直接検証する
+        // （fadeLen=96サンプル < block=480サンプルなので、フェードアウト→破棄→フェードイン
+        // は1回のpull()呼び出し内で完結し、直後の生の充填量を読めば破棄結果を確認できる）。
+        const double target = fifo.stats().targetSamples.load();
+        const int rawAfterDiscard = fifo.debugRawFilled();
+        expect ((double) rawAfterDiscard <= target + (double) block,
+                "破棄直後の充填量が目標+1ブロックを超えている");
 
         bool converged = false;
         const int maxIters = (int) std::lround (30.0 * rate / block);
