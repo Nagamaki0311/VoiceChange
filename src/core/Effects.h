@@ -76,7 +76,7 @@ private:
 
     juce::SmoothedValue<float> carrierFreq;
     juce::SmoothedValue<float> voicingSmoothed;
-    juce::Random rng;
+    juce::Random rng { 0x5eed }; // 固定シード（テストの再現性のため）
 
     double sampleRate = 48000.0;
     float attackCoeff = 0.0f;
