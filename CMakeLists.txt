@@ -22,7 +22,7 @@ FetchContent_MakeAvailable(JUCE)
 
 FetchContent_Declare(
     signalsmith-stretch
-    GIT_REPOSITORY https://github.com/Signalsmith-Audio/stretch.git
+    GIT_REPOSITORY https://github.com/Signalsmith-Audio/signalsmith-stretch.git
     GIT_TAG 1.4.0
     GIT_SHALLOW ON
     SYSTEM
