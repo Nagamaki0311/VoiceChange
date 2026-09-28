@@ -493,7 +493,6 @@ private:
         vc::test::addNoiseFloor (voice, -80.0f, 333);
 
         int failures = 0;
-        int knownOnsetTransients = 0;
         double worstSteadyRatio = 0.0;
         juce::String worstSteadyName;
 
@@ -509,7 +508,16 @@ private:
                     std::vector<float> in (voice);
 
                     if (onset)
-                        std::fill (in.begin(), in.begin() + settle + steady, 0.0f); // デジタル無音 → 切替の瞬間に発声開始
+                    {
+                        // デジタル無音 → 切替の瞬間に発声開始。立ち上がりは10msの二乗余弦アタック（D-017）。
+                        // 振幅が瞬時に最大になる位相そろいの合成母音は実際の声を代表せず、Signalsmith Stretchを通すと
+                        // シフター遅延（120ms）の位置に定常の約2倍のピーク・隣接差が出る（測定: minion->helium
+                        // 隣接差0.181対定常0.093）ため、アタック付きにして通常基準（1.5倍）で判定する。
+                        std::fill (in.begin(), in.begin() + settle + steady, 0.0f);
+                        const int attack = (int) std::lround (0.010 * kFs);
+                        for (int i = 0; i < attack; ++i)
+                            in[(size_t) (settle + steady + i)] *= (float) (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * (double) i / (double) attack));
+                    }
 
                     vc::Engine engine;
                     prepareEngine (engine);
@@ -544,34 +552,17 @@ private:
                         const double beforeDiff = vc::test::maxAdjacentDiff (before, steady);
                         const double after = vc::test::maxAdjacentDiff (out.data() + total - steady, steady);
                         const double trans = vc::test::maxAdjacentDiff (out.data() + switchPos, transition);
-                        const juce::String msg = juce::String (onset ? "onset " : "steady ") + presetName (a) + "->" + presetName (b)
-                                                 + ": transition diff " + juce::String (trans, 4) + " > 1.5*max(" + juce::String (beforeDiff, 4)
-                                                 + ", " + juce::String (after, 4) + ")";
-
-                        // ponytail: 稼働中のシフター（a）が無音のまま発声開始と同時にシフター系のプリセットbへ
-                        // 切り替わる場合、シフターの遅延（120ms）ちょうどに、位相がそろった合成母音の立ち上がりが
-                        // 出力へ現れ、定常値の約2倍のピーク・隣接差になる（例: minion->helium 隣接差0.18、定常0.093、
-                        // ピーク0.79対0.42）。Signalsmith Stretchの立ち上がり特性でEngine側では除けないため、
-                        // 既知の6通りとして数えるだけにし失敗にはしない（T-005報告参照）。改善案: シフターの立ち上がり
-                        // だけ短いフェードインを掛ける、または実声で確認する。
-                        if (onset && vc::shifterShouldRun (static_cast<vc::Preset> (a), 0) && vc::shifterShouldRun (static_cast<vc::Preset> (b), 0))
-                        {
-                            ++knownOnsetTransients;
-                            logMessage ("E9 known onset transient: " + msg);
-                        }
-                        else
-                        {
-                            ++failures;
-                            expect (false, msg);
-                        }
+                        ++failures;
+                        expect (false, juce::String (onset ? "onset " : "steady ") + presetName (a) + "->" + presetName (b)
+                                           + ": transition diff " + juce::String (trans, 4) + " > 1.5*max(" + juce::String (beforeDiff, 4)
+                                           + ", " + juce::String (after, 4) + ")");
                     }
                 }
             }
         }
 
         logMessage ("E9: worst steady-scenario ratio (transition diff / steady diff, limit 1.5) " + juce::String (worstSteadyRatio, 3) + " at " + worstSteadyName);
-        logMessage ("E9: " + juce::String (2 * 56 - failures - knownOnsetTransients) + "/112 switches passed, "
-                    + juce::String (knownOnsetTransients) + " known onset transients, " + juce::String (failures) + " failures");
+        logMessage ("E9: " + juce::String (2 * 56 - failures) + "/112 switches passed");
     }
 
     // ----- E10: CPU（参考値、失敗判定なし） -----
