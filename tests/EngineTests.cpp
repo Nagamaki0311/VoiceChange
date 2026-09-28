@@ -263,8 +263,14 @@ private:
     // ----- E5: NaN/Inf注入 -----
     void runE5()
     {
-        runE5Case (std::numeric_limits<float>::quiet_NaN(), "NaN");
-        runE5Case (std::numeric_limits<float>::infinity(), "Inf");
+        runE5Case (std::numeric_limits<float>::quiet_NaN(), "NaN", vc::Preset::Minion);
+        runE5Case (std::numeric_limits<float>::infinity(), "Inf", vc::Preset::Minion);
+        // ピッチ検出・トークボックス・ケロケロの経路（検出器のIIR状態・補正量・キャリア）も対象に含める。
+        for (const auto preset : { vc::Preset::Kerokero, vc::Preset::Talkbox })
+        {
+            runE5Case (std::numeric_limits<float>::quiet_NaN(), "NaN", preset);
+            runE5Case (std::numeric_limits<float>::infinity(), "Inf", preset);
+        }
 
         beginTest ("E5c: バイパス中のNaN注入で出力0・フラグ");
         {
@@ -281,13 +287,13 @@ private:
         }
     }
 
-    void runE5Case (float badValue, const juce::String& label)
+    void runE5Case (float badValue, const juce::String& label, vc::Preset preset)
     {
-        beginTest ("E5: " + label + "注入(ミニオン稼働中)からの復帰");
+        beginTest ("E5: " + label + "注入(" + juce::String (vc::kPresets[(size_t) preset].id) + "稼働中)からの復帰");
 
         vc::Engine engine;
         prepareEngine (engine);
-        engine.params().preset.store ((int) vc::Preset::Minion);
+        engine.params().preset.store ((int) preset);
         engine.params().pitch.store (0);
 
         auto lead = vc::test::makeSine (220.0, kFs, (int) kFs * 2, 0.3f);
@@ -295,7 +301,7 @@ private:
         engine.process (leadOut.data(), (int) leadOut.size());
 
         const int expectedL = engine.getShifterLatencySamples();
-        expect (expectedL > 0, "shifter should be active for Minion preset");
+        expect ((expectedL > 0) == vc::shifterShouldRun (preset, 0), "shifter activity does not match the preset");
 
         std::vector<float> badBlock ((size_t) kMaxBlock, 0.3f);
         badBlock[10] = badValue;
@@ -371,7 +377,7 @@ private:
     // ----- E7: アロケーション -----
     void runE7()
     {
-        beginTest ("E7: 全プリセット・全遷移でのアロケーション0回");
+        beginTest ("E7: 全プリセット・全56通りの順序付き切替・層1ピッチ・バイパス・リバーブ停止でのアロケーション0回");
 
         vc::Engine engine;
         prepareEngine (engine);
@@ -379,6 +385,29 @@ private:
 
         auto signal = vc::test::makeSine (220.0, kFs, kMaxBlock * 50, 0.3f);
         std::vector<float> buf (signal);
+        std::vector<float> pairBuf (signal.size());
+
+        // 全56通りの順序付き切替（a→b）。各プリセットを約85ms動かしてから切り替え、切替後も約85ms処理する
+        // （効果のフェード20ms、シフターの休止⇔稼働、ピッチ検出の起動・停止を含む）。
+        const auto runAllPairs = [&]
+        {
+            const int segment = kMaxBlock * 8;
+
+            for (int a = 0; a < (int) vc::kPresets.size(); ++a)
+            {
+                for (int b = 0; b < (int) vc::kPresets.size(); ++b)
+                {
+                    if (a == b)
+                        continue;
+
+                    std::copy (signal.begin(), signal.begin() + segment * 2, pairBuf.begin());
+                    engine.params().preset.store (a);
+                    engine.process (pairBuf.data(), segment);
+                    engine.params().preset.store (b);
+                    engine.process (pairBuf.data() + segment, segment);
+                }
+            }
+        };
 
         // ウォームアップ: 各プリセット・ピッチ・バイパスを一通り回し、遅延確保等を先に済ませる。
         for (int p = 0; p < (int) vc::kPresets.size(); ++p)
@@ -392,6 +421,9 @@ private:
                 engine.process (buf.data(), (int) buf.size());
             }
         }
+
+        engine.params().pitch.store (0);
+        runAllPairs();
 
         engine.params().enabled.store (false);
         buf = signal;
@@ -415,6 +447,9 @@ private:
                     engine.process (buf.data(), (int) buf.size());
                 }
             }
+
+            engine.params().pitch.store (0);
+            runAllPairs();
 
             engine.params().enabled.store (false);
             engine.process (buf.data(), (int) buf.size());
