@@ -120,13 +120,12 @@ double getLatencyMs() const noexcept;            // 平滑化した読み出し�
 
 ```cpp
 enum class State { Resting, Priming, FadingIn, Active, FadingOut };
-void prepare (double fs, int maxBlock, int stretchBlockSamples); // configure(1, b, b/4)、クロスフェード用バッファ、ウォームアップ
+void prepare (double fs, int maxBlock); // presetDefault（120ms・30ms、D-014）、クロスフェード用バッファ、ウォームアップ
 void setTarget (bool run, float semitones, float formantFactor) noexcept; // setTransposeSemitones / setFormantFactor(f, true)
 void process (const float* in, float* out, int n) noexcept;  // n ≤ maxBlock
 void reset() noexcept;                                       // → Resting
 int  getLatencySamples() const noexcept;  // FadingIn / Active / FadingOut のとき inputLatency()+outputLatency()、それ以外0
 State getState() const noexcept;
-struct BlockDecision { int blockMs; bool overBudget; };
 // ブロック長は120ms・インターバル30msに固定（D-014。decideStretchBlockは廃止）
 ```
 
@@ -172,7 +171,7 @@ class Talkbox       { void prepare(double fs, int maxBlock); void reset() noexce
 **Engine**
 
 ```cpp
-struct EngineConfig { double sampleRate; int maxBlock; int stretchBlockSamples; };
+struct EngineConfig { double sampleRate; int maxBlock; };
 void prepare (const EngineConfig&);            // メッセージスレッド。デバイス停止中のみ
 AtomicParams& params() noexcept;
 void process (float* monoInOut, int n) noexcept; // n > maxBlock なら maxBlock ごとに分割
