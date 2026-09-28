@@ -78,6 +78,7 @@ target_link_libraries(VoiceChange PRIVATE
     vc_core
     juce::juce_audio_devices
     juce::juce_gui_extra
+    juce::juce_data_structures
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags
 )
@@ -122,3 +123,4 @@ vc_add_test(ring_buffer RingBuffer)
 vc_add_test(ring_buffer_long RingBufferLong long)
 vc_add_test(shifter Shifter)
 vc_add_test(engine Engine)
+vc_add_test(app_logic AppLogic)

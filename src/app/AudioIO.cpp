@@ -5,6 +5,15 @@
 namespace vc
 {
 
+bool containsCableInput (const juce::StringArray& deviceNames) noexcept
+{
+    for (const auto& n : deviceNames)
+        if (n.containsIgnoreCase ("CABLE Input"))
+            return true;
+
+    return false;
+}
+
 // ===== SECTION: コールバッククラス =====
 
 class AudioIO::InputCallback final : public juce::AudioIODeviceCallback

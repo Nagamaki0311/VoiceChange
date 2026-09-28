@@ -1,7 +1,10 @@
 #pragma once
 
+#include <juce_core/juce_core.h>
+
 #include <array>
 #include <atomic>
+#include <cmath>
 
 // ===== SECTION: Params =====
 // 層1・層2の共通パラメータ定義。GUI・デバイスに依存しない（vc_core）。
@@ -85,7 +88,50 @@ inline bool shifterShouldRun (Preset preset, int layer1PitchSemitones) noexcept
     return spec.semitones != 0.0f || spec.formant != 1.0f || layer1PitchSemitones != 0;
 }
 
-// SavedSettings / sanitize / presetFromId はT-006（UI結合・設定保存）で追加する
-// （docs/plan.md 3章 T-006参照）。
+// ===== SECTION: 設定の保存・復元（T-006） =====
+// docs/spec.md「設定の保存」、docs/plan.md 2.5節「Params.h」参照。
+// PropertiesFileへ読み書きする値の集合。範囲外の値はsanitize()で範囲内へ丸める。
+struct SavedSettings
+{
+    juce::String inputDevice;
+    juce::String outputDevice;
+    float gainDb = 0.0f;   // -20〜+20dB
+    int pitch = 0;         // -12〜+12半音
+    float reverb = 0.0f;   // 0〜1（AtomicParams::reverbと同じ単位。0〜100%はUI表示のみの変換）
+    Preset preset = Preset::Normal;
+    bool enabled = true;
+    bool trayNoticeShown = false; // 初回のトレイ格納通知を表示済みか
+};
+
+// 不明なプリセット名はNormalにする。大文字小文字は区別しない
+// （設定ファイルを手で編集された場合でも壊れた状態にしないため）。
+inline Preset presetFromId (const juce::String& id) noexcept
+{
+    for (std::size_t i = 0; i < kPresets.size(); ++i)
+        if (id.equalsIgnoreCase (kPresets[i].id))
+            return static_cast<Preset> (i);
+
+    return Preset::Normal;
+}
+
+// 範囲外の値を範囲の端へ丸める。プリセットの文字列からのデコードは呼び出し側で
+// presetFromId()を通してから渡す（このため引数のpresetは常に有効な値として扱う）。
+// レビュー指摘2: juce::jlimitはNaNをそのまま返す（NaN < loもNaN > hiも false のため）。
+// 設定ファイルが手編集等で"nan"を含んでいた場合にAtomicParamsへNaNが伝播すると、
+// Engineが毎ブロック非有限値検査に落ちて恒久的に無音になるため、範囲チェックの前に
+// 非有限値を初期値へ丸める。
+inline SavedSettings sanitize (SavedSettings s) noexcept
+{
+    if (! std::isfinite (s.gainDb))
+        s.gainDb = 0.0f;
+    if (! std::isfinite (s.reverb))
+        s.reverb = 0.0f;
+
+    s.gainDb = juce::jlimit (-20.0f, 20.0f, s.gainDb);
+    s.pitch = juce::jlimit (-12, 12, s.pitch);
+    s.reverb = juce::jlimit (0.0f, 1.0f, s.reverb);
+
+    return s;
+}
 
 } // namespace vc

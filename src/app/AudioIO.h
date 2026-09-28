@@ -18,6 +18,10 @@
 namespace vc
 {
 
+// 出力デバイス名にVB-CABLE（"CABLE Input"）を含むものがあるか（docs/spec.md「VB-CABLE検出」）。
+// Main.cpp（起動時ダイアログ）とMainComponent（W1表示）の両方が使うため、ここに置く。
+bool containsCableInput (const juce::StringArray& deviceNames) noexcept;
+
 struct DeviceInfo
 {
     juce::String name;
@@ -50,6 +54,9 @@ public:
     // 低遅延モードで開けなければ共有モードへフォールバックする（Windowsのみ。D-001）。
     bool open (const juce::String& inName, const juce::String& outName);
     void close();
+
+    // 両方のデバイスが開いているか（UIの起動中表示・エラー表示の判定に使う。T-006）。
+    bool isOpen() const noexcept { return inputDevice != nullptr && outputDevice != nullptr; }
 
     DeviceInfo getInputInfo() const noexcept { return inputInfo; }
     DeviceInfo getOutputInfo() const noexcept { return outputInfo; }
