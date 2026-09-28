@@ -14,6 +14,7 @@ constexpr double kMaxHz = 1000.0;
 constexpr double kWindowSeconds = 0.021;
 constexpr double kHopSeconds = 0.005;
 constexpr float kThreshold = 0.15f;
+constexpr double kSegmentRatioMin = 0.6; // 区間RMSの最小/最大がこれ未満なら推定を更新しない
 constexpr float kRmsThreshold = 0.003f; // 約-50dBFS。これ未満は無声
 // 6次Butterworthの各2次段のQ
 constexpr std::array<float, 3> kButterQ { 0.5176381f, 0.7071068f, 1.9318517f };
@@ -99,15 +100,35 @@ void PitchDetector::estimate() noexcept
     const float* x = frame.data();
 
     // 最新の積分窓のRMS。閾値未満は無声（有声度0）。
-    double sumSq = 0.0;
-    for (int j = frameLen - windowLen; j < frameLen; ++j)
-        sumSq += (double) x[j] * (double) x[j];
+    // 窓を4分割し、区間ごとのRMSが大きく違う（無音への減衰・発声の立ち上がり）フレームは、
+    // 窓に半端な無音が混ざって周期推定が偏るため、推定を更新せず前回の値を保つ。
+    constexpr int kSegments = 2;
+    const int segLen = windowLen / kSegments;
+    double totalSq = 0.0;
+    double segMin = 1.0e30, segMax = 0.0;
 
-    if (std::sqrt (sumSq / (double) windowLen) < (double) kRmsThreshold)
+    for (int seg = 0; seg < kSegments; ++seg)
+    {
+        const int start = frameLen - windowLen + seg * segLen;
+        const int end = seg == kSegments - 1 ? frameLen : start + segLen;
+        double sumSq = 0.0;
+        for (int j = start; j < end; ++j)
+            sumSq += (double) x[j] * (double) x[j];
+
+        totalSq += sumSq;
+        const double segMs = sumSq / (double) (end - start);
+        segMin = std::min (segMin, segMs);
+        segMax = std::max (segMax, segMs);
+    }
+
+    if (std::sqrt (totalSq / (double) windowLen) < (double) kRmsThreshold)
     {
         voicing = 0.0f;
         return;
     }
+
+    if (segMin < kSegmentRatioMin * kSegmentRatioMin * segMax)
+        return;
 
     // 差分関数 d(tau) → 累積平均正規化差分関数 d'(tau)。放物線補間のためtauMax+1まで求める。
     cmnd[0] = 1.0f;

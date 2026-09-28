@@ -3,6 +3,7 @@
 #include "AllocationGuard.h"
 #include "TestSignals.h"
 #include "core/Effects.h"
+#include "core/Engine.h"
 #include "core/PitchDetector.h"
 
 #include <algorithm>
@@ -75,6 +76,9 @@ public:
         runX1();
         runX2();
         runX3Gain();
+        runF();
+        runK1();
+        runX3();
     }
 
 private:
@@ -147,7 +151,7 @@ private:
             for (const double f : { 100.0, 200.0, 400.0 })
                 checkAccuracy (tag + "saw " + juce::String (f), makeBandlimitedSaw (f, fs, n, 0.3f), fs, f);
 
-            for (const double f : { 100.0, 150.0, 250.0 })
+            for (const double f : { 75.0, 100.0, 150.0, 250.0 })
                 checkAccuracy (tag + "vowel " + juce::String (f), vc::test::makeSyntheticVowel (f, fs, n), fs, f);
         }
     }
@@ -366,6 +370,248 @@ private:
 
         std::sort (ratiosDb.begin(), ratiosDb.end());
         logMessage ("X3a: median ratio " + juce::String (ratiosDb[4], 2) + "dB");
+    }
+    // Engineをブロック処理する（480サンプルずつ）。
+    static void processEngine (vc::Engine& engine, float* data, int n)
+    {
+        for (int pos = 0; pos < n; pos += 480)
+            engine.process (data + pos, std::min (480, n - pos));
+    }
+
+    static std::vector<float> concat (const std::vector<std::vector<float>>& parts)
+    {
+        std::vector<float> all;
+        for (const auto& p : parts)
+            all.insert (all.end(), p.begin(), p.end());
+        return all;
+    }
+
+    // ----- K1: ケロケロ -----
+    // 信号をケロケロで処理し、最後の1秒の基本波周波数(Hz)を返す。
+    double kerokeroOutputHz (const std::vector<float>& signal, double approxOutHz, bool sineMode)
+    {
+        vc::Engine engine;
+        engine.prepare ({ 48000.0, 480 });
+        engine.params().preset.store ((int) vc::Preset::Kerokero);
+        std::vector<float> out (signal);
+        processEngine (engine, out.data(), (int) out.size());
+        const int len = 48000;
+        const float* seg = out.data() + (int) out.size() - len;
+        return sineMode ? vc::test::findFftPeakHz (seg, len, 48000.0)
+                        : vc::test::measureFundamentalHz (seg, len, 48000.0, approxOutHz);
+    }
+
+    void runK1()
+    {
+        beginTest ("K1: ケロケロ 450Hz→440Hz、425Hz→415.3Hz、母音150Hz→146.8Hz、無音を挟んでも補正量が不変");
+
+        constexpr double fs = 48000.0;
+        const int n = (int) (3.0 * fs);
+
+        const double f450 = kerokeroOutputHz (vc::test::makeSine (450.0, fs, n, 0.3f), 440.0, true);
+        const double f425 = kerokeroOutputHz (vc::test::makeSine (425.0, fs, n, 0.3f), 415.3, true);
+        const double fVowel = kerokeroOutputHz (vc::test::makeSyntheticVowel (150.0, fs, n), 146.8, false);
+        logMessage ("K1: 450Hz -> " + juce::String (f450, 2) + "Hz, 425Hz -> " + juce::String (f425, 2)
+                    + "Hz, vowel150 -> " + juce::String (fVowel, 2) + "Hz");
+
+        expectWithinAbsoluteError (f450, 440.0, 4.4);
+        expectWithinAbsoluteError (f425, 415.3, 4.153);
+        expectWithinAbsoluteError (fVowel, 146.8, 1.468);
+
+        // 100msの無音（デジタル無音）を挟んでも補正量が変わらない。
+        {
+            vc::Engine engine;
+            engine.prepare ({ fs, 480 });
+            engine.params().preset.store ((int) vc::Preset::Kerokero);
+
+            auto tone = vc::test::makeSine (450.0, fs, (int) fs, 0.3f);
+            processEngine (engine, tone.data(), (int) tone.size());
+            const float before = engine.getKerokeroCorrectionSemitones();
+
+            std::vector<float> silence ((size_t) (0.1 * fs), 0.0f);
+            processEngine (engine, silence.data(), (int) silence.size());
+            const float after = engine.getKerokeroCorrectionSemitones();
+
+            logMessage ("K1: correction before/after silence " + juce::String (before, 4) + " / " + juce::String (after, 4));
+            expectWithinAbsoluteError (before, -0.3903f, 0.02f);
+            expectWithinAbsoluteError (after, before, 0.01f);
+        }
+    }
+
+    // ----- X3: トークボックス（Engine経由） -----
+    void runX3()
+    {
+        beginTest ("X3: トークボックス 出力RMS比±3dB、倍音間隔=検出f0×2^(p/12)±1%、雑音入力で-40dB超");
+
+        constexpr double fs = 48000.0;
+        const int n = (int) (3.0 * fs);
+        const int len = (int) fs;
+        const std::array<std::array<double, 3>, 3> vowels { { { 730.0, 1090.0, 2440.0 }, { 270.0, 2290.0, 3010.0 }, { 300.0, 870.0, 2240.0 } } };
+        double worstDb = 0.0;
+        double worstSpacingPct = 0.0;
+        int caseIdx = 0;
+
+        // 音量は層1ピッチ0で比較する。ピッチシフター自体が強い倍音構造の合成母音で音量を最大約9dB
+        // 変える（Signalsmithの特性。DBGで確認済み）ため、ピッチ != 0では入力比では測れない。
+        // 倍音間隔はピッチ0/+5/-7を9通りの母音・f0に割り当てて測る。
+        for (const auto& fm : vowels)
+        {
+            for (const double f0 : { 100.0, 150.0, 250.0 })
+            {
+                const int pitchForSpacing = std::array<int, 3> { 0, 5, -7 }[(size_t) (caseIdx++ % 3)];
+                const float amp = 0.1f * 1.41421356f * 1.5f;
+                const auto in = vc::test::makeSyntheticVowel (f0, fs, n, fm, { 80.0, 90.0, 120.0 }, amp);
+
+                std::vector<int> pitches { 0 };
+                if (pitchForSpacing != 0)
+                    pitches.push_back (pitchForSpacing);
+
+                for (const int pitch : pitches)
+                {
+                    vc::Engine engine;
+                    engine.prepare ({ fs, 480 });
+                    engine.params().preset.store ((int) vc::Preset::Talkbox);
+                    engine.params().pitch.store (pitch);
+                    std::vector<float> out (in);
+                    processEngine (engine, out.data(), n);
+
+                    if (pitch == 0)
+                    {
+                        const double inRms = vc::test::rms (in.data() + n - len, len);
+                        const double outRms = vc::test::rms (out.data() + n - len, len);
+                        const double ratioDb = 20.0 * std::log10 (outRms / inRms);
+                        logMessage ("X3: F1=" + juce::String (fm[0]) + " f0=" + juce::String (f0) + " ratio " + juce::String (ratioDb, 2) + "dB");
+                        worstDb = std::max (worstDb, std::abs (ratioDb));
+                    }
+
+                    if (pitch == pitchForSpacing)
+                    {
+                        const double carrier = f0 * std::pow (2.0, (double) pitch / 12.0);
+                        const auto spec = vc::test::averagedMagnitudeSpectrum (out.data() + n - len, len);
+                        const auto h4 = vc::test::findPeakNear (spec, fs, 1 << 14, 4.0 * carrier, 0.03);
+                        const double spacingErrPct = h4.freqHz > 0.0 ? std::abs (h4.freqHz / 4.0 - carrier) / carrier * 100.0 : 100.0;
+                        logMessage ("X3: F1=" + juce::String (fm[0]) + " f0=" + juce::String (f0) + " pitch=" + juce::String (pitch)
+                                    + " harmonic spacing err " + juce::String (spacingErrPct, 3) + "%");
+                        worstSpacingPct = std::max (worstSpacingPct, spacingErrPct);
+                    }
+                }
+            }
+        }
+
+        expect (worstDb <= 3.0, "talkbox level ratio worst " + juce::String (worstDb, 2) + "dB");
+        expect (worstSpacingPct <= 1.0, "harmonic spacing error worst " + juce::String (worstSpacingPct, 3) + "%");
+
+        // 雑音入力（-20dBFS RMS）でも出力が-40dB超（キャリアが雑音になり無音にならない）。
+        {
+            vc::Engine engine;
+            engine.prepare ({ fs, 480 });
+            engine.params().preset.store ((int) vc::Preset::Talkbox);
+            std::vector<float> in ((size_t) n);
+            juce::Random rng (77);
+            for (auto& v : in)
+                v = (rng.nextFloat() * 2.0f - 1.0f) * 0.1f * 1.7320508f;
+            std::vector<float> out (in);
+            processEngine (engine, out.data(), n);
+            const double ratioDb = 20.0 * std::log10 (vc::test::rms (out.data() + n - len, len) / vc::test::rms (in.data() + n - len, len));
+            logMessage ("X3: noise in -> " + juce::String (ratioDb, 2) + "dB");
+            expect (ratioDb > -40.0, "noise input output level " + juce::String (ratioDb, 2) + "dB");
+        }
+    }
+    // ----- F1〜F3: フォルマント移動（Engineのヘリウム・ミニオン・ジャイアント） -----
+    // 倍音位置k*f0のピーク3点の放物線補間でフォルマント（loHz〜hiHz内で最大の倍音まわり）を求める。
+    static double formantPeakHz (const std::vector<double>& spectrum, double fs, double f0, double loHz, double hiHz)
+    {
+        int bestK = -1;
+        double bestMag = -1.0;
+
+        for (int k = (int) std::ceil (loHz / f0); (double) k * f0 <= hiHz; ++k)
+        {
+            const auto pk = vc::test::findPeakNear (spectrum, fs, 1 << 14, (double) k * f0, 0.03);
+            if (pk.freqHz > 0.0 && pk.magLinear > bestMag)
+            {
+                bestMag = pk.magLinear;
+                bestK = k;
+            }
+        }
+
+        if (bestK < 2)
+            return -1.0;
+
+        const auto a = vc::test::findPeakNear (spectrum, fs, 1 << 14, (double) (bestK - 1) * f0, 0.03);
+        const auto b = vc::test::findPeakNear (spectrum, fs, 1 << 14, (double) bestK * f0, 0.03);
+        const auto c = vc::test::findPeakNear (spectrum, fs, 1 << 14, (double) (bestK + 1) * f0, 0.03);
+        const double la = std::log (a.magLinear), lb = std::log (b.magLinear), lc = std::log (c.magLinear);
+        const double denom = la - 2.0 * lb + lc;
+        const double delta = std::abs (denom) > 1.0e-12 ? 0.5 * (la - lc) / denom : 0.0;
+        return ((double) bestK + juce::jlimit (-1.0, 1.0, delta)) * f0;
+    }
+
+    void runFormantCase (const juce::String& label, vc::Preset preset, double f0, double semis, double expectedS,
+                         bool enforce, double f0Tol, double sTol)
+    {
+        constexpr double fs = 48000.0;
+        constexpr int analysisLen = (int) (fs * 1.5);
+        const int totalLen = (int) (fs * 3.0) + analysisLen;
+
+        auto vowel = vc::test::makeSyntheticVowel (f0, fs, totalLen, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.3f);
+        vc::test::addNoiseFloor (vowel, -80.0f, 222);
+
+        vc::Engine engine;
+        engine.prepare ({ fs, 480 });
+        engine.params().preset.store ((int) preset);
+        std::vector<float> out (vowel);
+        processEngine (engine, out.data(), totalLen);
+
+        const float* steadyIn = vowel.data() + (totalLen - analysisLen);
+        const float* steadyOut = out.data() + (totalLen - analysisLen);
+
+        const double f0In = vc::test::measureFundamentalHz (steadyIn, analysisLen, fs, f0);
+        const double expectedRatio = std::pow (2.0, semis / 12.0);
+        const double f0Out = vc::test::measureFundamentalHz (steadyOut, analysisLen, fs, f0In * expectedRatio);
+        const double f0Ratio = f0Out / f0In;
+
+        const auto envIn = vc::test::measureFormantEnvelope (steadyIn, analysisLen, fs, f0In);
+        const auto envOut = vc::test::measureFormantEnvelope (steadyOut, analysisLen, fs, f0Out);
+        const double s = vc::test::measureEnvelopeScale (envIn, envOut);
+
+        const auto specIn = vc::test::averagedMagnitudeSpectrum (steadyIn, analysisLen);
+        const auto specOut = vc::test::averagedMagnitudeSpectrum (steadyOut, analysisLen);
+        const double f1In = formantPeakHz (specIn, fs, f0In, 450.0, 900.0);
+        const double f2In = formantPeakHz (specIn, fs, f0In, 950.0, 1600.0);
+        const double f1Out = formantPeakHz (specOut, fs, f0Out, 450.0 * expectedS, 900.0 * expectedS);
+        const double f2Out = formantPeakHz (specOut, fs, f0Out, 950.0 * expectedS, 1600.0 * expectedS);
+
+        logMessage (label + ": f0 " + juce::String (f0In, 2) + " -> " + juce::String (f0Out, 2) + "Hz (ratio " + juce::String (f0Ratio, 4)
+                    + ", expected " + juce::String (expectedRatio, 4) + "), s=" + juce::String (s, 3) + " (expected " + juce::String (expectedS, 2)
+                    + "), F1 " + juce::String (f1In, 0) + " -> " + juce::String (f1Out, 0) + "Hz, F2 " + juce::String (f2In, 0) + " -> " + juce::String (f2Out, 0) + "Hz");
+
+        if (enforce)
+        {
+            expect (std::abs (f0Ratio - expectedRatio) / expectedRatio <= f0Tol, label + ": f0 ratio " + juce::String (f0Ratio, 4));
+            expect (std::abs (s - expectedS) / expectedS <= sTol, label + ": envelope scale s=" + juce::String (s, 3));
+        }
+    }
+
+    void runF()
+    {
+        struct Case { const char* name; vc::Preset preset; double semis; double s; };
+        const std::array<Case, 3> cases { { { "F1 ヘリウム", vc::Preset::Helium, 0.0, 1.6 },
+                                             { "F2 ミニオン", vc::Preset::Minion, 8.0, 1.4 },
+                                             { "F3 ジャイアント", vc::Preset::Giant, -6.0, 0.75 } } };
+
+        // f0=150Hz: 合格基準（f0比±1%、s=期待値±10%）。
+        for (const auto& c : cases)
+        {
+            beginTest (juce::String (c.name) + " f0=150Hz");
+            runFormantCase (c.name, c.preset, 150.0, c.semis, c.s, true, 0.01, 0.1);
+        }
+
+        // f0=100Hz: 低い声の特性確認（D-015。失敗判定なし、実測値をログへ）。
+        for (const auto& c : cases)
+        {
+            beginTest (juce::String (c.name) + " f0=100Hz（特性確認）");
+            runFormantCase (juce::String (c.name) + " f0=100", c.preset, 100.0, c.semis, c.s, false, 0.0, 0.0);
+        }
     }
 };
 
