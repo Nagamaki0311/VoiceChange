@@ -1,0 +1,63 @@
+{
+  "outputStyle": "Concise",
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": true
+  },
+  "subagentStatusLine": {
+    "type": "command",
+    "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/statusline-subagent.sh\""
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '## Capabilities'; bash \"$CLAUDE_PROJECT_DIR/.claude/bootstrap.sh\" --check 2>/dev/null; echo; echo '## docs/tasks.md 未完了タスク'; awk -F'|' '$0 ~ /^[|] (ID|T-[0-9]+) [|]/ && $5 !~ /^ *完了 *$/' \"$CLAUDE_PROJECT_DIR/docs/tasks.md\"; echo; echo '## docs/progress.md 最新エントリ'; awk '/^---$/{n++;next} n==1' \"$CLAUDE_PROJECT_DIR/docs/progress.md\""
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'コンテキスト圧縮前: docs/progress.mdに現在の作業状況(実施内容・結果・次回開始位置)を記録し、docs/tasks.mdの状態を更新してから圧縮してください。'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/ja-style-check.py\""
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/subagent-doc-check.py\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git -C \"$CLAUDE_PROJECT_DIR\" status --porcelain | grep -q . && echo 'セッション終了: 未コミットの変更があります。docs/progress.md・docs/tasks.mdへの記録漏れがないか確認し、必要ならcommit/pushしてください。' || true"
+          }
+        ]
+      }
+    ]
+  }
+}
