@@ -1,6 +1,6 @@
 # AGENTS.md
 
-project001は、新規アプリ開発に共通する開発方針・設計原則・ワークフロー・レビュー基準を提供するAI開発エージェントテンプレートである。個別アプリの実装は、このテンプレートから作成した別リポジトリで行う。すべてのAIエージェント（Claude Code含む）は本ファイルの内容を最優先で守る。Claude Code固有の設定・運用は CLAUDE.md を参照。
+VoiceChangeは、Windows向けリアルタイムボイスチェンジャー（JUCE/C++20）のリポジトリである。開発方針・ワークフロー・レビュー基準はproject001テンプレートから引き継いだ。要件はdocs/spec.mdを参照。すべてのAIエージェント（Claude Code含む）は本ファイルの内容を最優先で守る。Claude Code固有の設定・運用は CLAUDE.md を参照。
 
 ## 設計原則
 
@@ -21,7 +21,7 @@ project001は、新規アプリ開発に共通する開発方針・設計原則�
 8. **手を抜かない対象**: 問題の理解、信頼境界での入力検証、データ損失を防ぐエラーハンドリング、セキュリティ、アクセシビリティ、明示的に要求された事項。
 9. **大規模ファイルは検索可能な状態を保つ**: 1ファイルが肥大化し全文を読むことが非現実的になった場合、`// ===== SECTION: 名称 =====`等の検索用アンカーコメントを主要区画・主要関数の先頭に置く。ドキュメントから該当箇所を参照する際は、編集のたびにズレる行番号ではなく、アンカー文字列に対する検索コマンド（例: `grep -n "関数名"`）を記載する。
 
-出典: [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail)（MIT License）をベースに統合（原則9はponytail外の知見を統合。docs/decisions.md D-024参照）。
+出典: [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail)（MIT License）をベースに統合（原則9はponytail外の知見を統合）。
 
 ## ワークフロー
 
@@ -50,5 +50,3 @@ User → Manager → Planner → Developer → Reviewer → Manager → Complete
 - docs/progress.md: 作業履歴、次回開始位置
 - docs/decisions.md: 設計判断とその理由
 - docs/agents.md: Agent構成、モデル構成、オーケストレーション、Hook構成の詳細
-
-新規プロジェクトとしてコピーした直後は、docs/のうちtasks.md/progress.md/decisions.mdの3ファイルからproject001自身の構築履歴をリセットする。手順はREADME.mdを参照（複製しない）。

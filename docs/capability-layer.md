@@ -11,7 +11,7 @@ Capability Layerの本体は、以下の**Agentへの指示規約**である。`
 3. 利用不可、またはコマンドが失敗した場合は、即座に既存フロー（Read/Grep/Bash等の標準ツール）へフォールバックする。インストールを促したり、タスクを止めたりしない
 4. ツール固有の仕様・コマンドは、そのツール専用のdocsファイル（例: docs/agent-reach.md）にのみ記載し、複製しない
 
-当初はこの検出手順（手順1）を`.claude/settings.json`のSessionStart Hookコマンド文字列に直接列挙していたが、検出対象が増えるにつれ1行コマンドが線形に長大化し可読性が落ちる問題があった。判定ラダー6段目（1行で書けるか）を再評価した結果、「1行では収まらない」という結論に至ったため、`.claude/bootstrap.sh`という専用スクリプトへ切り出した（D-013で`subagentStatusLine`用のスクリプトファイルを新設した際と同じ判断基準）。検出対象リストはスクリプト内1箇所にまとめており、追加は1行で完結する。
+当初はこの検出手順（手順1）を`.claude/settings.json`のSessionStart Hookコマンド文字列に直接列挙していたが、検出対象が増えるにつれ1行コマンドが線形に長大化し可読性が落ちる問題があった。判定ラダー6段目（1行で書けるか）を再評価した結果、「1行では収まらない」という結論に至ったため、`.claude/bootstrap.sh`という専用スクリプトへ切り出した（project001テンプレートのD-013で`subagentStatusLine`用のスクリプトファイルを新設した際と同じ判断基準）。検出対象リストはスクリプト内1箇所にまとめており、追加は1行で完結する。
 
 ## キャッシュ効率: bootstrap.sh経由の事前検出
 
@@ -23,7 +23,7 @@ Capability Layerの本体は、以下の**Agentへの指示規約**である。`
 
 ### Tier1: 統合済み（Agentの振る舞いに組込み）
 
-現在Tier1に該当するCapabilityはない。Agent-Reach/Code Review Graph/Context7/GitHub CLIの4件は、2026年公式仕様監査（T-020〜）で、動作未検証のまま複数セッションにわたり一度も検出されなかった実績が確認されたため、Tier2へ格下げした（D-021参照）。実際に検出・動作確認が取れた時点で、下記「新しいCapabilityを追加する手順」に沿って再度Tier1へ昇格させる。
+現在Tier1に該当するCapabilityはない。Agent-Reach/Code Review Graph/Context7/GitHub CLIの4件は、2026年公式仕様監査（T-020〜）で、動作未検証のまま複数セッションにわたり一度も検出されなかった実績が確認されたため、Tier2へ格下げした（project001テンプレートのD-021参照）。実際に検出・動作確認が取れた時点で、下記「新しいCapabilityを追加する手順」に沿って再度Tier1へ昇格させる。
 
 ### Tier2: 検出のみ（Agentの振る舞いには未組込み）
 
@@ -31,7 +31,7 @@ Capability Layerの本体は、以下の**Agentへの指示規約**である。`
 
 | Capability | 検出コマンド | 検出のみに留める理由 |
 |---|---|---|
-| Agent-Reach | `command -v agent-reach`（詳細はdocs/agent-reach.md参照） | 動作未検証のまま複数セッションで`unavailable`が続いており、Tier1（Researcherの振る舞いへの統合）は実際の検出実績が出るまで見送る（D-021） |
+| Agent-Reach | `command -v agent-reach`（詳細はdocs/agent-reach.md参照） | 動作未検証のまま複数セッションで`unavailable`が続いており、Tier1（Researcherの振る舞いへの統合）は実際の検出実績が出るまで見送る（project001テンプレートのD-021） |
 | Code Review Graph | `command -v code-review-graph`（詳細はdocs/code-review-graph.md参照） | 同上（Developer/Reviewerへの統合を見送る） |
 | Context7 | `command -v ctx7`（詳細はdocs/context7.md参照） | 同上（Planner/Developer/Reviewer/Researcherへの統合を見送る）。サブコマンド仕様も本環境で未検証のまま |
 | GitHub CLI (`gh`) | `command -v gh` | 同上（Researcherへの統合を見送る） |
@@ -45,10 +45,10 @@ Capability Layerの本体は、以下の**Agentへの指示規約**である。`
 |---|---|
 | MCP Server | 個別ツールではなくClaude Code本体の接続機構であり、`command -v`で検出する対象と同列ではない。加えてproject001のsubagent（`.claude/agents/*.md`）は`tools`フロントマターがallowlist方式であり、現状Planner/Developer/Reviewer/ResearcherからMCPサーバーのツールを呼び出せない。追加する場合は、対象subagentの`tools`にMCPツール名を追記した上で、当該Agent定義ファイルとdocs/capability-layer.mdの両方を更新する手順が必要になる |
 | Claude Design `/design-sync` | Claude Code本体のスラッシュコマンドであり`command -v`で検出する対象ではない。project001はテンプレート元リポジトリのため、特定アプリの永続的なデザインシステムをdesign-syncで同期する対象を持たない（詳細はdocs/design-workflow.md参照） |
-| Ponytail | AGENTS.mdの設計原則1〜8として本文へ統合済み（D-003、D-014）であり、`command -v`で検出する外部コマンドではないため検出対象にしない |
-| Claude Codeプラグイン全般 | project scopeでは既定で有効化しない。プラグインはユーザー個人のインストール状況に依存し、project001をコピーした派生プロジェクトすべてに強制されるべきものではないため。派生プロジェクトで有効化する場合は、`.claude/settings.json`にプラグインmarketplace/インストール設定を追加し（`enabledPlugins`等、Claude Code公式ドキュメントのキー構成に従う）、user scope（個人環境全体）ではなくproject scope（このリポジトリ配下のみ）に限定した上で、docs/capability-layer.mdに追加したプラグイン名と用途を記録する。**例外**: Frontend Design（`frontend-design@claude-plugins-official`）はD-025によりproject scopeで有効化済み（`.claude/settings.json`の`enabledPlugins`）。詳細はdocs/design-workflow.md参照 |
+| Ponytail | AGENTS.mdの設計原則1〜8として本文へ統合済み（project001テンプレートのD-003、project001テンプレートのD-014）であり、`command -v`で検出する外部コマンドではないため検出対象にしない |
+| Claude Codeプラグイン全般 | project scopeでは既定で有効化しない。プラグインはユーザー個人のインストール状況に依存し、project001をコピーした派生プロジェクトすべてに強制されるべきものではないため。派生プロジェクトで有効化する場合は、`.claude/settings.json`にプラグインmarketplace/インストール設定を追加し（`enabledPlugins`等、Claude Code公式ドキュメントのキー構成に従う）、user scope（個人環境全体）ではなくproject scope（このリポジトリ配下のみ）に限定した上で、docs/capability-layer.mdに追加したプラグイン名と用途を記録する。**例外**: Frontend Design（`frontend-design@claude-plugins-official`）はproject001テンプレートのD-025によりproject scopeで有効化済み（`.claude/settings.json`の`enabledPlugins`）。詳細はdocs/design-workflow.md参照 |
 
-### 派生プロジェクトでの推奨プラグイン（D-030）
+### 派生プロジェクトでの推奨プラグイン（project001テンプレートのD-030）
 
 project001自体はコードを持たないため有効化しない。派生プロジェクトで言語・要件が決まった時点で、上記の手順（project scopeに限定し本ファイルに記録）に従って判断する。
 
@@ -57,7 +57,7 @@ project001自体はコードを持たないため有効化しない。派生プ�
 | Code intelligence（`typescript-lsp@claude-plugins-official`、`pyright-lsp@claude-plugins-official`等） | 型付き言語を使う場合は有効化を推奨 | 公式のトークン削減策の1つ。記号単位の定義参照がgrep+複数ファイル読込を置き換え、編集直後に型エラーを検出する。言語サーバー本体（例: `npm install -g typescript-language-server typescript`）の別途導入が必要。クラウドセッション（claude.ai/code）では言語サーバーが起動せず効果がない |
 | security-guidance（`security-guidance@claude-plugins-official`） | 既定では有効化しない。認証・決済・個人情報を扱うアプリで、コスト増を許容できる場合のみ検討する | ターンの終了時（Stop Hook）とcommit時に別途LLMレビューを実行するため、ターンごとに追加のAPI消費が発生する。Reviewerの敵対的検証（REVIEW.md「セキュリティ」観点）と役割が重なる |
 
-Tier2からTier1への昇格条件は2種類ある。Node.js/Python/Playwrightは、個別アプリのリポジトリ（project001から作成された別リポジトリ）で実際に使うタスクが発生した時点。Agent-Reach/Code Review Graph/Context7/GitHub CLIは、実行環境での検出・動作確認が取れた時点（D-021）。いずれも下記「新しいCapabilityを追加する手順」に沿ってTier1へ昇格させる。
+Tier2からTier1への昇格条件は2種類ある。Node.js/Python/Playwrightは、個別アプリのリポジトリ（project001から作成された別リポジトリ）で実際に使うタスクが発生した時点。Agent-Reach/Code Review Graph/Context7/GitHub CLIは、実行環境での検出・動作確認が取れた時点（project001テンプレートのD-021）。いずれも下記「新しいCapabilityを追加する手順」に沿ってTier1へ昇格させる。
 
 ## 新しいCapabilityを追加する手順
 

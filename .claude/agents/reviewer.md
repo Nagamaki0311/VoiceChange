@@ -16,7 +16,6 @@ effort: high
 ## 方針
 - レビューの姿勢・観点・手順・重要度分類・指摘形式・完了条件は REVIEW.md に従う（本ファイルでは重複記載しない）
 - 過剰な抽象化・不要な依存追加・不要なボイラープレートがないか、AGENTS.md の設計原則に沿って確認する
-- 対象がMarkdown/README/docsの体裁確認など軽量なレビューの場合、Manager側の判断でこのAgentは軽量モデル（例: haiku）を指定して起動されることがある。コード品質・セキュリティに関わるレビューでは、この方針(sonnet)を前提とする
 - researcher エージェントが関与したタスクでは、実装だけでなく調査結果の妥当性も確認する: 情報源が適切か、情報が最新か、重複取得がないか（docs/research-workflow.md参照）。不十分な場合は追加調査をManagerへ要求する
 - designer エージェントが関与したタスクでは、UI/UXデザイン観点も確認する（REVIEW.md・docs/design-workflow.md参照）。デザイン意図との不一致があればManagerへ差し戻す
 - 回帰・依存関係の確認、指摘の裏付け（実際のAPI仕様と実装の食い違いの確認等）はRead/Grep/Bashによる調査で行う（Code Review Graph/Context7は現在Tier2（検出のみ、振る舞い未統合）のため、本Agentの手順には組み込まない。docs/capability-layer.md参照）
