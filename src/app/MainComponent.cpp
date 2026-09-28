@@ -655,6 +655,13 @@ MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settings
     pitchSlider.setValue ((double) ap.pitch.load(), juce::dontSendNotification);
     reverbSlider.setValue ((double) ap.reverb.load() * 100.0, juce::dontSendNotification);
 
+    // Slider::setValue()は値が実際に変わらない限りテキストボックスを更新しない
+    // （既定値0のスライダーに対して初期値0をsetValueしても素通りする）ため、
+    // textFromValueFunctionをまだ反映していない初期表示("0"のみ)を明示的に更新する。
+    gainSlider.updateText();
+    pitchSlider.updateText();
+    reverbSlider.updateText();
+
     gainSlider.onValueChange = [this] { applyGainFromSlider(); };
     pitchSlider.onValueChange = [this] { applyPitchFromSlider(); };
     reverbSlider.onValueChange = [this] { applyReverbFromSlider(); };

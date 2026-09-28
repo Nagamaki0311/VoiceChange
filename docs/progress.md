@@ -19,6 +19,23 @@
 
 ---
 
+## 2026-09-28 T-006 修正: スライダー値表示に単位が出ない不具合
+
+### 実施内容
+- Manager（レビュー）からの指摘: スクリーンショットでゲイン/ピッチ/リバーブのスライダー値が単位なしの`0`のみで、design.md 3.5節の表示形式（`+3 dB`/`0 dB`/`-12 dB`、`+5 半音`/`0 半音`、`40 %`/`0 %`）になっていなかった。
+- 原因: `juce::Slider::setValue()`は新しい値が現在値（既定0）と等しい場合`updateText()`を呼ばずに素通りする実装のため、`textFromValueFunction`を設定した後に`setValue(初期値と同じ0, dontSendNotification)`を呼んでも、そのタイミングでは反映されず、`setRange()`直後に生成された既定のテキスト（`textFromValueFunction`未設定時点の`String(roundToInt(v))`＝単位なし数値）がそのまま残っていた。
+- `src/app/MainComponent.cpp`のスライダー初期化直後（3スライダーの`setValue()`の後）に`updateText()`を明示的に呼び、初期表示にも`textFromValueFunction`を確実に反映させた。
+
+### 結果
+- `cmake --build build --parallel`: 成功。
+- `ctest --test-dir build --output-on-failure`: **全件成功**（smoke, ring_buffer, ring_buffer_long(28.7秒), shifter, engine, app_logic の6件）。
+- `xvfb-run -a -s "-screen 0 1280x1024x24" ... --screenshot`: 終了コード0、PNG 460×600。目視確認: ゲイン「0 dB」、ピッチ「0 半音」、リバーブ「0 %」と単位付きで表示されることを確認。一時的にスライダー値を+3dB/-5半音/40%に変更して撮影し「+3 dB」「-5 半音」「40 %」（live色）も正しく表示されることを確認した後、既定値に戻して最終スクリーンショットを撮り直した。
+
+### 次回開始位置
+- T-006はこの修正を含めて完了。次はT-007（前エントリのT-006本体の記載を参照）。
+
+---
+
 ## 2026-09-28 T-006 UI結合と設定の保存・復元
 
 ### 実施内容
