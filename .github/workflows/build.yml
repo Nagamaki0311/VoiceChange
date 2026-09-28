@@ -1,0 +1,98 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build (Release)
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Check for VC runtime / UCRT DLL dependencies
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem -Path "$vsPath\VC\Tools\MSVC" -Recurse -Filter "dumpbin.exe" |
+              Where-Object { $_.FullName -match "Hostx64\\x64" } |
+              Select-Object -First 1 -ExpandProperty FullName
+
+          if (-not $dumpbin) {
+              throw "dumpbin.exe not found"
+          }
+
+          Write-Host "Using dumpbin: $dumpbin"
+
+          $exes = @(
+              "build\VoiceChange_artefacts\Release\VoiceChange.exe",
+              "build\VoiceChangeTests_artefacts\Release\VoiceChangeTests.exe"
+          )
+
+          $forbidden = "(?i)(vcruntime|msvcp|ucrtbase|api-ms-win-crt|concrt|vccorlib)"
+          $failed = $false
+
+          foreach ($exe in $exes) {
+              Write-Host "== $exe =="
+              $output = & $dumpbin /dependents $exe
+              $output | Write-Host
+
+              if ($output -match $forbidden) {
+                  Write-Error "$exe depends on a VC runtime / UCRT DLL"
+                  $failed = $true
+              }
+          }
+
+          if ($failed) {
+              exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoiceChange-windows
+          path: build/VoiceChange_artefacts/Release/VoiceChange.exe
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            libasound2-dev \
+            libx11-dev \
+            libxrandr-dev \
+            libxinerama-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libfreetype-dev \
+            libfontconfig1-dev
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

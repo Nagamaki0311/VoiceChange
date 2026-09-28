@@ -1,69 +1,88 @@
-# project001
+# VoiceChange
 
-Claude CodeによるAI開発OS。新規アプリ開発に共通する開発方針・タスク管理・レビュー手順をテンプレートとして提供する。
+Windows向けリアルタイムボイスチェンジャー（単一の.exe）。物理マイク・SteelSeries Sonar等の仮想入力デバイスの音声を加工し、VB-CABLE経由でDiscordやOBSへ渡す。
 
-## セットアップ
+想定するチェーン:
 
-1. `git clone`等でこのリポジトリを取得する。
-2. （任意）`bash .claude/bootstrap.sh`を実行し、Optional Dependency（Agent-Reach/Code Review Graph/Context7/GitHub CLI等）の導入状況を確認する。インストールは行わず案内のみを表示するため、実行しなくてもproject001は完全に動作する。
-3. AGENTS.mdの開発フロー（User → Manager → Planner → Developer → Reviewer → Manager → Complete）に従って進める。
+```
+物理マイク → (Sonar等の前段処理) → VoiceChange → VB-CABLE (CABLE Input) → Discord / OBS
+```
 
-## 使い方
+詳細な仕様はdocs/spec.md、UIはdocs/design.md、実装計画はdocs/plan.md、設計判断の経緯はdocs/decisions.mdを参照する。開発フロー（Manager/Planner/Developer/Reviewer等の役割分担）はAGENTS.mdを参照する。
 
-新規アプリを開発する場合、このリポジトリをコピーして雛形として使う。個別アプリの仕様・実装コードはproject001自体には追加しない。以降はAGENTS.mdの開発フローに従って進める。
+## 動作要件
 
-### 新規プロジェクトでの初期化
+- Windows 10 / 11（64bit）。
+- [VB-CABLE](https://vb-audio.com/Cable/)を別途インストールしておくこと（本アプリには同梱しない）。未インストールの場合、起動時に検出できなかった旨のダイアログを表示する。
+- 入力元は物理マイクに限らず、SteelSeries Sonar等の仮想入力デバイスも区別なく選べる。
 
-`/init-project`コマンド（`.claude/commands/init-project.md`）を実行するか、以下の手順を直接行う。コピー直後にこの手順を行わないと、新規プロジェクトのSessionStart Hookがproject001自身の構築履歴を表示し続けてしまう。docs/のうちtasks.md/progress.md/decisions.mdの3つのみをリセットする。
+## 開発中の機能
 
-- `docs/tasks.md`: 「## タスク一覧」表のヘッダ行と区切り行は残し、`T-xxx`の行をすべて削除する。「## バックログ」の既存項目もすべて削除する。列構成は変えない（SessionStart Hookが状態列の値でフィルタするため）。
-- `docs/progress.md`: 「## 記録フォーマット」直後の`---`（この行を含む）より下をすべて削除する。
-- `docs/decisions.md`: 同様に`---`（この行を含む）より下のD-xxxをすべて削除する。
-- 型付き言語を使う場合は、docs/capability-layer.md「派生プロジェクトでの推奨プラグイン」に従ってCode intelligenceプラグインの有効化を検討する（使用言語が未定なら、決まった時点で行う）。
-- `README.md`: プロジェクト名・概要を書き換える。本節「### 新規プロジェクトでの初期化」自体は削除してよい。
+現時点（T-002完了時点）では、CMake構成・依存関係の固定・CI・空のウィンドウのみが実装済みで、音声処理チェーンは未実装である。今後の実装状況はdocs/tasks.md、作業履歴はdocs/progress.mdを参照する。
 
-## 構成
+## ビルド手順
 
-- AGENTS.md
-  - 開発方針・設計原則・ワークフロー（全AIエージェント共通、最優先で読む）
+### Windows（配布用）
 
-- REVIEW.md
-  - レビュー方針（敵対的検証 / Adversarial Review）。reviewer Agentが従う
+Visual Studio 2022（Desktop development with C++）とCMake 3.25以上が必要。
 
-- CLAUDE.md
-  - Claude Code固有の設定・運用ルール（AGENTS.mdをimportする）
+```
+cmake -S . -B build -A x64
+cmake --build build --config Release
+```
 
-- .claude/agents
-  - planner / designer / researcher / developer / reviewer
+生成物は`build/VoiceChange_artefacts/Release/VoiceChange.exe`。MSVCランタイムは静的リンク（`/MT`）するため、VC++ 再頒布可能パッケージのインストールなしで動作する（CIの`dumpbin /dependents`検査で確認している）。
 
-- .claude/skills/design-principles
-  - UI/UXデザインの品質判断基準（designer/developer/reviewerが使用）
+### Linux（開発用、配布対象外）
 
-- .claude/settings.json
-  - SessionStart / PreCompact / PostToolUse / SubagentStop / SessionEnd Hook（セッション継続性・ドキュメント品質の補助）、subagentStatusLine（サブエージェント進捗の可視化）、enabledPlugins（Frontend Designをproject scopeで有効化）。詳細はdocs/agents.md・docs/design-workflow.md
+開発はLinux上で行い、DSPコア（`vc_core`、GUI・デバイス非依存のINTERFACEライブラリ）とテストの検証、UIのXvfb上でのスクリーンショット確認に使う。ALSA・X11系・freetype・fontconfigの開発パッケージが必要（`.github/workflows/build.yml`のlinuxジョブ参照）。
 
-- .claude/bootstrap.sh
-  - Optional Dependency（Capability Layer）の導入状況を案内のみで表示する検出スクリプト。インストールは行わない
+```
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
 
-- .claude/commands/init-project.md
-  - `/init-project`コマンド。新規プロジェクトでの初期化手順（本READMEの該当節）を実行する
+依存ソース（JUCE / signalsmith-stretch / signalsmith-linear）はCMakeの`FetchContent`で取得する。ネットワークなしでローカルの取得済みソースを使う場合は次のように指定する。
 
-- docs
-  - tasks.md: タスクと状態管理
-  - progress.md: 作業履歴
-  - decisions.md: 設計判断の記録
-  - agents.md: Agent構成・モデル構成・Hook/Status Line構成の詳細
-  - agent-reach.md: [Agent-Reach](https://github.com/Panniantong/Agent-Reach) 対応（Optional Dependency、検出・フォールバック方針）
-  - code-review-graph.md: [Code Review Graph](https://github.com/tirth8205/code-review-graph) 対応（Optional Dependency、影響範囲解析）
-  - context7.md: [Context7](https://github.com/upstash/context7) 対応（Optional Dependency、ライブラリドキュメント確認）
-  - capability-layer.md: 外部ツール検出の共通規約（Capability Layer）
-  - research-workflow.md: 外部調査ワークフロー
-  - design-workflow.md: デザインワークフロー（Designer/Claude Design/Frontend Designプラグインの連携）
-  - status-line.md: サブエージェント進捗の可視化（Status Line）の仕様
+```
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DFETCHCONTENT_SOURCE_DIR_JUCE=<JUCEのパス> \
+  -DFETCHCONTENT_SOURCE_DIR_SIGNALSMITH-STRETCH=<stretchのパス> \
+  -DFETCHCONTENT_SOURCE_DIR_SIGNALSMITH-LINEAR=<linearのパス>
+```
 
-## 開発フロー
+## 技術スタック
 
-User → Manager → Planner → Developer → Reviewer → Manager → Complete
-（外部調査が必要な場合のみResearcherが、UI/UX実装を伴う場合のみDesignerが加わる）
+| 項目 | 採用 |
+|---|---|
+| 言語 | C++20 |
+| フレームワーク | JUCE 9.0.2（CMake、FetchContentでタグ固定） |
+| ピッチ/フォルマント | Signalsmith Stretch 1.4.0（依存: signalsmith-linear 0.6.4） |
+| ビルド | MSVC、`/MT`（GitHub Actions windows-latest） |
 
-詳細は AGENTS.md・REVIEW.md・docs/agents.md・docs/design-workflow.md を参照。
+### 選定理由
+
+- JUCEは`IAudioClient3`による「WASAPI共有低遅延モード」に対応しており、他アプリと干渉しない共有モードのまま低遅延を実現できる。
+- GC（ガベージコレクション）のない言語（C++）で音声スレッドを完全に制御できる。
+- DSP部品・GUI・デバイス管理が単一フレームワーク（JUCE）で揃い、依存が少ない。
+- Signalsmith Stretchは高品質なピッチシフトとフォルマント操作をMITライセンスで提供する。
+
+### 使わないもの
+
+- **Rubber Band**: GPLライセンスのため、AGPLv3/商用デュアルのJUCEと組み合わせても配布条件が複雑になる。MITのSignalsmith Stretchで要件（移調・フォルマント操作）を満たせるため採用しない。
+- **WASAPI排他モード**: 排他モードで開いたデバイスは他アプリが同時に使えなくなる。本アプリはSonar等の前段処理やDiscord/OBSと並行して動く前提のため、共有モード（低遅延モード優先、フォールバックで通常モード）のみを使う。
+
+## ライセンス
+
+- JUCE 9はAGPLv3と商用ライセンスのデュアルライセンス。本アプリの.exeを配布する場合、ソースコード全体をAGPLv3で公開するか、JUCEの商用ライセンスを取得する必要がある。
+- Signalsmith Stretch / signalsmith-linearはMITライセンス。
+
+## ドキュメント
+
+- docs/spec.md: 仕様書
+- docs/design.md: UIデザイン仕様
+- docs/plan.md: 実装計画
+- docs/decisions.md: 設計判断の記録（ADR）
+
+開発フロー・設計原則はAGENTS.mdを参照する。
