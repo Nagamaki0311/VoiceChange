@@ -216,10 +216,9 @@ class MainComponent final : public juce::Component,
 {
 public:
     // audioIO・settingsはMain.cpp（アプリ全体）が所有し、本コンポーネントより長生きする。
-    // desiredInputName/desiredOutputNameは起動時にopen()を試みたデバイス名（失敗していてもよい。
-    // コンボボックスに保存済みの選択を示すため、AudioIOが開けたかどうかによらず必要。design.md 3.5節）。
-    MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settingsIn,
-                    juce::String desiredInputName, juce::String desiredOutputName);
+    // コンボボックスの選択表示は、起動時にopen()を試みたデバイス名（失敗していてもよい）を
+    // AudioIO::getDesiredInputName()/getDesiredOutputName()から読む（design.md 3.5節）。
+    MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settingsIn);
     ~MainComponent() override;
 
     void paint (juce::Graphics&) override;
@@ -237,6 +236,9 @@ private:
 
     void refreshDeviceCombo (juce::ComboBox& combo, const juce::StringArray& names, const juce::String& desiredName,
                               juce::StringArray& realNamesOut);
+    // デバイス一覧・選択中の名前が前回の構築から変わったときだけコンボボックスを作り直す
+    // （design.md 3.5節「（未接続）」項目の追加・除去と新規デバイスの反映）。ポップアップ表示中は次回に回す。
+    void syncDeviceCombos();
     void deviceComboChanged (bool isInputCombo);
 
     void createPresetButtons();
@@ -251,7 +253,8 @@ private:
     void refreshEnabledAppearance();
 
     void updateStatus (bool slowUpdate);
-    void announceIfChanged (const juce::String& newMessage, bool isWarnOrError);
+    // announceKeyは経過秒数など毎秒変わる部分を除いた文言。キーが変わったときだけ読み上げ通知する。
+    void announceIfChanged (const juce::String& announceKey, bool isWarnOrError);
     // design.md 5章「状態パネル: 要約文を1秒に1回まで更新」。可視の8フレーム更新より遅い
     // 周期（30fps想定で30フレーム=約1秒）でsetDescription()を更新する（レビュー指摘4）。
     juce::String buildStatusSummary (const StatusData& d) const;
@@ -278,11 +281,11 @@ private:
 
     int frameCounter = 0;
     int accessibilityFrameCounter = 0; // 30fps想定で30回=約1秒ごとにstatusPanelのdescriptionを更新
-    juce::String lastAnnouncedMessage;
+    juce::String lastAnnouncedKey;
     StatusData lastStatusData; // buildStatusSummary()用に直近の状態を保持する
 
     juce::StringArray inputComboRealNames, outputComboRealNames;
-    juce::String currentDesiredInputName, currentDesiredOutputName;
+    juce::String inputComboKey, outputComboKey; // 構築時の(一覧+選択名)。変化検出用。初期値の空は実際のキーと一致しない
 
     // W1(VB-CABLE未検出)は起動時にしか判定しない(design.md 6.2節)。
     bool vbCableMissing = false;

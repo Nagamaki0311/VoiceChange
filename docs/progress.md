@@ -19,6 +19,25 @@
 
 ---
 
+## 2026-09-28 T-007 レビュー指摘の修正（12件）
+
+### 実施内容
+- `ConnectionMonitor`: 入力・出力それぞれの最終進捗時刻を持ち、どちらか一方でも2秒進まなければ`CloseAndFail`（JUCE 9のWASAPI入力スレッドは無言終了でコールバックを呼ばないため）。健常時の「一覧変更 && 使用中デバイスが一覧に無い」も`CloseAndFail`。開くこと自体の失敗用に`enterFailed()`を追加。
+- `AudioIO`: 日本語のエラー文は`fromUTF8`（生リテラルはLatin-1解釈で文字化けしていた）。失敗側`FailedSide`（None/Input/Output/Both。片方が失敗しても両方試して特定）と、現在のopen()世代でstartまで成功したかのフラグ（`isReconnecting()`は成功済みの世代の異常のみ）。一度も開けていないデバイスは異常状態でもE4のまま、再試行は継続。デバイス名が空（起動時に0件）の場合は既定デバイスが現れた時点で採用して開く（`pickDefault*Name`をMain.cppからAudioIOへ移動）。レート/バッファ長の変化で出力を無音にするatomicフラグ（再オープンで解除）。時計は`getMillisecondCounterHiRes()`由来の64bit値（Main.cppの統計ログ含む）。未使用のgetter3つを削除、根拠にならないplan.md引用コメントを修正。
+- `MainComponent`: E4の文言・赤枠を`FailedSide`で決定（前方一致を廃止）。コンボボックスを一覧・選択名の変化時のみ作り直す（ポップアップ表示中は保留、通知なしで構築）。選択名の出典を`AudioIO::getDesired*Name()`に一本化（コンストラクタ引数を削除）。「n秒経過」入りの文言は秒数を除いたキーで比較して通知。
+- `Main.cpp`: トレイは(on, err, tooltip)が変わったときだけ更新、エラーバッジにE6（入力0件）を追加。起動時は名前が空でも必ず`open()`。終了時は設定保存をclose()より前に実施。
+- テスト: 片方だけ停止（両パターン、2.0秒/1.9秒）、一覧変更×デバイスなし、健常時の一覧変更（デバイスあり・なし）、異常状態中のエラーフラグ、一覧変更による再試行後の+2秒、`enterFailed`。StatsLogはラベルと値の対応も検証。
+- docs: D-016改訂、plan.mdのConnectionMonitor説明、design.md 6.2 E4の文言。
+
+### 結果
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 全6件成功。
+- `--screenshot`: 終了コード0、460×600。デバイスなし環境で崩れなし（入力・出力とも0件のため両方赤枠、メッセージはE6）。`timeout 8 xvfb-run -a ...`は落ちずにタイムアウト（124）まで生存。
+
+### 次回開始位置
+- Windows実機でのE1〜E4・再接続・コンボボックスの動的更新の確認（README「手動確認手順」）。
+
+---
+
 ## 2026-09-28 T-007 トレイ常駐・デバイス切断時の処理・エラー表示・統計ログ
 
 ### 実施内容

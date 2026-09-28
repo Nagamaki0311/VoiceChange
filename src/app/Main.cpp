@@ -78,24 +78,6 @@ juce::Image makeTrayImage (bool on, bool errorBadge)
     return img;
 }
 
-juce::String pickDefaultInputName (const juce::StringArray& names)
-{
-    // docs/spec.md「初回起動時の既定値: 入力はシステム既定の入力デバイス」。
-    // AudioIO::getInputNames()はscanForDevices()済みの一覧をそのまま返し、既定デバイスが先頭に来る
-    // （docs/plan.md 1章の事実5「一覧では既定デバイスがindex 0」）。
-    return names.isEmpty() ? juce::String() : names[0];
-}
-
-juce::String pickDefaultOutputName (const juce::StringArray& names)
-{
-    // docs/spec.md「出力は『CABLE Input』を含むデバイス（なければシステム既定の出力）」。
-    for (const auto& n : names)
-        if (n.containsIgnoreCase ("CABLE Input"))
-            return n;
-
-    return names.isEmpty() ? juce::String() : names[0];
-}
-
 vc::SavedSettings loadSettings (juce::PropertiesFile& props)
 {
     vc::SavedSettings s;
@@ -196,15 +178,14 @@ private:
 class VoiceChangeMainWindow final : public juce::DocumentWindow
 {
 public:
-    VoiceChangeMainWindow (vc::AudioIO& audioIOIn, juce::PropertiesFile& settingsIn,
-                            const juce::String& desiredInput, const juce::String& desiredOutput)
+    VoiceChangeMainWindow (vc::AudioIO& audioIOIn, juce::PropertiesFile& settingsIn)
         : DocumentWindow ("VoiceChange", juce::Colour (vc::AppLookAndFeel::bgWindow),
                            DocumentWindow::minimiseButton | DocumentWindow::closeButton)
     {
         setUsingNativeTitleBar (true);
         setResizable (false, false);
 
-        auto* content = new vc::MainComponent (audioIOIn, settingsIn, desiredInput, desiredOutput);
+        auto* content = new vc::MainComponent (audioIOIn, settingsIn);
         setContentOwned (content, true);
 
         // design.md 7章「ウィンドウアイコンはトレイアイコンのON版（32px）と同じ図案」。
@@ -278,22 +259,35 @@ public:
 private:
     void timerCallback() override { refresh(); }
 
-    // design.md 6.1節「トレイ」列: ON/OFF版、または赤いバッジ(デバイス切断・再接続中、開けない、E5の10秒間)。
-    bool hasErrorBadge() const noexcept
+    // design.md 6.1節「トレイ」列: ON/OFF版、または赤いバッジ(デバイス切断・再接続中、開けない、E5の10秒間、
+    // E6=入力デバイス0件)。
+    bool hasErrorBadge() const
     {
         return audioIO.isReconnecting()
             || audioIO.hasRecentEngineError()
-            || ((! audioIO.isOpen()) && audioIO.getErrorText().isNotEmpty());
+            || audioIO.getInputNames().isEmpty()
+            || ((! audioIO.isOpen()) && audioIO.getFailedSide() != vc::AudioIO::FailedSide::None);
     }
 
+    // (on, err, tooltip)が前回から変わったときだけアイコンとツールチップを更新する
+    // (OSのトレイ更新は不要に繰り返さない)。
     void refresh()
     {
         const bool on = audioIO.engineParams().enabled.load (std::memory_order_relaxed);
         const bool err = hasErrorBadge();
+        const juce::String tooltip = buildTooltip (on, err);
+
+        if (hasShown && on == shownOn && err == shownErr && tooltip == shownTooltip)
+            return;
+
+        hasShown = true;
+        shownOn = on;
+        shownErr = err;
+        shownTooltip = tooltip;
 
         const auto image = makeTrayImage (on, err);
         setIconImage (image, image);
-        setIconTooltip (buildTooltip (on, err));
+        setIconTooltip (tooltip);
     }
 
     juce::String buildTooltip (bool on, bool err) const
@@ -327,6 +321,9 @@ private:
 
         if (audioIO.hasRecentEngineError())
             return juce::String::fromUTF8 ("音声処理で異常を検出");
+
+        if (audioIO.getInputNames().isEmpty())
+            return juce::String::fromUTF8 ("入力デバイスなし");
 
         return juce::String::fromUTF8 ("デバイスを開けません");
     }
@@ -369,6 +366,9 @@ private:
     juce::PropertiesFile& settings;
     vc::AppLookAndFeel menuLookAndFeel;
 
+    bool hasShown = false, shownOn = false, shownErr = false;
+    juce::String shownTooltip;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TrayIcon)
 };
 
@@ -410,14 +410,15 @@ public:
         // D-009: 起動時に保存済みのデバイスが見つからない場合でも既定デバイスへ切り替えない。
         // ここでの「既定値」は保存済み設定が無い場合にのみ使う。
         const juce::String desiredInput = saved.inputDevice.isNotEmpty() ? saved.inputDevice
-                                                                          : pickDefaultInputName (inputNames);
+                                                                          : vc::pickDefaultInputName (inputNames);
         const juce::String desiredOutput = saved.outputDevice.isNotEmpty() ? saved.outputDevice
-                                                                            : pickDefaultOutputName (outputNames);
+                                                                            : vc::pickDefaultOutputName (outputNames);
 
-        if (desiredInput.isNotEmpty() && desiredOutput.isNotEmpty())
-            audioIO.open (desiredInput, desiredOutput); // Linux/Xvfbでデバイスが無ければ失敗するがクラッシュしない
+        // 名前が空の側(デバイス0件)も含めて必ず呼ぶ。失敗しても名前は記録され、AudioIOが2秒ごとの再試行と
+        // 既定デバイスが現れたときの採用を続ける。Linux/Xvfbでデバイスが無ければ失敗するがクラッシュしない。
+        audioIO.open (desiredInput, desiredOutput);
 
-        mainWindow = std::make_unique<VoiceChangeMainWindow> (audioIO, *settings, desiredInput, desiredOutput);
+        mainWindow = std::make_unique<VoiceChangeMainWindow> (audioIO, *settings);
 
         // design.md 7章「システムトレイ」。閉じるボタン・Escで格納したとき、初回だけ通知を出す。
         trayIcon = std::make_unique<TrayIcon> (audioIO, *mainWindow, *settings);
@@ -431,7 +432,7 @@ public:
                       .getChildFile ("VoiceChange").getChildFile ("VoiceChange.log");
         logFile.getParentDirectory().createDirectory(); // PropertiesFileの保存タイミングに依存しない
         vc::resetIfLarger (logFile, 1024 * 1024);
-        appStartMs = (juce::int64) juce::Time::getMillisecondCounter();
+        appStartMs = (juce::int64) juce::Time::getMillisecondCounterHiRes(); // 32bitのgetMillisecondCounter()は約49.7日でラップする
         startTimer (60000);
 
         handleScreenshotArgumentIfPresent();
@@ -442,11 +443,12 @@ public:
         stopTimer();
         trayIcon = nullptr;
         mainWindow = nullptr;
-        audioIO.close();
 
+        // 設定の保存はデバイスのclose()（ドライバ次第で時間がかかる・固まる）より前に済ませる。
         if (settings != nullptr)
             settings->saveIfNeeded();
 
+        audioIO.close();
         settings = nullptr;
     }
 
@@ -503,7 +505,7 @@ private:
         const double inRate = audioIO.getInputInfo().rate;
 
         vc::StatsSnapshot snap;
-        snap.elapsedSeconds = (double) ((juce::int64) juce::Time::getMillisecondCounter() - appStartMs) * 0.001;
+        snap.elapsedSeconds = (double) ((juce::int64) juce::Time::getMillisecondCounterHiRes() - appStartMs) * 0.001;
         snap.latencyMs = audioIO.getLatency().totalMs;
         snap.fillMs = inRate > 0.0 ? (double) fifoStats.fillSmoothedSamples.load (std::memory_order_relaxed) / inRate * 1000.0 : 0.0;
         snap.underruns = fifoStats.underruns.load (std::memory_order_relaxed);

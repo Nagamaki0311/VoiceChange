@@ -19,10 +19,14 @@ class ConnectionMonitor
 public:
     enum class Action { None, CloseAndFail, TryReopen };
 
-    // nowMsは単調時計(ミリ秒、juce::Time::getMillisecondCounter()相当)。
-    // inCount/outCountは入力・出力コールバックの呼び出し回数(ウォッチドッグ)。値が2秒進まなければ異常とみなす。
-    // errorFlagはaudioDeviceError・無言終了・例外のいずれか、reopenRequestedはレート/バッファ長の変化検出。
+    // nowMsはラップしない単調時計(ミリ秒。(int64) Time::getMillisecondCounterHiRes()相当。32bitのgetMillisecondCounter()は
+    // 約49.7日でラップするため使わない)。
+    // inCount/outCountは入力・出力コールバックの呼び出し回数(ウォッチドッグ)。入力・出力それぞれの最終進捗時刻を持ち、
+    // どちらか一方でも2秒進まなければ異常とみなす(JUCE 9のWASAPI入力スレッドは1秒タイムアウトで通知なしに終了するため、
+    // 片方だけ止まる異常を「もう一方が進んでいる」ことで見逃さない)。
+    // errorFlagはaudioDeviceError・例外等、reopenRequestedはレート/バッファ長の変化検出。
     // devicesPresentは現在の一覧に開きたいデバイス(入出力とも)が存在するか、listChangedは一覧変更通知の有無。
+    // 健常時に「一覧変更 && 使用中のデバイスが一覧に無い」も異常(CloseAndFail)とする。
     Action update (juce::int64 nowMs, std::uint64_t inCount, std::uint64_t outCount,
                    bool errorFlag, bool reopenRequested, bool devicesPresent, bool listChanged) noexcept
     {
@@ -34,23 +38,30 @@ public:
                 initialised = true;
                 lastInCount = inCount;
                 lastOutCount = outCount;
-                lastProgressMs = nowMs;
+                lastInProgressMs = nowMs;
+                lastOutProgressMs = nowMs;
                 return Action::None;
             }
 
-            if (inCount != lastInCount || outCount != lastOutCount)
+            if (inCount != lastInCount)
             {
                 lastInCount = inCount;
-                lastOutCount = outCount;
-                lastProgressMs = nowMs;
+                lastInProgressMs = nowMs;
             }
 
-            const bool stalled = (nowMs - lastProgressMs) >= kWatchdogMs;
-
-            if (errorFlag || reopenRequested || stalled)
+            if (outCount != lastOutCount)
             {
-                failed = true;
-                nextRetryMs = nowMs + kRetryIntervalMs;
+                lastOutCount = outCount;
+                lastOutProgressMs = nowMs;
+            }
+
+            const bool stalled = (nowMs - lastInProgressMs) >= kWatchdogMs
+                              || (nowMs - lastOutProgressMs) >= kWatchdogMs;
+            const bool deviceGone = listChanged && ! devicesPresent;
+
+            if (errorFlag || reopenRequested || stalled || deviceGone)
+            {
+                enterFailed (nowMs);
                 return Action::CloseAndFail;
             }
 
@@ -73,6 +84,15 @@ public:
         return Action::None;
     }
 
+    // 開くこと自体に失敗した場合(コールバックがまだ一度も動いていない)に、ウォッチドッグを経由せず
+    // 異常状態へ入れて、2秒ごとの再試行を続けさせる。
+    void enterFailed (juce::int64 nowMs) noexcept
+    {
+        initialised = true;
+        failed = true;
+        nextRetryMs = nowMs + kRetryIntervalMs;
+    }
+
     bool isFailed() const noexcept { return failed; }
 
 private:
@@ -84,7 +104,8 @@ private:
 
     std::uint64_t lastInCount = 0;
     std::uint64_t lastOutCount = 0;
-    juce::int64 lastProgressMs = 0;
+    juce::int64 lastInProgressMs = 0;
+    juce::int64 lastOutProgressMs = 0;
     juce::int64 nextRetryMs = 0;
 };
 

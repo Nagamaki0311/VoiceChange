@@ -563,13 +563,9 @@ void StatusPanel::paint (juce::Graphics& g)
 
 // ===== SECTION: MainComponent =====
 
-MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settingsIn,
-                               juce::String desiredInputName, juce::String desiredOutputName)
+MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settingsIn)
     : audioIO (audioIOIn), settings (settingsIn)
 {
-    currentDesiredInputName = desiredInputName;
-    currentDesiredOutputName = desiredOutputName;
-
     setLookAndFeel (&lookAndFeel);
     tooltipWindow.setLookAndFeel (&lookAndFeel);
     lookAndFeel.setEnabledFlag (&audioIO.engineParams().enabled);
@@ -598,8 +594,7 @@ MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settings
     inputCombo.setTitle (juce::String::fromUTF8 ("入力デバイス"));
     outputCombo.setTitle (juce::String::fromUTF8 ("出力デバイス"));
 
-    refreshDeviceCombo (inputCombo, audioIO.getInputNames(), currentDesiredInputName, inputComboRealNames);
-    refreshDeviceCombo (outputCombo, audioIO.getOutputNames(), currentDesiredOutputName, outputComboRealNames);
+    syncDeviceCombos();
 
     inputCombo.onChange = [this] { deviceComboChanged (true); };
     outputCombo.onChange = [this] { deviceComboChanged (false); };
@@ -850,6 +845,25 @@ void MainComponent::refreshDeviceCombo (juce::ComboBox& combo, const juce::Strin
     combo.setSelectedId (selectId, juce::dontSendNotification);
 }
 
+void MainComponent::syncDeviceCombos()
+{
+    auto sync = [this] (DeviceComboBox& combo, juce::StringArray& realNames, juce::String& shownKey,
+                         const juce::StringArray& names, const juce::String& desiredName)
+    {
+        const juce::String key = names.joinIntoString ("\n") + juce::String::charToString ((juce::juce_wchar) 0x1F) + desiredName;
+
+        if (key == shownKey || combo.isPopupActive())
+            return;
+
+        // refreshDeviceCombo()はdontSendNotificationで構築するため、onChange（＝open()）は発火しない。
+        refreshDeviceCombo (combo, names, desiredName, realNames);
+        shownKey = key;
+    };
+
+    sync (inputCombo, inputComboRealNames, inputComboKey, audioIO.getInputNames(), audioIO.getDesiredInputName());
+    sync (outputCombo, outputComboRealNames, outputComboKey, audioIO.getOutputNames(), audioIO.getDesiredOutputName());
+}
+
 void MainComponent::deviceComboChanged (bool isInputCombo)
 {
     auto& combo = isInputCombo ? inputCombo : outputCombo;
@@ -863,15 +877,13 @@ void MainComponent::deviceComboChanged (bool isInputCombo)
     if (chosen.isEmpty())
         return; // 「(未接続)」の項目は実デバイスではないので何もしない
 
-    if (isInputCombo)
-        currentDesiredInputName = chosen;
-    else
-        currentDesiredOutputName = chosen;
+    const juce::String inName = isInputCombo ? chosen : audioIO.getDesiredInputName();
+    const juce::String outName = isInputCombo ? audioIO.getDesiredOutputName() : chosen;
 
-    audioIO.open (currentDesiredInputName, currentDesiredOutputName);
+    audioIO.open (inName, outName);
 
-    settings.setValue ("inputDevice", currentDesiredInputName);
-    settings.setValue ("outputDevice", currentDesiredOutputName);
+    settings.setValue ("inputDevice", inName);
+    settings.setValue ("outputDevice", outName);
 
     updateStatus (true);
 }
@@ -987,19 +999,19 @@ void MainComponent::timerCallback()
     }
 }
 
-void MainComponent::announceIfChanged (const juce::String& newMessage, bool isWarnOrError)
+void MainComponent::announceIfChanged (const juce::String& announceKey, bool isWarnOrError)
 {
     if (! isWarnOrError)
     {
-        lastAnnouncedMessage = newMessage;
+        lastAnnouncedKey = announceKey;
         return;
     }
 
-    if (newMessage == lastAnnouncedMessage)
+    if (announceKey == lastAnnouncedKey)
         return;
 
-    lastAnnouncedMessage = newMessage;
-    juce::AccessibilityHandler::postAnnouncement (newMessage, juce::AccessibilityHandler::AnnouncementPriority::high);
+    lastAnnouncedKey = announceKey;
+    juce::AccessibilityHandler::postAnnouncement (announceKey, juce::AccessibilityHandler::AnnouncementPriority::high);
 }
 
 // design.md 5章の要約例「遅延 38.4ミリ秒、CPU 0.8パーセント、入力 低遅延、出力 低遅延、
@@ -1022,50 +1034,58 @@ juce::String MainComponent::buildStatusSummary (const StatusData& d) const
 
 void MainComponent::updateStatus (bool /*slowUpdate*/)
 {
+    syncDeviceCombos(); // 一覧・選択名が変わっていればコンボボックスを作り直す(以降の判定は同じ一覧を見る)
+
     const bool isOpen = audioIO.isOpen();
     const auto inputNames = audioIO.getInputNames();
     const auto outputNames = audioIO.getOutputNames();
     const bool noInputDevices = inputNames.isEmpty();
-    const juce::String errText = audioIO.getErrorText();
-    const bool openFailed = (! isOpen) && errText.isNotEmpty();
-    const bool inputSideFailed = openFailed && errText.startsWith (juce::String::fromUTF8 ("入力"));
-    const bool outputSideFailed = openFailed && errText.startsWith (juce::String::fromUTF8 ("出力"));
-
-    // ----- コンボボックスのエラー表示(design.md 3.5節「切断状態」) -----
-    const bool inputMissingFromList = currentDesiredInputName.isNotEmpty() && ! inputNames.contains (currentDesiredInputName);
-    const bool outputMissingFromList = currentDesiredOutputName.isNotEmpty() && ! outputNames.contains (currentDesiredOutputName);
+    const auto desiredInput = audioIO.getDesiredInputName();
+    const auto desiredOutput = audioIO.getDesiredOutputName();
 
     // ----- デバイス切断・再接続中(design.md 6.1節 E1〜E3、6.2節) -----
+    // 一度は動いていた世代が異常になった場合のみ(D-016)。
+    const bool reconnecting = audioIO.isReconnecting();
+
+    // ----- デバイスを開けない(E4)。一度もstartに成功していない世代の失敗。失敗側の行を赤くする -----
+    const auto failedSide = audioIO.getFailedSide();
+    const bool openFailed = (! isOpen) && (! reconnecting) && failedSide != AudioIO::FailedSide::None;
+    const bool inputSideFailed = openFailed && (failedSide == AudioIO::FailedSide::Input || failedSide == AudioIO::FailedSide::Both);
+    const bool outputSideFailed = openFailed && (failedSide == AudioIO::FailedSide::Output || failedSide == AudioIO::FailedSide::Both);
+
+    // ----- コンボボックスのエラー表示(design.md 3.5節「切断状態」) -----
+    const bool inputMissingFromList = desiredInput.isNotEmpty() && ! inputNames.contains (desiredInput);
+    const bool outputMissingFromList = desiredOutput.isNotEmpty() && ! outputNames.contains (desiredOutput);
+
     // 保存デバイス名が一覧から消えていれば入力/出力を個別に特定できる(E1/E2)。どちらも一覧にある
     // (ドライバが無言で止まった等)場合はE3とし、どちらの行が原因か特定できないため両方を赤くする。
-    const bool reconnecting = audioIO.isReconnecting();
-    const int reconnectElapsedSec = (int) audioIO.getReconnectElapsedSeconds();
+    // reconnectHeadは経過秒数を除いた文言(読み上げ通知のキーにも使う。毎秒変わる文言を通知し続けないため)。
     bool reconnectInputRed = false, reconnectOutputRed = false;
-    juce::String reconnectMessage;
+    juce::String reconnectHead, reconnectMessage;
 
     if (reconnecting)
     {
-        const juce::String elapsedText = juce::String (reconnectElapsedSec) + juce::String::fromUTF8 ("秒経過");
+        const juce::String elapsedText = juce::String::fromUTF8 ("（") + juce::String ((int) audioIO.getReconnectElapsedSeconds())
+                                         + juce::String::fromUTF8 ("秒経過）…");
 
         if (inputMissingFromList)
         {
-            reconnectMessage = juce::String::fromUTF8 ("入力デバイスが切断されました。再接続を試みています（")
-                               + elapsedText + juce::String::fromUTF8 ("）…");
+            reconnectHead = juce::String::fromUTF8 ("入力デバイスが切断されました。再接続を試みています");
             reconnectInputRed = true;
         }
         else if (outputMissingFromList)
         {
-            reconnectMessage = juce::String::fromUTF8 ("出力デバイスが切断されました。再接続を試みています（")
-                               + elapsedText + juce::String::fromUTF8 ("）…");
+            reconnectHead = juce::String::fromUTF8 ("出力デバイスが切断されました。再接続を試みています");
             reconnectOutputRed = true;
         }
         else
         {
-            reconnectMessage = juce::String::fromUTF8 ("音声が止まっています。デバイスを開き直しています（")
-                               + elapsedText + juce::String::fromUTF8 ("）…");
+            reconnectHead = juce::String::fromUTF8 ("音声が止まっています。デバイスを開き直しています");
             reconnectInputRed = true;
             reconnectOutputRed = true;
         }
+
+        reconnectMessage = reconnectHead + elapsedText;
     }
 
     const bool inputError = inputMissingFromList || inputSideFailed || noInputDevices || reconnectInputRed;
@@ -1123,7 +1143,9 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
     juce::String message;
     bool isWarnOrError = false;
 
-    if ((! isOpen) && errText.isEmpty() && ! noInputDevices && ! reconnecting)
+    juce::String announceKey; // 空ならmessageそのもの。経過秒数入りの文言は秒数を除いたキーにする
+
+    if ((! isOpen) && failedSide == AudioIO::FailedSide::None && ! noInputDevices && ! reconnecting)
     {
         // 起動中(design.md 6.1節)。Main.cppは起動時に同期的にopen()するため通常はほぼ一瞬で終わる。
         data.delayStarting = true;
@@ -1134,6 +1156,7 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
         // E1〜E3(design.md 6.1節・6.2節、優先順位1〜2)。デバイス切断・再接続中は遅延を"—"にする。
         data.delayAsDash = true;
         message = reconnectMessage;
+        announceKey = reconnectHead;
         data.icon = StatusData::IconKind::Error;
         data.messageBold = true;
         data.lineColour = juce::Colour (AppLookAndFeel::error);
@@ -1153,8 +1176,10 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
     else if (openFailed)
     {
         data.delayAsDash = true;
-        message = inputSideFailed ? juce::String::fromUTF8 ("入力デバイスを開けませんでした。別のデバイスを選んでください。")
-                                   : juce::String::fromUTF8 ("出力デバイスを開けませんでした。別のデバイスを選んでください。");
+        const juce::String side = (inputSideFailed && outputSideFailed) ? juce::String::fromUTF8 ("入力・出力")
+                                   : inputSideFailed ? juce::String::fromUTF8 ("入力")
+                                                     : juce::String::fromUTF8 ("出力");
+        message = side + juce::String::fromUTF8 ("デバイスを開けませんでした。別のデバイスを選んでください。");
         data.icon = StatusData::IconKind::Error;
         data.messageBold = true;
         data.lineColour = juce::Colour (AppLookAndFeel::error);
@@ -1230,7 +1255,7 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
     levelValueLabel.setText (meterText, juce::dontSendNotification);
     levelValueLabel.setColour (juce::Label::textColourId, meterColour);
 
-    announceIfChanged (message, isWarnOrError);
+    announceIfChanged (announceKey.isEmpty() ? message : announceKey, isWarnOrError);
 }
 
 } // namespace vc

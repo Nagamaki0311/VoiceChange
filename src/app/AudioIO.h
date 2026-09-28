@@ -17,9 +17,11 @@
 // 「ConnectionMonitor」、docs/decisions.md D-009参照。
 // 500msの`juce::Timer`でConnectionMonitorを評価し、片方だけの異常でも両方をclose()、両方揃ってから
 // 両方をopen()し直す（D-009。この対称性はConnectionMonitorではなくここで保証する）。
-// 監視対象は3つ: (1)audioDeviceError、(2)無言終了（audioDeviceStoppedがこちらからのstop()以外で
-// 呼ばれた場合）、(3)audioDeviceAboutToStartの2回目以降でレート/バッファ長が変化した場合。
-// (1)(2)はerrorFlag/deviceStoppedFlagとして合成し、ConnectionMonitorのerrorFlag引数に渡す。
+// 監視対象は3つ: (1)コールバック回数の停滞（入力・出力それぞれ。主軸）、(2)audioDeviceError・例外、
+// (3)audioDeviceAboutToStartの2回目以降でレート/バッファ長が変化した場合。
+// JUCE 9のWASAPIはデバイス側の無言終了（入力スレッドの1秒タイムアウト等）でaudioDeviceStopped()を
+// 呼ばない（呼ばれるのはこちらからのstop()だけ。D-016）ため、無言終了の検出はコールバック回数のみに頼る。
+// audioDeviceStopped()がこちらのstop()以外で呼ばれた場合(他のデバイス型)は補助的にerrorFlag側へ合成する。
 
 namespace vc
 {
@@ -27,6 +29,12 @@ namespace vc
 // 出力デバイス名にVB-CABLE（"CABLE Input"）を含むものがあるか（docs/spec.md「VB-CABLE検出」）。
 // Main.cpp（起動時ダイアログ）とMainComponent（W1表示）の両方が使うため、ここに置く。
 bool containsCableInput (const juce::StringArray& deviceNames) noexcept;
+
+// docs/spec.md「初回起動時の既定値」。入力はシステム既定（一覧の先頭。docs/plan.md 1章の事実5）、
+// 出力は「CABLE Input」を含むデバイス（なければシステム既定）。一覧が空なら空文字列。
+// Main.cpp（起動時）とAudioIO（起動時にデバイスが0件だった場合の後追い）が使う。
+juce::String pickDefaultInputName (const juce::StringArray& names);
+juce::String pickDefaultOutputName (const juce::StringArray& names);
 
 struct DeviceInfo
 {
@@ -59,6 +67,8 @@ public:
 
     // メッセージスレッドのみ。両方停止 → 作成 → open → prepare → start。
     // 低遅延モードで開けなければ共有モードへフォールバックする（Windowsのみ。D-001）。
+    // 起動時・手動選択時に呼ぶ（新しい「世代」の開始。startに一度も成功していない世代の失敗はE4扱い。D-016）。
+    // 失敗しても再接続の再試行は続く。名前が空の側は開けない（失敗側に数える）。
     bool open (const juce::String& inName, const juce::String& outName);
     void close();
 
@@ -75,6 +85,10 @@ public:
 
     juce::String getErrorText() const;
 
+    // 直近のopen()で開けなかった側（成功していればNone）。E4の文言と赤枠の行の判定に使う（T-007）。
+    enum class FailedSide { None, Input, Output, Both };
+    FailedSide getFailedSide() const noexcept { return failedSide; }
+
     // 層1パラメータ・プリセット・ON/OFF（音声スレッドとはatomicのみでやり取りする、D-001）。
     AtomicParams& engineParams() noexcept { return engine.params(); }
 
@@ -83,19 +97,17 @@ public:
     // リングバッファの統計（充填量・アンダーラン/オーバーラン・速度補正）。StatsLog用（T-007）。
     const ResamplingFifoStats& getFifoStats() const noexcept { return fifo.stats(); }
 
-    std::uint64_t getInputCallbackCount() const noexcept { return inputCallbackCount.load (std::memory_order_relaxed); }
-    std::uint64_t getOutputCallbackCount() const noexcept { return outputCallbackCount.load (std::memory_order_relaxed); }
-    bool hasErrorFlag() const noexcept { return errorFlag.load (std::memory_order_relaxed); }
-
     // ===== T-007: 再接続・エラー表示 =====
-    // ConnectionMonitorが異常状態(CloseAndFail後、再open()に成功するまで)かどうか。design.md 6.1節
-    // 「デバイス切断・再接続中」の判定に使う（MainComponent・トレイの両方）。
-    bool isReconnecting() const noexcept { return connectionMonitor.isFailed(); }
+    // 一度は動いていた(現在のopen()世代でstartまで成功した)のに異常状態になり、再open()に成功するまでの間。
+    // design.md 6.1節「デバイス切断・再接続中」(E1〜E3)の判定に使う（MainComponent・トレイの両方）。
+    // 一度もstartに成功していない世代の失敗は含まない（そちらはE4。getFailedSide()で判定する）。
+    bool isReconnecting() const noexcept { return connectionMonitor.isFailed() && startedThisGeneration; }
 
     // 異常状態になってからの経過秒数（design.md 6.2節 E1〜E3の"{n}秒経過"）。異常でなければ0。
     double getReconnectElapsedSeconds() const noexcept;
 
-    // open()に渡された最後のデバイス名（成功・失敗を問わない）。再接続とE1/E2の判定に使う。
+    // open()に渡された最後のデバイス名（成功・失敗を問わない）。再接続・E1/E2の判定・コンボボックスの選択表示に使う。
+    // 空のまま(起動時にデバイスが0件)なら、既定デバイスが現れた時点でAudioIOが採用して開く。
     juce::String getDesiredInputName() const noexcept { return desiredInputName; }
     juce::String getDesiredOutputName() const noexcept { return desiredOutputName; }
 
@@ -111,6 +123,9 @@ private:
 
     void createDeviceTypes();
     juce::AudioIODeviceType* nameListType() const;
+
+    // open()の本体。再接続の再試行(TryReopen)は世代を進めないためこちらを直接呼ぶ。
+    bool openDevices (const juce::String& inName, const juce::String& outName);
 
     // 低遅延→共有の順で開く。開いたデバイスと実際に使ったモードを返す(nullptrなら失敗)。
     std::unique_ptr<juce::AudioIODevice> openOneDevice (const juce::String& outName,
@@ -138,6 +153,8 @@ private:
 
     DeviceInfo inputInfo, outputInfo;
     juce::String errorText;
+    FailedSide failedSide = FailedSide::None;
+    bool startedThisGeneration = false; // 現在のopen()世代でstartまで一度でも成功したか（メッセージスレッドのみ）
 
     // open()に渡された名前(成功・失敗を問わず記録する)。ConnectionMonitorがTryReopenを返したとき、
     // 同じ名前で開き直すために使う（D-009: 保存済みデバイスが無い場合も既定へ切り替えず再試行する）。
@@ -146,7 +163,8 @@ private:
     std::atomic<std::uint64_t> inputCallbackCount { 0 };
     std::atomic<std::uint64_t> outputCallbackCount { 0 };
     std::atomic<bool> errorFlag { false };          // audioDeviceErrorまたは例外
-    std::atomic<bool> deviceStoppedFlag { false };  // 無言終了（こちらからのstop()以外でaudioDeviceStoppedが呼ばれた）
+    std::atomic<bool> deviceStoppedFlag { false };  // こちらからのstop()以外でaudioDeviceStoppedが呼ばれた（補助。WASAPIでは呼ばれない）
+    std::atomic<bool> muteOutputFlag { false };     // レート/バッファ長の変化後、再オープンまで出力を無音にする
     std::atomic<bool> reopenRequestedFlag { false }; // audioDeviceAboutToStartの2回目以降でレート/バッファ長が変化
     std::atomic<bool> expectingIntentionalStop { false }; // close()内でstop()を呼ぶ間だけtrue
     std::atomic<bool> listChangedFlag { false };

@@ -330,21 +330,21 @@
 
 ## D-016: T-007のエラー分類・単一消費者化・無言終了の判定
 
-- 日付: 2026-09-28
+- 日付: 2026-09-28（レビュー指摘への対応で2026-09-28に改訂）
 - 状態: 採用
 
 ### 背景
-- plan.md「AudioIO」「ConnectionMonitor」節は監視ロジックの骨格のみを定義しており、実装時に以下3点の判断が必要だった。
+- plan.md「AudioIO」「ConnectionMonitor」節は監視ロジックの骨格のみを定義しており、実装時に以下の判断が必要だった。レビューで、初版の「無言終了は`audioDeviceStopped()`で拾える」という前提と、E4/E3の切り分けがdesign.md 6.1/6.2節と食い違っていることが判明したため改訂した。
 
 ### 決定
-1. **E4（デバイスを開けない）とE1〜E3（切断・再接続中）の切り分け**: ConnectionMonitorは両者を区別しない（両方ともCloseAndFail/TryReopenの単純な繰り返し）。UI側（MainComponent・トレイ）で`AudioIO::isReconnecting()`（ConnectionMonitorが異常状態に入っているか）を最優先の判定にし、まだ異常状態に入っていない起動直後・デバイス変更直後の一瞬だけE4を表示する。異常状態に入った後は、保存デバイス名が一覧から消えていればE1/E2、消えていなければ（ドライバが一覧に残ったまま無言で止まった場合等）E3として両方の行を赤くする。
+1. **E4（デバイスを開けない）とE1〜E3（切断・再接続中）の切り分け**: `AudioIO`が「現在の`open()`世代で一度でもstartまで成功したか」を持つ。`open()`（起動時・手動選択時）が世代を進め、ConnectionMonitorのTryReopenによる再試行は世代を進めない。一度もstartに成功していない世代の失敗は、時間が経ってもE4（`AudioIO::getFailedSide()`が返す失敗側None/Input/Output/Bothの行を赤枠、文言も失敗側で決める。文言の前方一致には頼らない）。startに成功した後の異常だけがE1〜E3で、保存デバイス名が一覧から消えていればE1/E2、消えていなければ（ドライバが一覧に残ったまま無言で止まった場合等）E3として両方の行を赤くする。再接続の再試行はどちらの場合も2秒ごとに続ける（開くこと自体の失敗は`ConnectionMonitor::enterFailed()`で異常状態へ入れる）。
 2. **Engineのエラーフラグ（bit0非有限値・bit1例外）は`AudioIO`の500msタイマーだけが読んで消費する**: T-006まではMainComponentが直接`engine.getErrorFlags()`/`clearErrorFlags()`を読んで10秒間のE5表示を管理していたが、T-007でトレイのバッジ・ツールチップも同じ情報を必要とするようになった。2箇所が同じedge-triggeredフラグを消費すると早いもの勝ちで取りこぼす。`AudioIO`が唯一の消費者になり、`hasRecentEngineError()`（レベル判定）と`getLastEngineErrorTimeText()`を公開する形に変更した。
-3. **無言終了の検出**: `audioDeviceStopped()`はこちらから`stop()`を呼んだ場合にも呼ばれる。`AudioIO::close()`内で`stop()`を呼ぶ直前だけ`expectingIntentionalStop`を立て、それ以外で`audioDeviceStopped()`が呼ばれた場合だけ無言終了とみなす。
+3. **無言終了の検出はコールバック回数の停滞のみに頼る**: JUCE 9のWASAPIは、入力スレッドが1秒のイベント待ちタイムアウトで通知なしに終了しても`audioDeviceStopped()`を呼ばない（`audioDeviceStopped()`が呼ばれるのはこちらの`stop()`だけ）。このため、ConnectionMonitorは入力・出力それぞれの最終進捗時刻を持ち、どちらか一方でも2秒進まなければ異常とする（片方だけ止まる異常を、もう一方が進んでいることで見逃さない）。`audioDeviceStopped()`は`close()`内の意図した`stop()`（`expectingIntentionalStop`）以外で呼ばれた場合にだけ、他のデバイス型向けの補助としてエラーフラグへ合成する。
 
 ### 理由
-- 1: ConnectionMonitorのインターフェース（`update`/`isFailed`のみ）を変えずに済み、UIごとに異なる文言の使い分けを実現できる。
+- 1: E4は「今すぐ別のデバイスを選ぶ必要がある」状態、E1〜E3は「待てば戻る」状態であり、一度も動いていないデバイスに「再接続中」と出すのは誤り。世代のフラグにより、ConnectionMonitorのインターフェースを大きく変えずにdesign.mdの表と一致させられる。
 - 2: エラーフラグの消費者を1つに絞ることで、取りこぼし・二重クリアの競合を構造的に防げる。
-- 3: JUCEの`AudioIODeviceCallback`契約上、意図した停止と異常停止を区別する手段が`audioDeviceStopped()`自体にはないため。
+- 3: 実際のJUCE 9のソース（`juce_WASAPI_windows.cpp`）で、無言終了時にコールバックが呼ばれないことを確認した。検出できる情報はコールバックが進んでいるかだけである。
 
 ### 影響
 - MainComponentの`errorUntilMs`/`errorTimestampText`は削除し、`AudioIO`側の値を読むだけにした。

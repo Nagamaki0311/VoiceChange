@@ -168,6 +168,35 @@ private:
             expect (mon.isFailed());
         }
 
+        // 片方だけ止まる異常(JUCE 9のWASAPI入力スレッドは1秒タイムアウトで通知なしに終了する)は、
+        // もう一方が進み続けていても検出する。fixedIn=trueなら入力を固定・出力を進める。逆も同様。
+        for (const bool fixedIn : { true, false })
+        {
+            const juce::String which = juce::String::fromUTF8 (fixedIn ? "入力が止まり出力は進行" : "出力が止まり入力は進行");
+
+            beginTest ("ConnectionMonitor: " + which + juce::String::fromUTF8 (" → 2.0秒でCloseAndFail、1.9秒ではNone"));
+            {
+                auto run = [&] (juce::int64 stallMs)
+                {
+                    vc::ConnectionMonitor mon;
+                    mon.update (0, 0, 0, false, false, true, false);
+
+                    juce::uint64 moving = 0;
+                    for (juce::int64 t = 100; t < stallMs; t += 100)
+                    {
+                        ++moving;
+                        expect (mon.update (t, fixedIn ? 0 : moving, fixedIn ? moving : 0, false, false, true, false) == Action::None);
+                    }
+
+                    ++moving;
+                    return mon.update (stallMs, fixedIn ? 0 : moving, fixedIn ? moving : 0, false, false, true, false);
+                };
+
+                expect (run (1900) == Action::None);
+                expect (run (2000) == Action::CloseAndFail);
+            }
+        }
+
         beginTest ("ConnectionMonitor: カウンタが進み続けていれば異常にならない");
         {
             vc::ConnectionMonitor mon;
@@ -205,6 +234,77 @@ private:
 
             // まだ2秒経っていない(t=2100)が、一覧変更通知でデバイスが戻っていれば即TryReopen。
             expect (mon.update (2100, 0, 0, false, false, true, true) == Action::TryReopen);
+        }
+
+        beginTest ("ConnectionMonitor: 一覧変更通知があってもデバイスが無ければ異常状態でもTryReopenしない");
+        {
+            vc::ConnectionMonitor mon;
+            mon.update (0, 0, 0, false, false, true, false);
+            mon.update (2000, 0, 0, false, false, true, false); // CloseAndFail(次回予定はt=4000)
+
+            expect (mon.update (2100, 0, 0, false, false, false, true) == Action::None);
+            expect (mon.update (3900, 0, 0, false, false, false, true) == Action::None);
+            expect (mon.update (4000, 0, 0, false, false, false, false) == Action::TryReopen); // 通常のスケジュールは有効
+        }
+
+        beginTest ("ConnectionMonitor: 一覧変更による再試行の次の再試行はそこから+2秒");
+        {
+            vc::ConnectionMonitor mon;
+            mon.update (0, 0, 0, false, false, true, false);
+            mon.update (2000, 0, 0, false, false, true, false); // CloseAndFail
+            expect (mon.update (2100, 0, 0, false, false, true, true) == Action::TryReopen); // 一覧変更で即時
+
+            expect (mon.update (4000, 0, 0, false, false, false, false) == Action::None); // 元の予定(4000)ではない
+            expect (mon.update (4099, 0, 0, false, false, false, false) == Action::None);
+            expect (mon.update (4100, 0, 0, false, false, false, false) == Action::TryReopen); // 2100+2000
+            expect (mon.update (6100, 0, 0, false, false, false, false) == Action::TryReopen); // さらに+2秒
+        }
+
+        beginTest ("ConnectionMonitor: 健常時の一覧変更通知は、デバイスがあれば無視する");
+        {
+            vc::ConnectionMonitor mon;
+            mon.update (0, 0, 0, false, false, true, false);
+
+            juce::uint64 in = 0, out = 0;
+            for (juce::int64 t = 100; t <= 1000; t += 100)
+            {
+                ++in; ++out;
+                expect (mon.update (t, in, out, false, false, true, true) == Action::None);
+            }
+
+            expect (! mon.isFailed());
+        }
+
+        beginTest ("ConnectionMonitor: 健常時に一覧変更があり使用中デバイスが一覧に無ければ即CloseAndFail");
+        {
+            vc::ConnectionMonitor mon;
+            mon.update (0, 0, 0, false, false, true, false);
+            expect (mon.update (100, 1, 1, false, false, false, false) == Action::None); // 通知なしなら一覧だけでは判定しない
+            expect (mon.update (200, 2, 2, false, false, false, true) == Action::CloseAndFail);
+            expect (mon.isFailed());
+            expect (mon.update (2200, 2, 2, false, false, false, false) == Action::TryReopen); // 以後は+2秒ごと
+        }
+
+        beginTest ("ConnectionMonitor: 異常状態中のエラーフラグ・再オープン要求はCloseAndFailを重ねて返さない");
+        {
+            vc::ConnectionMonitor mon;
+            mon.update (0, 0, 0, false, false, true, false);
+            expect (mon.update (100, 0, 0, true, false, true, false) == Action::CloseAndFail);
+
+            expect (mon.update (200, 0, 0, true, true, false, false) == Action::None);
+            expect (mon.update (2100, 0, 0, true, false, false, false) == Action::TryReopen);
+        }
+
+        beginTest ("ConnectionMonitor: enterFailed(開くこと自体に失敗)後は2秒ごとにTryReopen");
+        {
+            vc::ConnectionMonitor mon;
+            mon.enterFailed (1000);
+            expect (mon.isFailed());
+
+            expect (mon.update (2900, 0, 0, false, false, false, false) == Action::None);
+            expect (mon.update (3000, 0, 0, false, false, false, false) == Action::TryReopen);
+            expect (mon.update (4900, 0, 0, false, false, false, false) == Action::None);
+            expect (mon.update (5000, 0, 0, false, false, false, false) == Action::TryReopen);
         }
 
         beginTest ("ConnectionMonitor: エラーフラグは即CloseAndFail");
@@ -245,21 +345,22 @@ private:
 
             const auto line = vc::formatStatsLine (s);
 
-            expect (line.contains ("3661"));        // 経過時間
-            expect (line.contains ("45.2"));        // レイテンシ
-            expect (line.contains ("12.3"));        // 充填量
+            // 値だけでなくラベルとの対応も検証する(値が別の項目に入れ替わる不具合を検出する)。
+            expect (line.contains ("t=3661s"));          // 経過時間
+            expect (line.contains ("latencyMs=45.2"));   // レイテンシ
+            expect (line.contains ("fillMs=12.3"));      // 充填量
             expect (line.contains ("underruns=3"));
             expect (line.contains ("overruns=1"));
-            expect (line.contains ("-15.5"));       // 速度比補正
-            expect (line.contains ("0.8"));         // CPU使用率
-            expect (line.contains ("42.0"));        // メモリ(MB)
+            expect (line.contains ("speedPpm=-15.5"));   // 速度比補正
+            expect (line.contains ("cpu=0.8%"));         // CPU使用率
+            expect (line.contains ("memMB=42.0"));       // メモリ(MB)
         }
 
         beginTest ("StatsLog: 速度比補正が正のときは符号を付ける");
         {
             vc::StatsSnapshot s;
             s.speedCorrectionPpm = 12.0;
-            expect (vc::formatStatsLine (s).contains ("+12.0"));
+            expect (vc::formatStatsLine (s).contains ("speedPpm=+12.0"));
         }
 
         beginTest ("StatsLog: resetIfLarger 1MB超の一時ファイルは作り直し後にサイズ0");
