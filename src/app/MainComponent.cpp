@@ -1,0 +1,1144 @@
+#include "MainComponent.h"
+
+#include <cmath>
+
+// ===== SECTION: MainComponent実装 =====
+// docs/design.md 3章のレイアウト表・3.5節のコンポーネント仕様・6章の状態設計に対応する。
+// UIスレッドと音声スレッド間はAtomicParams(std::atomic)のみでやり取りする（音声パスには触れない）。
+
+namespace vc
+{
+
+// ===== SECTION: AppLookAndFeel =====
+
+AppLookAndFeel::AppLookAndFeel()
+{
+    setColour (juce::ResizableWindow::backgroundColourId, juce::Colour (bgWindow));
+
+    setColour (juce::ComboBox::backgroundColourId, juce::Colour (surface));
+    setColour (juce::ComboBox::textColourId, juce::Colour (textPrimary));
+    setColour (juce::ComboBox::outlineColourId, juce::Colour (lineBorder));
+    setColour (juce::ComboBox::arrowColourId, juce::Colour (textSecondary));
+    setColour (juce::ComboBox::focusedOutlineColourId, juce::Colour (focus));
+    setColour (juce::ComboBox::buttonColourId, juce::Colour (surface));
+
+    setColour (juce::PopupMenu::backgroundColourId, juce::Colour (0xFF222428));
+    setColour (juce::PopupMenu::textColourId, juce::Colour (textPrimary));
+    setColour (juce::PopupMenu::highlightedBackgroundColourId, juce::Colour (popupHighlight));
+    setColour (juce::PopupMenu::highlightedTextColourId, juce::Colour (textPrimary));
+
+    setColour (juce::TextButton::buttonColourId, juce::Colour (surface));
+    setColour (juce::TextButton::textColourOffId, juce::Colour (textPrimary));
+    setColour (juce::TextButton::textColourOnId, juce::Colour (liveInk));
+
+    setColour (juce::Slider::backgroundColourId, juce::Colour (track));
+    setColour (juce::Slider::trackColourId, juce::Colour (live));
+    setColour (juce::Slider::thumbColourId, juce::Colour (textPrimary));
+    setColour (juce::Slider::textBoxTextColourId, juce::Colour (textPrimary));
+    setColour (juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
+    setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+
+    setColour (juce::Label::textColourId, juce::Colour (textPrimary));
+
+    setColour (juce::TooltipWindow::backgroundColourId, juce::Colour (tooltipBg));
+    setColour (juce::TooltipWindow::textColourId, juce::Colour (textPrimary));
+    setColour (juce::TooltipWindow::outlineColourId, juce::Colour (tooltipBorder));
+
+    setColour (juce::AlertWindow::backgroundColourId, juce::Colour (bgWindow));
+    setColour (juce::AlertWindow::textColourId, juce::Colour (textPrimary));
+    setColour (juce::AlertWindow::outlineColourId, juce::Colour (lineBorder));
+}
+
+juce::Font AppLookAndFeel::uiFont (float pointHeight, bool bold)
+{
+    static const juce::String name = [] () -> juce::String
+    {
+        const auto available = juce::Font::findAllTypefaceNames();
+        for (const char* candidate : { "Yu Gothic UI", "Meiryo UI", "Noto Sans CJK JP" })
+            if (available.contains (candidate))
+                return juce::String (candidate);
+        return juce::Font::getDefaultSansSerifFontName();
+    }();
+
+    auto options = juce::FontOptions {}.withName (name).withPointHeight (pointHeight)
+                       .withStyleFlags (bold ? juce::Font::bold : juce::Font::plain);
+    return juce::Font (options);
+}
+
+juce::Font AppLookAndFeel::numericFont (float pointHeight)
+{
+    static const juce::String name = [] () -> juce::String
+    {
+        const auto available = juce::Font::findAllTypefaceNames();
+        if (available.contains ("Consolas"))
+            return "Consolas";
+        return juce::Font::getDefaultMonospacedFontName();
+    }();
+
+    return juce::Font (juce::FontOptions {}.withName (name).withPointHeight (pointHeight));
+}
+
+void AppLookAndFeel::drawComboBox (juce::Graphics& g, int width, int height, bool /*isButtonDown*/,
+                                    int, int, int, int, juce::ComboBox& box)
+{
+    const juce::Rectangle<float> bounds (0.0f, 0.0f, (float) width, (float) height);
+    const bool errorState = (bool) box.getProperties().getWithDefault ("errorState", false);
+    const bool hasFocus = box.hasKeyboardFocus (true);
+    const bool hover = box.isMouseOver (true);
+
+    g.setColour (juce::Colour (surface));
+    g.fillRoundedRectangle (bounds, 4.0f);
+
+    juce::Colour borderColour (lineBorder);
+    float borderWidth = 1.0f;
+
+    if (errorState)     { borderColour = juce::Colour (error);          borderWidth = 1.5f; }
+    else if (hasFocus)  { borderColour = juce::Colour (focus);          borderWidth = 2.0f; }
+    else if (hover)     { borderColour = juce::Colour (lineBorderHover); borderWidth = 1.0f; }
+
+    g.setColour (borderColour);
+    g.drawRoundedRectangle (bounds.reduced (borderWidth * 0.5f), 4.0f, borderWidth);
+
+    // シェブロン（design.md 3.5節: 幅10×高さ6、線幅1.5、右端から12px）
+    const float cx = (float) width - 12.0f - 5.0f;
+    const float cy = (float) height * 0.5f;
+
+    juce::Path chevron;
+    chevron.startNewSubPath (cx - 5.0f, cy - 2.0f);
+    chevron.lineTo (cx, cy + 3.0f);
+    chevron.lineTo (cx + 5.0f, cy - 2.0f);
+
+    g.setColour (juce::Colour (errorState ? error : (juce::uint32) textSecondary));
+    g.strokePath (chevron, juce::PathStrokeType (1.5f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+}
+
+juce::Font AppLookAndFeel::getComboBoxFont (juce::ComboBox&)
+{
+    return uiFont (14.0f);
+}
+
+juce::Font AppLookAndFeel::getPopupMenuFont()
+{
+    return uiFont (14.0f);
+}
+
+void AppLookAndFeel::drawPopupMenuBackground (juce::Graphics& g, int width, int height)
+{
+    g.fillAll (juce::Colour (0xFF222428));
+    g.setColour (juce::Colour (lineBorder));
+    g.drawRect (0, 0, width, height, 1);
+}
+
+void AppLookAndFeel::drawPopupMenuItem (juce::Graphics& g, const juce::Rectangle<int>& area, bool isSeparator,
+                                         bool /*isActive*/, bool isHighlighted, bool isTicked, bool /*hasSubMenu*/,
+                                         const juce::String& text, const juce::String&, const juce::Drawable*,
+                                         const juce::Colour*)
+{
+    if (isSeparator)
+    {
+        g.setColour (juce::Colour (lineDivider));
+        g.fillRect (area.withY (area.getCentreY()).withHeight (1).reduced (8, 0));
+        return;
+    }
+
+    if (isHighlighted)
+    {
+        g.setColour (juce::Colour (popupHighlight));
+        g.fillRect (area);
+    }
+
+    auto r = area.reduced (12, 0);
+
+    g.setColour (juce::Colour (textPrimary));
+    g.setFont (uiFont (14.0f));
+
+    if (isTicked)
+        g.drawText (juce::String::fromUTF8 ("\xE2\x9C\x93"), r.removeFromLeft (18), juce::Justification::centredLeft, false);
+    else
+        r.removeFromLeft (18);
+
+    g.drawText (text, r, juce::Justification::centredLeft, true);
+}
+
+void AppLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& button, const juce::Colour&,
+                                            bool isHighlighted, bool isDown)
+{
+    const auto bounds = button.getLocalBounds().toFloat();
+    const bool selected = button.getToggleState();
+    const int presetIdx = (int) button.getProperties().getWithDefault ("presetIndex", -1);
+    const bool isNormal = presetIdx == (int) Preset::Normal;
+    const bool bypassed = ! isChainEnabled();
+    const bool liveStyle = selected && ! isNormal && ! bypassed;
+
+    juce::Colour bg (surface);
+    juce::Colour border (lineBorder);
+    float borderWidth = 1.0f;
+    bool noBorder = false;
+
+    if (liveStyle)
+    {
+        bg = juce::Colour (live);
+        noBorder = true;
+    }
+    else if (selected)
+    {
+        border = juce::Colour (textSecondary);
+        borderWidth = 2.0f;
+    }
+    else if (isDown)
+    {
+        bg = juce::Colour (surfacePressed);
+        border = juce::Colour (lineBorderHover);
+    }
+    else if (isHighlighted)
+    {
+        bg = juce::Colour (surfaceHover);
+        border = juce::Colour (lineBorderHover);
+    }
+
+    g.setColour (bg);
+    g.fillRoundedRectangle (bounds, 4.0f);
+
+    if (! noBorder)
+    {
+        g.setColour (border);
+        g.drawRoundedRectangle (bounds.reduced (borderWidth * 0.5f), 4.0f, borderWidth);
+    }
+
+    if (button.hasKeyboardFocus (true))
+    {
+        g.setColour (juce::Colour (liveStyle ? liveInk : focus));
+        g.drawRoundedRectangle (bounds.reduced (3.0f), 3.0f, 2.0f);
+    }
+}
+
+void AppLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& button, bool, bool)
+{
+    const bool selected = button.getToggleState();
+    const int presetIdx = (int) button.getProperties().getWithDefault ("presetIndex", -1);
+    const bool isNormal = presetIdx == (int) Preset::Normal;
+    const bool bypassed = ! isChainEnabled();
+    const bool liveStyle = selected && ! isNormal && ! bypassed;
+
+    g.setColour (juce::Colour (liveStyle ? liveInk : textPrimary));
+    g.setFont (uiFont (14.0f, selected));
+
+    g.drawFittedText (button.getButtonText(), button.getLocalBounds().reduced (4, 0),
+                       juce::Justification::centred, 1, 0.85f);
+}
+
+juce::Font AppLookAndFeel::getTextButtonFont (juce::TextButton&, int)
+{
+    return uiFont (14.0f);
+}
+
+void AppLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int width, int height,
+                                        float sliderPos, float, float,
+                                        juce::Slider::SliderStyle, juce::Slider& slider)
+{
+    const bool zeroBased = (bool) slider.getProperties().getWithDefault ("zeroBasedFill", false);
+    const bool bypassed = ! isChainEnabled();
+    const juce::Colour fillColour (bypassed ? idleFill : live);
+
+    const float trackY = (float) y + (float) height * 0.5f - 2.0f;
+    g.setColour (juce::Colour (track));
+    g.fillRoundedRectangle ((float) x, trackY, (float) width, 4.0f, 2.0f);
+
+    const float zeroPos = zeroBased ? (float) slider.valueToProportionOfLength (0.0) * (float) width + (float) x
+                                     : (float) x;
+    const float fillStart = juce::jmin (zeroPos, sliderPos);
+    const float fillEnd = juce::jmax (zeroPos, sliderPos);
+
+    if (fillEnd > fillStart)
+    {
+        g.setColour (fillColour);
+        g.fillRoundedRectangle (fillStart, trackY, fillEnd - fillStart, 4.0f, 2.0f);
+    }
+
+    if (zeroBased)
+    {
+        g.setColour (juce::Colour (lineBorderHover));
+        g.fillRect (juce::Rectangle<float> (zeroPos - 0.5f, (float) y + (float) height * 0.5f - 5.0f, 1.0f, 10.0f));
+    }
+
+    constexpr float thumbW = 10.0f, thumbH = 20.0f;
+    const juce::Rectangle<float> thumb (sliderPos - thumbW * 0.5f, (float) y + (float) height * 0.5f - thumbH * 0.5f,
+                                         thumbW, thumbH);
+
+    g.setColour (slider.isMouseOverOrDragging() ? juce::Colours::white : juce::Colour (textPrimary));
+    g.fillRoundedRectangle (thumb, 2.0f);
+    g.setColour (juce::Colour (bgWindow));
+    g.drawRoundedRectangle (thumb, 2.0f, 1.0f);
+    g.setColour (juce::Colour (0xFF7A7F87));
+    g.fillRect (juce::Rectangle<float> (thumb.getCentreX() - 0.5f, thumb.getY() + 5.0f, 1.0f, 10.0f));
+}
+
+// ===== SECTION: LevelMeter =====
+
+LevelMeter::LevelMeter()
+{
+    setInterceptsMouseClicks (false, false);
+}
+
+void LevelMeter::setDisconnected (bool isDisconnected) noexcept
+{
+    disconnected = isDisconnected;
+
+    if (disconnected)
+    {
+        envelopeDb = kMinDb;
+        peakHoldDb = kMinDb;
+        peakHoldRemainingSec = 0.0;
+    }
+}
+
+void LevelMeter::advance (float linearPeak, double dtSeconds) noexcept
+{
+    if (disconnected)
+    {
+        repaint();
+        return;
+    }
+
+    const float instDb = linearPeak > 0.0f ? juce::jmax (kMinDb, juce::Decibels::gainToDecibels (linearPeak)) : kMinDb;
+
+    envelopeDb = instDb > envelopeDb ? instDb : juce::jmax (kMinDb, envelopeDb - (float) (kFallDbPerSec * dtSeconds));
+
+    if (instDb >= peakHoldDb)
+    {
+        peakHoldDb = instDb;
+        peakHoldRemainingSec = 1.0;
+    }
+    else if (peakHoldRemainingSec > 0.0)
+    {
+        peakHoldRemainingSec -= dtSeconds;
+    }
+    else
+    {
+        peakHoldDb = juce::jmax (kMinDb, peakHoldDb - (float) (kFallDbPerSec * dtSeconds));
+    }
+
+    repaint();
+}
+
+void LevelMeter::paint (juce::Graphics& g)
+{
+    constexpr int segW = 5, segGap = 2;
+
+    for (int i = 0; i < kNumSegments; ++i)
+    {
+        const float segStartDb = kMinDb + kSegmentDb * (float) i;
+        const bool lit = (! disconnected) && envelopeDb >= segStartDb;
+
+        juce::Colour c (AppLookAndFeel::meterOff);
+
+        if (lit)
+        {
+            if (i <= 33)      c = juce::Colour (AppLookAndFeel::meterLit);
+            else if (i <= 37) c = juce::Colour (AppLookAndFeel::warn);
+            else              c = juce::Colour (AppLookAndFeel::error);
+        }
+
+        g.setColour (c);
+        g.fillRoundedRectangle ((float) (i * (segW + segGap)), 0.0f, (float) segW, (float) getHeight(), 1.0f);
+    }
+}
+
+// ===== SECTION: ToggleSwitch =====
+
+ToggleSwitch::ToggleSwitch() : juce::Button ("effectToggle")
+{
+    setClickingTogglesState (true);
+    setWantsKeyboardFocus (true);
+}
+
+void ToggleSwitch::paintButton (juce::Graphics& g, bool isHighlighted, bool isDown)
+{
+    const bool on = getToggleState();
+    const auto bounds = getLocalBounds().toFloat();
+
+    juce::Colour bg, border;
+    float borderWidth;
+
+    if (on)
+    {
+        bg = isDown ? juce::Colour (AppLookAndFeel::liveTintPressed)
+                    : (isHighlighted ? juce::Colour (AppLookAndFeel::liveTintHover) : juce::Colour (AppLookAndFeel::liveTint));
+        border = juce::Colour (AppLookAndFeel::live);
+        borderWidth = 1.5f;
+    }
+    else
+    {
+        bg = isDown ? juce::Colour (AppLookAndFeel::surfacePressed)
+                    : (isHighlighted ? juce::Colour (AppLookAndFeel::surfaceHover) : juce::Colour (AppLookAndFeel::surface));
+        border = juce::Colour (AppLookAndFeel::lineBorderHover);
+        borderWidth = 1.0f;
+    }
+
+    g.setColour (bg);
+    g.fillRoundedRectangle (bounds, 4.0f);
+    g.setColour (border);
+    g.drawRoundedRectangle (bounds.reduced (borderWidth * 0.5f), 4.0f, borderWidth);
+
+    // ランプ: design.md絶対座標(44,412)。本コンポーネントは(20,388)起点なのでローカル(24,24)。
+    constexpr float lampCx = 24.0f, lampCy = 24.0f, lampR = 6.0f;
+
+    if (on)
+    {
+        g.setColour (juce::Colour (AppLookAndFeel::live));
+        g.fillEllipse (lampCx - lampR, lampCy - lampR, lampR * 2.0f, lampR * 2.0f);
+    }
+    else
+    {
+        g.setColour (juce::Colour (AppLookAndFeel::idleFill));
+        g.drawEllipse (lampCx - lampR, lampCy - lampR, lampR * 2.0f, lampR * 2.0f, 1.5f);
+    }
+
+    const auto mainFont = AppLookAndFeel::uiFont (16.0f, true);
+    const auto subFont = AppLookAndFeel::uiFont (13.0f, false);
+
+    // 主文はx40(絶対x60)から左寄せ、副文はx404(絶対x424)まで右寄せ(design.md 3.5節)。
+    // 副文の文言が長い(例: OFF時の「原音をそのまま出力中（バイパス）」)ため、主文の実測幅より
+    // 広めの開始位置から確保し、途中で切れないようにする。
+    const juce::Rectangle<float> mainArea (40.0f, 0.0f, 140.0f, bounds.getHeight());
+    const juce::Rectangle<float> subArea (140.0f, 0.0f, 404.0f - 140.0f, bounds.getHeight());
+
+    if (on)
+    {
+        juce::AttributedString as;
+        as.setJustification (juce::Justification::centredLeft);
+        as.append (juce::String::fromUTF8 ("エフェクト "), mainFont, juce::Colour (AppLookAndFeel::textPrimary));
+        as.append (juce::String::fromUTF8 ("ON"), mainFont, juce::Colour (AppLookAndFeel::live));
+        as.draw (g, mainArea);
+    }
+    else
+    {
+        g.setColour (juce::Colour (AppLookAndFeel::textPrimary));
+        g.setFont (mainFont);
+        g.drawText (juce::String::fromUTF8 ("エフェクト OFF"), mainArea, juce::Justification::centredLeft, true);
+    }
+
+    g.setColour (juce::Colour (AppLookAndFeel::textSecondary));
+    g.setFont (subFont);
+    g.drawText (on ? juce::String::fromUTF8 ("加工した声を出力中")
+                   : juce::String::fromUTF8 ("原音をそのまま出力中（バイパス）"),
+                subArea, juce::Justification::centredRight, true);
+
+    if (hasKeyboardFocus (true))
+    {
+        g.setColour (juce::Colour (AppLookAndFeel::focus));
+        g.drawRoundedRectangle (bounds.reduced (3.0f), 3.0f, 2.0f);
+    }
+}
+
+// ===== SECTION: StatusPanel =====
+
+StatusPanel::StatusPanel()
+{
+    setInterceptsMouseClicks (false, false);
+}
+
+void StatusPanel::setData (const StatusData& newData)
+{
+    data = newData;
+    repaint();
+}
+
+void StatusPanel::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour (AppLookAndFeel::bgInset));
+
+    g.setColour (data.lineColour);
+    g.fillRect (0, 0, getWidth(), 2);
+
+    const auto uiSmall = AppLookAndFeel::uiFont (13.0f);
+    const auto delayFont = AppLookAndFeel::numericFont (22.0f);
+    const auto cpuFont = AppLookAndFeel::numericFont (18.0f);
+
+    // ----- 1行目: 遅延 / CPU -----
+    g.setColour (juce::Colour (AppLookAndFeel::textSecondary));
+    g.setFont (uiSmall);
+    g.drawText (juce::String::fromUTF8 ("遅延"), 20, 12, 36, 26, juce::Justification::centredLeft);
+
+    juce::String delayText;
+    juce::Colour delayColour (AppLookAndFeel::textPrimary);
+
+    if (data.delayStarting)
+    {
+        delayText = "--.-";
+    }
+    else if (data.delayAsDash)
+    {
+        delayText = juce::String::fromUTF8 ("\xE2\x80\x94");
+        delayColour = juce::Colour (AppLookAndFeel::error);
+    }
+    else
+    {
+        delayText = juce::String (data.delayMs, 1);
+        delayColour = data.delayWarn ? juce::Colour (AppLookAndFeel::warn) : juce::Colour (AppLookAndFeel::textPrimary);
+    }
+
+    g.setColour (delayColour);
+    g.setFont (delayFont);
+    g.drawText (delayText, 60, 12, 72, 26, juce::Justification::centredRight);
+
+    g.setColour (juce::Colour (AppLookAndFeel::textSecondary));
+    g.setFont (uiSmall);
+    g.drawText ("ms", 136, 12, 40, 26, juce::Justification::centredLeft);
+    g.drawText ("CPU", 300, 12, 40, 26, juce::Justification::centredLeft);
+
+    g.setColour (juce::Colour (AppLookAndFeel::textPrimary));
+    g.setFont (cpuFont);
+    g.drawText (juce::String (data.cpuPercent, 1), 340, 12, 72, 26, juce::Justification::centredRight);
+
+    g.setColour (juce::Colour (AppLookAndFeel::textSecondary));
+    g.setFont (uiSmall);
+    g.drawText ("%", 416, 12, 30, 26, juce::Justification::centredLeft);
+
+    // ----- 2行目: 内訳（design.md 6.3節、AttributedStringで1行に描く） -----
+    {
+        juce::AttributedString as;
+        as.setJustification (juce::Justification::centredLeft);
+
+        const auto wordFont = AppLookAndFeel::uiFont (12.0f);
+        const auto numFont = AppLookAndFeel::numericFont (12.0f);
+        const juce::Colour secondary (AppLookAndFeel::textSecondary);
+        const juce::Colour primary (AppLookAndFeel::textPrimary);
+
+        as.append (juce::String::fromUTF8 ("内訳  デバイス "), wordFont, secondary);
+        as.append (juce::String (data.deviceMs, 1), numFont, primary);
+        as.append (juce::String::fromUTF8 (" ＋ バッファ "), wordFont, secondary);
+        as.append (juce::String (data.bufferMs, 1), numFont, primary);
+        as.append (juce::String::fromUTF8 (" ＋ ピッチ "), wordFont, secondary);
+
+        if (data.shifterResting)
+            as.append (juce::String::fromUTF8 ("休止"), wordFont, secondary);
+        else
+            as.append (juce::String (data.shifterMs, 1), numFont, primary);
+
+        as.append (" ms", wordFont, secondary);
+        as.draw (g, juce::Rectangle<float> (20.0f, 42.0f, 420.0f, 16.0f));
+    }
+
+    // ----- 3行目: デバイスのモード -----
+    g.setFont (uiSmall);
+    g.setColour (juce::Colour (AppLookAndFeel::textSecondary));
+    g.drawText (juce::String::fromUTF8 ("入力"), 20, 60, 32, 16, juce::Justification::centredLeft);
+
+    g.setColour (data.inputModeWarn ? juce::Colour (AppLookAndFeel::warn) : juce::Colour (AppLookAndFeel::textPrimary));
+    g.drawText (data.inputModeText, 52, 60, 100, 16, juce::Justification::centredLeft);
+
+    g.setColour (juce::Colour (AppLookAndFeel::textSecondary));
+    g.drawText (juce::String::fromUTF8 ("出力"), 220, 60, 32, 16, juce::Justification::centredLeft);
+
+    g.setColour (data.outputModeWarn ? juce::Colour (AppLookAndFeel::warn) : juce::Colour (AppLookAndFeel::textPrimary));
+    g.drawText (data.outputModeText, 252, 60, 150, 16, juce::Justification::centredLeft);
+
+    // ----- メッセージのアイコン + 本文 -----
+    if (data.icon != StatusData::IconKind::None)
+    {
+        const bool isError = data.icon == StatusData::IconKind::Error;
+        g.setColour (isError ? juce::Colour (AppLookAndFeel::error) : juce::Colour (AppLookAndFeel::warn));
+
+        if (isError)
+        {
+            g.fillEllipse (20.0f, 91.0f, 12.0f, 12.0f);
+        }
+        else
+        {
+            juce::Path tri;
+            tri.addTriangle (26.0f, 91.0f, 20.0f, 103.0f, 32.0f, 103.0f);
+            g.fillPath (tri);
+        }
+
+        g.setColour (juce::Colour (AppLookAndFeel::bgWindow));
+        g.setFont (AppLookAndFeel::uiFont (10.0f, true));
+        g.drawText ("!", 20, 91, 12, 12, juce::Justification::centred);
+    }
+
+    g.setColour (data.messageColour);
+    g.setFont (AppLookAndFeel::uiFont (13.0f, data.messageBold));
+    g.drawFittedText (data.message, 40, 88, 400, 40, juce::Justification::topLeft, 2, 1.0f);
+}
+
+// ===== SECTION: MainComponent =====
+
+MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settingsIn,
+                               juce::String desiredInputName, juce::String desiredOutputName)
+    : audioIO (audioIOIn), settings (settingsIn)
+{
+    currentDesiredInputName = desiredInputName;
+    currentDesiredOutputName = desiredOutputName;
+
+    setLookAndFeel (&lookAndFeel);
+    tooltipWindow.setLookAndFeel (&lookAndFeel);
+    lookAndFeel.setEnabledFlag (&audioIO.engineParams().enabled);
+
+    setSize (460, 600);
+    setTitle (juce::String::fromUTF8 ("VoiceChange"));
+
+    vbCableMissing = ! containsCableInput (audioIO.getOutputNames());
+
+    auto setupLabel = [this] (juce::Label& l, const juce::String& text)
+    {
+        l.setText (text, juce::dontSendNotification);
+        l.setFont (AppLookAndFeel::uiFont (13.0f));
+        l.setColour (juce::Label::textColourId, juce::Colour (AppLookAndFeel::textSecondary));
+        l.setInterceptsMouseClicks (false, false);
+        addAndMakeVisible (l);
+    };
+
+    setupLabel (inputLabel,  juce::String::fromUTF8 ("入力"));
+    setupLabel (outputLabel, juce::String::fromUTF8 ("出力"));
+    setupLabel (levelLabel,  juce::String::fromUTF8 ("レベル"));
+    setupLabel (gainLabel,   juce::String::fromUTF8 ("ゲイン"));
+    setupLabel (pitchLabel,  juce::String::fromUTF8 ("ピッチ"));
+    setupLabel (reverbLabel, juce::String::fromUTF8 ("リバーブ"));
+
+    inputCombo.setTitle (juce::String::fromUTF8 ("入力デバイス"));
+    outputCombo.setTitle (juce::String::fromUTF8 ("出力デバイス"));
+
+    refreshDeviceCombo (inputCombo, audioIO.getInputNames(), currentDesiredInputName, inputComboRealNames);
+    refreshDeviceCombo (outputCombo, audioIO.getOutputNames(), currentDesiredOutputName, outputComboRealNames);
+
+    inputCombo.onChange = [this] { deviceComboChanged (true); };
+    outputCombo.onChange = [this] { deviceComboChanged (false); };
+
+    inputCombo.setExplicitFocusOrder (1);
+    outputCombo.setExplicitFocusOrder (2);
+
+    addAndMakeVisible (inputCombo);
+    addAndMakeVisible (outputCombo);
+
+    levelMeter.setTitle (juce::String::fromUTF8 ("入力レベル"));
+    addAndMakeVisible (levelMeter);
+
+    levelValueLabel.setFont (AppLookAndFeel::uiFont (14.0f));
+    levelValueLabel.setColour (juce::Label::textColourId, juce::Colour (AppLookAndFeel::textSecondary));
+    levelValueLabel.setJustificationType (juce::Justification::centredRight);
+    levelValueLabel.setInterceptsMouseClicks (false, false);
+    addAndMakeVisible (levelValueLabel);
+
+    auto setupSlider = [this] (juce::Slider& s, double lo, double hi, bool zeroBased, const juce::String& title,
+                                std::function<juce::String (double)> fmt, const juce::String& tip)
+    {
+        s.setSliderStyle (juce::Slider::LinearHorizontal);
+        s.setTextBoxStyle (juce::Slider::TextBoxRight, true, 64, 32);
+        s.setRange (lo, hi, 1.0);
+        s.setDoubleClickReturnValue (true, 0.0);
+        s.setSliderSnapsToMousePosition (false);
+        s.getProperties().set ("zeroBasedFill", zeroBased);
+        s.textFromValueFunction = std::move (fmt);
+        s.setTitle (title);
+        s.setTooltip (tip);
+        addAndMakeVisible (s);
+    };
+
+    setupSlider (gainSlider, -20.0, 20.0, true, juce::String::fromUTF8 ("ゲイン（音量）"),
+        [] (double v) { return (v > 0.0 ? juce::String ("+") : juce::String()) + juce::String ((int) v) + " dB"; },
+        juce::String::fromUTF8 ("ダブルクリックで初期値（0 dB）に戻します"));
+
+    setupSlider (pitchSlider, -12.0, 12.0, true, juce::String::fromUTF8 ("ピッチ（音程）"),
+        [] (double v) { return (v > 0.0 ? juce::String ("+") : juce::String()) + juce::String ((int) v) + juce::String::fromUTF8 (" 半音"); },
+        juce::String::fromUTF8 ("ダブルクリックで初期値（0 半音）に戻します"));
+
+    setupSlider (reverbSlider, 0.0, 100.0, false, juce::String::fromUTF8 ("リバーブ（残響）"),
+        [] (double v) { return juce::String ((int) v) + " %"; },
+        juce::String::fromUTF8 ("ダブルクリックで初期値（0 %）に戻します"));
+
+    gainSlider.setExplicitFocusOrder (3);
+    pitchSlider.setExplicitFocusOrder (4);
+    reverbSlider.setExplicitFocusOrder (5);
+
+    auto& ap = audioIO.engineParams();
+    gainSlider.setValue (ap.gainDb.load(), juce::dontSendNotification);
+    pitchSlider.setValue ((double) ap.pitch.load(), juce::dontSendNotification);
+    reverbSlider.setValue ((double) ap.reverb.load() * 100.0, juce::dontSendNotification);
+
+    gainSlider.onValueChange = [this] { applyGainFromSlider(); };
+    pitchSlider.onValueChange = [this] { applyPitchFromSlider(); };
+    reverbSlider.onValueChange = [this] { applyReverbFromSlider(); };
+
+    updateSliderAppearance (gainSlider);
+    updateSliderAppearance (pitchSlider);
+    updateSliderAppearance (reverbSlider);
+
+    createPresetButtons();
+
+    toggleButton.setToggleState (ap.enabled.load(), juce::dontSendNotification);
+    toggleButton.setTitle (juce::String::fromUTF8 ("エフェクト全体のON/OFF"));
+    toggleButton.setExplicitFocusOrder (14);
+    toggleButton.onClick = [this] { applyToggle(); };
+    addAndMakeVisible (toggleButton);
+
+    statusPanel.setTitle (juce::String::fromUTF8 ("状態表示"));
+    addAndMakeVisible (statusPanel);
+
+    updateStatus (true);
+}
+
+MainComponent::~MainComponent()
+{
+    stopTimer();
+    tooltipWindow.setLookAndFeel (nullptr);
+    setLookAndFeel (nullptr);
+}
+
+void MainComponent::createPresetButtons()
+{
+    struct PresetUiInfo { Preset preset; const char* label; const char* tooltip; };
+
+    // design.md 3.3節のレイアウト表どおりの表示順（種類別。内部のPreset/kPresetsの並びとは異なる）。
+    // UI表示名と内部識別子の対照表はsrc/core/Params.hのenum直上コメントを正とする。
+    static const PresetUiInfo kOrder[8] = {
+        { Preset::Normal,   "ノーマル",       "特殊効果なし（音響卓の設定だけを反映）" },
+        { Preset::Helium,   "ヘリウム",       "音程はそのままで、声質だけを細く軽くする" },
+        { Preset::Minion,   "ミニオン",       "声を高くして、小さなキャラクター風にする" },
+        { Preset::Giant,    "ジャイアント",   "声を低くして、大柄なキャラクター風にする" },
+        { Preset::Echo,     "エコー",         "やまびこのように声が繰り返し響く" },
+        { Preset::Kerokero, "ケロケロ",       "音程を半音単位に吸着させる" },
+        { Preset::Robot,    "ロボット",       "金属的な響きのロボット声にする" },
+        { Preset::Talkbox,  "トークボックス", "声の抑揚をシンセサイザーの音色に乗せる" },
+    };
+
+    constexpr int colX[4] = { 20, 127, 234, 341 };
+    constexpr int rowY[2] = { 278, 330 };
+
+    for (int i = 0; i < 8; ++i)
+    {
+        const auto& info = kOrder[(size_t) i];
+
+        auto button = std::make_unique<juce::TextButton> (juce::String::fromUTF8 (info.label));
+        button->setClickingTogglesState (true);
+        button->setRadioGroupId (1001, juce::dontSendNotification);
+        button->getProperties().set ("presetIndex", (int) info.preset);
+        button->setTitle (juce::String::fromUTF8 (info.label));
+        button->setDescription (juce::String::fromUTF8 (info.tooltip));
+        button->setTooltip (juce::String::fromUTF8 (info.tooltip));
+        button->setExplicitFocusOrder (6 + i);
+        button->setBounds (colX[i % 4], rowY[i / 4], 99, 44);
+
+        const Preset presetValue = info.preset;
+        button->onClick = [this, presetValue]
+        {
+            audioIO.engineParams().preset.store ((int) presetValue, std::memory_order_relaxed);
+            settings.setValue ("preset", juce::String (kPresets[(size_t) presetValue].id));
+            updatePresetButtonStates();
+        };
+
+        addAndMakeVisible (*button);
+        presetButtons[(size_t) i] = std::move (button);
+    }
+
+    updatePresetButtonStates();
+}
+
+void MainComponent::updatePresetButtonStates()
+{
+    const int current = audioIO.engineParams().preset.load (std::memory_order_relaxed);
+
+    for (auto& b : presetButtons)
+    {
+        if (b == nullptr)
+            continue;
+
+        const int idx = (int) b->getProperties().getWithDefault ("presetIndex", -1);
+        b->setToggleState (idx == current, juce::dontSendNotification);
+        b->repaint();
+    }
+}
+
+void MainComponent::updateSliderAppearance (juce::Slider& slider)
+{
+    const bool bypassed = ! audioIO.engineParams().enabled.load (std::memory_order_relaxed);
+    const bool atInitial = slider.getValue() == 0.0;
+
+    juce::Colour c (AppLookAndFeel::textPrimary);
+    if (! atInitial)
+        c = bypassed ? juce::Colour (AppLookAndFeel::textSecondary) : juce::Colour (AppLookAndFeel::live);
+
+    slider.setColour (juce::Slider::textBoxTextColourId, c);
+    slider.repaint();
+}
+
+void MainComponent::applyGainFromSlider()
+{
+    const float v = (float) gainSlider.getValue();
+    audioIO.engineParams().gainDb.store (v, std::memory_order_relaxed);
+    settings.setValue ("gainDb", (double) v);
+    updateSliderAppearance (gainSlider);
+}
+
+void MainComponent::applyPitchFromSlider()
+{
+    const int v = (int) pitchSlider.getValue();
+    audioIO.engineParams().pitch.store (v, std::memory_order_relaxed);
+    settings.setValue ("pitch", (double) v);
+    updateSliderAppearance (pitchSlider);
+}
+
+void MainComponent::applyReverbFromSlider()
+{
+    const float v = (float) (reverbSlider.getValue() * 0.01);
+    audioIO.engineParams().reverb.store (v, std::memory_order_relaxed);
+    settings.setValue ("reverb", (double) v);
+    updateSliderAppearance (reverbSlider);
+}
+
+void MainComponent::applyToggle()
+{
+    const bool on = toggleButton.getToggleState();
+    audioIO.engineParams().enabled.store (on, std::memory_order_relaxed);
+    settings.setValue ("enabled", on);
+
+    updateSliderAppearance (gainSlider);
+    updateSliderAppearance (pitchSlider);
+    updateSliderAppearance (reverbSlider);
+
+    for (auto& b : presetButtons)
+        if (b != nullptr)
+            b->repaint();
+}
+
+void MainComponent::refreshDeviceCombo (juce::ComboBox& combo, const juce::StringArray& names,
+                                         const juce::String& desiredName, juce::StringArray& realNamesOut)
+{
+    combo.clear (juce::dontSendNotification);
+    realNamesOut.clear();
+
+    combo.setTextWhenNothingSelected (juce::String::fromUTF8 ("デバイスを選択"));
+    combo.setTextWhenNoChoicesAvailable (juce::String::fromUTF8 ("（利用できるデバイスがありません）"));
+
+    const bool desiredMissing = desiredName.isNotEmpty() && ! names.contains (desiredName);
+
+    int id = 1;
+    int selectId = 0;
+
+    if (desiredMissing)
+    {
+        combo.addItem (desiredName + juce::String::fromUTF8 ("（未接続）"), id);
+        realNamesOut.add ({});
+        selectId = id;
+        ++id;
+    }
+
+    for (const auto& n : names)
+    {
+        combo.addItem (n, id);
+        realNamesOut.add (n);
+
+        if (n == desiredName)
+            selectId = id;
+
+        ++id;
+    }
+
+    combo.setSelectedId (selectId, juce::dontSendNotification);
+}
+
+void MainComponent::deviceComboChanged (bool isInputCombo)
+{
+    auto& combo = isInputCombo ? inputCombo : outputCombo;
+    auto& realNames = isInputCombo ? inputComboRealNames : outputComboRealNames;
+
+    const int id = combo.getSelectedId();
+    if (id <= 0 || id > realNames.size())
+        return;
+
+    const juce::String chosen = realNames[id - 1];
+    if (chosen.isEmpty())
+        return; // 「(未接続)」の項目は実デバイスではないので何もしない
+
+    if (isInputCombo)
+        currentDesiredInputName = chosen;
+    else
+        currentDesiredOutputName = chosen;
+
+    audioIO.open (currentDesiredInputName, currentDesiredOutputName);
+
+    settings.setValue ("inputDevice", currentDesiredInputName);
+    settings.setValue ("outputDevice", currentDesiredOutputName);
+
+    updateStatus (true);
+}
+
+void MainComponent::paint (juce::Graphics& g)
+{
+    g.fillAll (juce::Colour (AppLookAndFeel::bgWindow));
+
+    g.setColour (juce::Colour (AppLookAndFeel::lineDivider));
+    g.fillRect (20, 94, 420, 1);
+    g.fillRect (20, 140, 420, 1);
+    g.fillRect (20, 266, 420, 1);
+}
+
+void MainComponent::resized()
+{
+    inputLabel.setBounds (20, 12, 60, 32);
+    inputCombo.setBounds (88, 12, 352, 32);
+    outputLabel.setBounds (20, 50, 60, 32);
+    outputCombo.setBounds (88, 50, 352, 32);
+
+    levelLabel.setBounds (20, 104, 60, 24);
+    levelMeter.setBounds (93, 110, 278, 12);
+    levelValueLabel.setBounds (376, 104, 64, 24);
+
+    gainLabel.setBounds (20, 150, 60, 32);
+    gainSlider.setBounds (88, 150, 352, 32);
+    pitchLabel.setBounds (20, 186, 60, 32);
+    pitchSlider.setBounds (88, 186, 352, 32);
+    reverbLabel.setBounds (20, 222, 60, 32);
+    reverbSlider.setBounds (88, 222, 352, 32);
+
+    toggleButton.setBounds (20, 388, 420, 48);
+    statusPanel.setBounds (0, 452, 460, 148);
+}
+
+void MainComponent::visibilityChanged()
+{
+    updateTimerRunState();
+}
+
+void MainComponent::parentHierarchyChanged()
+{
+    // setContentOwned()がこのコンポーネントを表示状態にする時点では、親のDocumentWindow自体は
+    // まだsetVisible(true)を呼ばれておらずisShowing()はfalseを返す。DocumentWindow側の
+    // setVisible(true)はinternalHierarchyChanged()経由で子孫のparentHierarchyChanged()を
+    // 呼ぶため、初回表示はこちらで検出する。
+    updateTimerRunState();
+}
+
+void MainComponent::updateTimerRunState()
+{
+    if (isShowing())
+    {
+        if (! isTimerRunning())
+        {
+            frameCounter = 0;
+            startTimerHz (30);
+            levelMeter.setDisconnected (! audioIO.isOpen()); // 最初のupdateStatus()前に反映しておく
+            updateStatus (true);
+
+            const int current = audioIO.engineParams().preset.load (std::memory_order_relaxed);
+            for (auto& b : presetButtons)
+            {
+                if (b != nullptr && (int) b->getProperties().getWithDefault ("presetIndex", -1) == current)
+                {
+                    b->grabKeyboardFocus();
+                    break;
+                }
+            }
+        }
+    }
+    else
+    {
+        stopTimer();
+    }
+}
+
+bool MainComponent::keyPressed (const juce::KeyPress& key)
+{
+    if (key == juce::KeyPress::escapeKey)
+    {
+        if (auto* dw = findParentComponentOfClass<juce::DocumentWindow>())
+            dw->closeButtonPressed();
+
+        return true;
+    }
+
+    return false;
+}
+
+void MainComponent::timerCallback()
+{
+    constexpr double dt = 1.0 / 30.0;
+
+    levelMeter.setDisconnected (! audioIO.isOpen());
+    levelMeter.advance (audioIO.takeInputPeak(), dt);
+
+    ++frameCounter;
+    if (frameCounter >= 8)
+    {
+        frameCounter = 0;
+        updateStatus (true);
+    }
+}
+
+void MainComponent::announceIfChanged (const juce::String& newMessage, bool isWarnOrError)
+{
+    if (! isWarnOrError)
+    {
+        lastAnnouncedMessage = newMessage;
+        return;
+    }
+
+    if (newMessage == lastAnnouncedMessage)
+        return;
+
+    lastAnnouncedMessage = newMessage;
+    juce::AccessibilityHandler::postAnnouncement (newMessage, juce::AccessibilityHandler::AnnouncementPriority::high);
+}
+
+void MainComponent::updateStatus (bool /*slowUpdate*/)
+{
+    const bool isOpen = audioIO.isOpen();
+    const auto inputNames = audioIO.getInputNames();
+    const auto outputNames = audioIO.getOutputNames();
+    const bool noInputDevices = inputNames.isEmpty();
+    const juce::String errText = audioIO.getErrorText();
+    const bool openFailed = (! isOpen) && errText.isNotEmpty();
+    const bool inputSideFailed = openFailed && errText.startsWith (juce::String::fromUTF8 ("入力"));
+    const bool outputSideFailed = openFailed && errText.startsWith (juce::String::fromUTF8 ("出力"));
+
+    // ----- コンボボックスのエラー表示(design.md 3.5節「切断状態」) -----
+    const bool inputMissingFromList = currentDesiredInputName.isNotEmpty() && ! inputNames.contains (currentDesiredInputName);
+    const bool outputMissingFromList = currentDesiredOutputName.isNotEmpty() && ! outputNames.contains (currentDesiredOutputName);
+    const bool inputError = inputMissingFromList || inputSideFailed || noInputDevices;
+    const bool outputError = outputMissingFromList || outputSideFailed;
+
+    inputCombo.getProperties().set ("errorState", inputError);
+    outputCombo.getProperties().set ("errorState", outputError);
+    inputCombo.repaint();
+    outputCombo.repaint();
+    inputLabel.setColour (juce::Label::textColourId,
+        inputError ? juce::Colour (AppLookAndFeel::error) : juce::Colour (AppLookAndFeel::textSecondary));
+    outputLabel.setColour (juce::Label::textColourId,
+        outputError ? juce::Colour (AppLookAndFeel::error) : juce::Colour (AppLookAndFeel::textSecondary));
+
+    // ----- E5(異常値・例外): 検出後10秒間表示する(design.md 6.1節) -----
+    if (audioIO.getEngineErrorFlags() != 0)
+    {
+        audioIO.clearEngineErrorFlags();
+        errorUntilMs = (juce::int64) juce::Time::getMillisecondCounter() + 10000;
+        errorTimestampText = juce::Time::getCurrentTime().formatted ("%H:%M:%S");
+    }
+    const bool e5Active = errorUntilMs != 0 && (juce::int64) juce::Time::getMillisecondCounter() < errorUntilMs;
+
+    const auto latency = audioIO.getLatency();
+    const bool shifterResting = latency.shifterMs <= 0.0;
+    const double excludingShifter = latency.deviceInMs + latency.deviceOutMs + latency.ringBufferMs;
+    const bool w2Active = isOpen && excludingShifter > 48.0;
+
+    const auto inInfo = audioIO.getInputInfo();
+    const auto outInfo = audioIO.getOutputInfo();
+
+    StatusData data;
+    data.cpuPercent = (double) audioIO.getCpuLoad() * 100.0;
+    data.deviceMs = latency.deviceInMs + latency.deviceOutMs;
+    data.bufferMs = latency.ringBufferMs;
+    data.shifterMs = latency.shifterMs;
+    data.shifterResting = shifterResting;
+    data.delayWarn = w2Active;
+    data.delayMs = latency.totalMs;
+
+    data.inputModeText = isOpen ? (inInfo.lowLatency ? juce::String::fromUTF8 ("低遅延") : juce::String::fromUTF8 ("通常"))
+                                 : juce::String::fromUTF8 ("\xE2\x80\x94");
+    data.outputModeText = isOpen ? (outInfo.lowLatency ? juce::String::fromUTF8 ("低遅延") : juce::String::fromUTF8 ("通常"))
+                                  : juce::String::fromUTF8 ("\xE2\x80\x94");
+    data.inputModeWarn = w2Active && ! inInfo.lowLatency;
+    data.outputModeWarn = w2Active && ! outInfo.lowLatency;
+
+    const bool bypassed = ! audioIO.engineParams().enabled.load (std::memory_order_relaxed);
+
+    juce::String message;
+    bool isWarnOrError = false;
+
+    if ((! isOpen) && errText.isEmpty() && ! noInputDevices)
+    {
+        // 起動中(design.md 6.1節)。Main.cppは起動時に同期的にopen()するため通常はほぼ一瞬で終わる。
+        data.delayStarting = true;
+        message = juce::String::fromUTF8 ("デバイスを開いています…");
+    }
+    else if (noInputDevices)
+    {
+        data.delayAsDash = true;
+        message = juce::String::fromUTF8 ("入力デバイスが見つかりません。マイクを接続してください。");
+        data.icon = StatusData::IconKind::Error;
+        data.messageBold = true;
+        data.lineColour = juce::Colour (AppLookAndFeel::error);
+        data.messageColour = juce::Colour (AppLookAndFeel::error);
+        isWarnOrError = true;
+    }
+    else if (openFailed)
+    {
+        data.delayAsDash = true;
+        message = inputSideFailed ? juce::String::fromUTF8 ("入力デバイスを開けませんでした。別のデバイスを選んでください。")
+                                   : juce::String::fromUTF8 ("出力デバイスを開けませんでした。別のデバイスを選んでください。");
+        data.icon = StatusData::IconKind::Error;
+        data.messageBold = true;
+        data.lineColour = juce::Colour (AppLookAndFeel::error);
+        data.messageColour = juce::Colour (AppLookAndFeel::error);
+        isWarnOrError = true;
+    }
+    else if (e5Active)
+    {
+        message = juce::String::fromUTF8 ("音声処理で異常を検出したため、一瞬無音にして復旧しました（")
+                   + errorTimestampText + juce::String::fromUTF8 ("）");
+        data.icon = StatusData::IconKind::Error;
+        data.messageBold = true;
+        data.lineColour = juce::Colour (AppLookAndFeel::error);
+        data.messageColour = juce::Colour (AppLookAndFeel::error);
+        isWarnOrError = true;
+    }
+    else if (vbCableMissing)
+    {
+        message = juce::String::fromUTF8 ("VB-CABLEが見つかりません。Discord等へ声を渡すにはインストールが必要です。");
+        data.icon = StatusData::IconKind::Warn;
+        data.messageBold = true;
+        data.lineColour = juce::Colour (AppLookAndFeel::warn);
+        data.messageColour = juce::Colour (AppLookAndFeel::warn);
+        isWarnOrError = true;
+    }
+    else if (w2Active)
+    {
+        const juce::String which = (data.inputModeWarn && data.outputModeWarn) ? juce::String::fromUTF8 ("入出力デバイス")
+                                    : data.inputModeWarn ? juce::String::fromUTF8 ("入力デバイス")
+                                                          : juce::String::fromUTF8 ("出力デバイス");
+        message = juce::String::fromUTF8 ("デバイスとバッファの遅延が目標を超えています。（") + which
+                   + juce::String::fromUTF8 ("が「通常」モードのためです）");
+        data.icon = StatusData::IconKind::Warn;
+        data.messageBold = true;
+        data.lineColour = juce::Colour (AppLookAndFeel::warn);
+        data.messageColour = juce::Colour (AppLookAndFeel::warn);
+        isWarnOrError = true;
+    }
+    else if (bypassed)
+    {
+        message = juce::String::fromUTF8 ("バイパス中：原音をそのまま出力しています");
+    }
+    else
+    {
+        message = juce::String::fromUTF8 ("正常に動作しています");
+    }
+
+    data.message = message;
+    statusPanel.setData (data);
+
+    // ----- メーターの数値(design.md 3.5節) -----
+    juce::String meterText;
+    juce::Colour meterColour (AppLookAndFeel::textSecondary);
+
+    if (levelMeter.isDisconnected())
+    {
+        meterText = juce::String::fromUTF8 ("\xE2\x80\x94");
+    }
+    else if (levelMeter.getPeakHoldDb() <= -59.9f)
+    {
+        meterText = juce::String::fromUTF8 ("無音");
+    }
+    else
+    {
+        const float peak = levelMeter.getPeakHoldDb();
+        meterText = juce::String ((int) std::lround (peak)) + " dB";
+
+        if (peak >= -0.5f)      meterColour = juce::Colour (AppLookAndFeel::error);
+        else if (peak > -3.0f)  meterColour = juce::Colour (AppLookAndFeel::warn);
+    }
+
+    levelValueLabel.setText (meterText, juce::dontSendNotification);
+    levelValueLabel.setColour (juce::Label::textColourId, meterColour);
+
+    announceIfChanged (message, isWarnOrError);
+}
+
+} // namespace vc

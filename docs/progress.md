@@ -19,6 +19,46 @@
 
 ---
 
+## 2026-09-28 T-006 UI結合と設定の保存・復元
+
+### 実施内容
+- `src/app/MainComponent.h/.cpp`（新規）: docs/design.mdのレイアウト・配色・フォント表どおりに実装。
+  - `AppLookAndFeel`（`LookAndFeel_V4`派生）: design.md 3.1節の色トークンをstatic constexprで保持し、`drawComboBox`/`drawPopupMenuBackground`/`drawPopupMenuItem`/`drawButtonBackground`/`drawButtonText`/`drawLinearSlider`と各`get*Font`を上書き。フォント名は`Font::findAllTypefaceNames()`から`"Yu Gothic UI" → "Meiryo UI" → "Noto Sans CJK JP" → 既定`の順に一度だけ解決し関数ローカルstaticでキャッシュ。
+  - 自前描画コンポーネント: `LevelMeter`（40セグメント、上昇即時/下降20dB/秒、ピークホールド1.0秒+20dB/秒減衰）、`ToggleSwitch`（`Button`派生、`paintButton`を上書き）、`StatusPanel`（状態の色の線・遅延/CPU・内訳(AttributedString)・デバイスモード・メッセージ+アイコン）。
+  - プリセットボタン8個: `TextButton`+`setClickingTogglesState`+共通`setRadioGroupId`。表示順は種類別（design.md 3.3節のレイアウト順=ノーマル/ヘリウム/ミニオン/ジャイアント/エコー/ケロケロ/ロボット/トークボックス）で、`src/core/Params.h`のPreset enum順（Normal/Echo/Helium/...）とは異なるため、`createPresetButtons()`内に別途表示順テーブルを持たせた。バイパス中の「ノーマルまたは選択中プリセット」は中立色、ON時の非ノーマル選択はlive色、という中核ルールをComponentプロパティ("presetIndex")+`AppLookAndFeel::isChainEnabled()`(AtomicParams.enabledへのポインタ参照)で判定。
+  - スライダー3種（ゲイン/ピッチ/リバーブ）: `LinearHorizontal`+`TextBoxRight`、`setSliderSnapsToMousePosition(false)`、`setDoubleClickReturnValue(true, 0.0)`、`textFromValueFunction`で書式化。ゲイン/ピッチは0基準の中央塗り(`zeroBasedFill`プロパティ)、リバーブは左基準。値の文字色は`onValueChange`のたびに`updateSliderAppearance()`で再計算（初期値/ON/バイパスの3色）。
+  - 30fpsタイマー: `visibilityChanged()`だけでは`setContentOwned()`実行時点で祖先のDocumentWindowがまだ非表示のため`isShowing()`がfalseのまま検出できず（Component::componentFlagsは既定で全ビットfalseから開始し、`addAndMakeVisible`のsetVisible(true)呼び出しはこのタイミングで一度しか発火しない）、`parentHierarchyChanged()`（`DocumentWindow::setVisible(true)`が`internalHierarchyChanged()`経由で子孫に伝播する）でも同じ判定を行うよう`updateTimerRunState()`に共通化した。数値更新は8フレームに1回（`frameCounter`）。
+  - キーボード操作: `setExplicitFocusOrder`で入力コンボ→出力コンボ→ゲイン→ピッチ→リバーブ→プリセット8個(表示順)→トグルの順。Escは`findParentComponentOfClass<DocumentWindow>()->closeButtonPressed()`を呼ぶ（T-007でトレイ格納に置き換われば自動的にEscの挙動も変わる）。`setTitle`/`setDescription`をdesign.md 5章の表どおりに設定し、E/W系メッセージが変化した時だけ`AccessibilityHandler::postAnnouncement(...,high)`。
+  - 層2プリセットは効果なし（T-005で追加）。ボタンは`AtomicParams.preset`をstoreするだけ。
+- `src/core/Params.h`: `SavedSettings`（inputDevice/outputDevice/gainDb/pitch/reverb/preset/enabled/trayNoticeShown）、`presetFromId()`（`kPresets[].id`と大文字小文字を区別せず比較、不一致はNormal）、`sanitize()`（gainDb→±20dB、pitch→±12、reverb→0〜1にjlimit）を追加。
+- `src/app/Main.cpp`: `juce::PropertiesFile`（applicationName/folderName="VoiceChange"、filenameSuffix="settings"、millisecondsBeforeSaving=1000）を読み書き。読み込みは`loadSettings()`→`sanitize()`。起動時デバイス既定値は入力=一覧先頭、出力=`containsCableInput`で「CABLE Input」を含むもの（無ければ一覧先頭）。層1パラメータ・プリセット・ON/OFFはAudioIO::open()（内部でEngine::prepare()を呼ぶ）より前にAtomicParamsへstoreしてから開く。VB-CABLE未検出時は`VbCableDialog`（`DialogWindow`派生、非モーダル、閉じると自身をdelete）を表示。`--screenshot <path>`は`Timer::callAfterDelay(400,...)`後に`createComponentSnapshot`→`PNGImageFormat::writeImageToStream`→`quit()`。
+- `src/app/AudioIO.h/.cpp`: `isOpen()`（UI の起動中/エラー判定用）と自由関数`containsCableInput()`（Main.cppのダイアログ判定・MainComponentのW1判定の両方から使う）を追加。
+- `tests/AppLogicTests.cpp`（新規、カテゴリAppLogic・quick）: sanitize()の範囲外丸め（gain±100→±20、pitch±50→±12、reverb 2.0/-1→1.0/0.0）、初期値のまま(キー無し相当)、presetFromId()の既知/大文字小文字/不明→Normalを検証。
+- `CMakeLists.txt`: `app_logic`をquickラベルでctestに登録。`VoiceChange`ターゲットに`juce::juce_data_structures`をリンク追加（`PropertiesFile`はjuce_gui_extraの依存に含まれないため）。
+
+### 結果
+- `cmake --build build --parallel`: 成功（アプリ・テストとも警告のみ、既存コードと同種の`-Wfloat-equal`のみ）。
+- `ctest --test-dir build --output-on-failure`: **全件合格**（smoke, ring_buffer, ring_buffer_long(28.6秒), shifter, engine, app_logic の6件）。
+- `xvfb-run -a -s "-screen 0 1280x1024x24" build/VoiceChange_artefacts/Release/VoiceChange --screenshot <path>`: 終了コード0、PNG 460×600（表示スケール1倍）。目視確認: 日本語表示に豆腐なし、要素順序はdesign.md 3.3節の表どおり（入力→出力→レベル→ゲイン→ピッチ→リバーブ→プリセット8個→トグル→状態パネル）、ミント(live)色はONトグルの塗り・選択中プリセット(非ノーマル)にのみ使用されバイパス中は使われないことを確認。バイパスON+プリセット「ヘリウム」選択状態も一時的にコードを差し替えて撮影し、選択中プリセットが中立色（surface+2px secondary枠+太字primary文字）になること、トグルOFF表示（中抜き円+「エフェクト OFF」+副文）を確認した後、コードを元に戻して最終スクリーンショットを撮り直した。
+  - 撮影中に見つけたバグ2件を修正: (1) 上記の`visibilityChanged()`単独では初回にタイマーが起動しない問題（`parentHierarchyChanged()`併用で解消）。(2) `ToggleSwitch`のOFF時副文「原音をそのまま出力中（バイパス）」が確保幅不足で末尾が切れる問題（主文/副文の領域幅を再配分して解消）。
+- 開発環境(Xvfb)は入出力デバイスとも0件のため、E6（入力デバイスが見つかりません）とVB-CABLE未検出（W1相当、ただし優先順位はE6が上のため今回のスクリーンショットには表示されない）を実機さながらに確認できた。デバイス切断からの再接続(E1〜E3)はConnectionMonitor未実装(T-007)のため確認できない。
+
+### 計画からの変更点
+- ConnectionMonitor（T-007）がないため、状態パネルの状態はE1/E2/E3（再接続中の経過秒数表示）を除くE4/E5/E6/W1/W2/バイパス/正常/起動中のみ実装した。E4「デバイスを開けませんでした」相当は`AudioIO::getErrorText()`の文字列先頭（"入力"/"出力"）で判定した（AudioIOに新しいフィールドは追加していない）。
+- コンボボックスの「保存済みデバイス名が一覧から消えた場合の(未接続)項目」(design.md 3.5節)は構築時に1回だけ判定する実装とした。一覧変更の監視（`audioDeviceListChanged`相当）はT-007のConnectionMonitor導入時に合わせて動的化する想定。
+- design.mdのW2文言・48ms閾値はD-014のとおり反映した（decisions.mdのD-014時点で既にdesign.md本文も更新済みのため、デザイン自体の変更はしていない）。
+- それ以外はdocs/plan.md 2.5節・3章T-006、docs/design.mdのとおりに実装した。
+
+### 未解決事項
+- トレイ常駐・切断時の再接続・統計ログはT-007で実装する（本タスクの範囲外）。
+- ComboBoxの長いデバイス名の省略記号「…」表示（design.md 3.5節）は、JUCE標準の`Label`描画（縮小表示）に委ね、専用の省略描画は実装していない。実デバイス名で長いものが出た場合は目視確認が必要。
+- Windows実機でのYu Gothic UI/Meiryo UIの表示、WASAPI経由の実デバイス一覧表示は未検証（開発環境はLinux/Xvfbで入出力デバイスとも0件のため）。
+
+### 次回開始位置
+- T-007（`src/core/ConnectionMonitor.h`、`src/core/StatsLog.*`、`src/app/AudioIO.*`のウォッチドッグ・再接続、`src/app/MainComponent.*`のトレイ・E1〜E3表示、`tests/AppLogicTests.cpp`）。T-006で実装したStatusPanel/コンボボックスのエラー表示はT-007で動的な一覧変更検出と結合する想定。
+
+---
+
 ## 2026-09-28 T-004 D-015確定: P4をP4a/P4b（合格基準/低域の特性確認）に分割
 
 ### 実施内容
