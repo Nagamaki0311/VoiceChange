@@ -440,4 +440,213 @@ inline double measureEnvelopeScale (const FormantEnvelope& envIn, const FormantE
     return bestS;
 }
 
+// ===== SECTION: マイク処理用の合成信号・測定（docs/plan.md 8.3 T-010） =====
+
+// 話し声に近い合成音節（N0c・N0e・N6用）: f0 110〜140Hz・ビブラート±2%（5Hz）の母音（フォルマント700/1200/2600Hz）を、
+// 長さの異なる音節（半波の包絡）と50msの無音を交互に並べる。包絡が不規則でf0が揺れるため、相互相関のピークが
+// 真の遅延の1点にだけ立つ（f0の周期ずれや包絡の周期性による誤ったピークを避ける）。値はint16の値域。
+inline std::vector<float> makeSyllables (int n, double sampleRate = 48000.0)
+{
+    static constexpr int kSyllableLengths[] = { 7200, 4800, 9600, 3600, 8400, 6000, 10800, 5400, 7800, 4200, 9000, 6600 };
+    constexpr double twoPi = 6.283185307179586476925286766559;
+
+    // 長さは48kHzでのサンプル数。他のレートでは同じ時間長にする。
+    const double scale = sampleRate / 48000.0;
+    const int gap = (int) std::lround (2400.0 * scale);
+
+    std::vector<float> out ((size_t) n, 0.0f);
+    double phase = 0.0;
+    int pos = 0;
+    int syllable = 0;
+
+    while (pos < n)
+    {
+        const int len = (int) std::lround (kSyllableLengths[syllable % 12] * scale);
+        const double f0Base = 110.0 + 15.0 * (syllable % 3);
+        ++syllable;
+
+        for (int i = 0; i < len && pos + i < n; ++i)
+        {
+            const double t = (pos + i) / sampleRate;
+            const double f0 = f0Base * (1.0 + 0.02 * std::sin (twoPi * 5.0 * t));
+            phase += twoPi * f0 / sampleRate;
+
+            double sum = 0.0;
+
+            for (int h = 1; h <= 30; ++h)
+            {
+                const double f = h * f0;
+                const double g = std::exp (-std::pow ((f - 700.0) / 300.0, 2.0))
+                                 + 0.6 * std::exp (-std::pow ((f - 1200.0) / 400.0, 2.0))
+                                 + 0.2 * std::exp (-std::pow ((f - 2600.0) / 600.0, 2.0));
+                sum += g * std::sin (h * phase);
+            }
+
+            out[(size_t) (pos + i)] = (float) (4000.0 * sum * std::sin (juce::MathConstants<double>::pi * i / len));
+        }
+
+        pos += len + gap;
+    }
+
+    return out;
+}
+
+// 途切れない話し声に近い母音: f0のビブラート±2%（5Hz）、4Hzの音節抑揚（振幅 0.7 ± 0.3）、フォルマント730/1090/2440Hz。
+// 倍音の振幅は3つの2極共振器のk*f0での応答の積（makeSyntheticVowelと同じ）。ピークがampになるよう正規化する。
+inline std::vector<float> makeSpeechLikeVowel (double f0Hz, double sampleRate, int n, float amp = 0.3f)
+{
+    constexpr double twoPi = 6.283185307179586476925286766559;
+    constexpr std::array<double, 3> formantHz { 730.0, 1090.0, 2440.0 };
+    constexpr std::array<double, 3> formantBw { 80.0, 90.0, 120.0 };
+
+    // 6kHz以上は共振器の応答が小さいため、倍音は6kHzまでにする（計算量の削減）。
+    const int maxHarmonic = std::max (1, (int) std::floor (std::min (6000.0, 0.45 * sampleRate) / f0Hz));
+    std::vector<double> harmonicAmp ((size_t) maxHarmonic);
+
+    for (int k = 1; k <= maxHarmonic; ++k)
+    {
+        double a = 1.0;
+
+        for (size_t i = 0; i < 3; ++i)
+            a *= resonatorMagnitude ((double) k * f0Hz, formantHz[i], formantBw[i], sampleRate);
+
+        harmonicAmp[(size_t) (k - 1)] = a;
+    }
+
+    std::vector<float> out ((size_t) n);
+    double phase = 0.0;
+    double peak = 0.0;
+
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = (double) i / sampleRate;
+        phase += twoPi * f0Hz * (1.0 + 0.02 * std::sin (twoPi * 5.0 * t)) / sampleRate;
+
+        double sum = 0.0;
+
+        for (int k = 1; k <= maxHarmonic; ++k)
+            sum += harmonicAmp[(size_t) (k - 1)] * std::sin ((double) k * phase);
+
+        sum *= 0.7 + 0.3 * std::sin (twoPi * 4.0 * t);
+        out[(size_t) i] = (float) sum;
+        peak = std::max (peak, std::abs (sum));
+    }
+
+    if (peak > 0.0)
+        for (auto& s : out)
+            s = (float) ((double) s * (double) amp / peak);
+
+    return out;
+}
+
+// RMSがrmsTargetになるよう全体を定数倍する。
+inline void normalizeRms (std::vector<float>& buf, float rmsTarget)
+{
+    const double r = rms (buf.data(), (int) buf.size());
+
+    if (r > 0.0)
+        for (auto& s : buf)
+            s = (float) ((double) s * (double) rmsTarget / r);
+}
+
+// ピンク雑音（Paul Kellet's refined method）。RMSがrmsになるよう正規化する。
+inline std::vector<float> makePinkNoise (int n, float rmsLevel, int seed = 1)
+{
+    std::vector<float> out ((size_t) n);
+    juce::Random rng (seed);
+    double b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+
+    for (auto& s : out)
+    {
+        const double white = (double) rng.nextFloat() * 2.0 - 1.0;
+        b0 = 0.99886 * b0 + white * 0.0555179;
+        b1 = 0.99332 * b1 + white * 0.0750759;
+        b2 = 0.96900 * b2 + white * 0.1538520;
+        b3 = 0.86650 * b3 + white * 0.3104856;
+        b4 = 0.55000 * b4 + white * 0.5329522;
+        b5 = -0.7616 * b5 - white * 0.0168980;
+        s = (float) (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362);
+        b6 = white * 0.115926;
+    }
+
+    normalizeRms (out, rmsLevel);
+    return out;
+}
+
+// ブラウン雑音（白色雑音の漏れ積分）。RMSがrmsLevelになるよう正規化する。
+inline std::vector<float> makeBrownNoise (int n, float rmsLevel, int seed = 2)
+{
+    std::vector<float> out ((size_t) n);
+    juce::Random rng (seed);
+    double y = 0.0;
+
+    for (auto& s : out)
+    {
+        y = 0.998 * y + ((double) rng.nextFloat() * 2.0 - 1.0);
+        s = (float) y;
+    }
+
+    normalizeRms (out, rmsLevel);
+    return out;
+}
+
+// bufのstartSampleから、freqHzの正弦をdecayMs（時定数）で指数減衰させたクリックを足す（打鍵・マウスクリックの模擬）。
+inline void addClick (std::vector<float>& buf, int startSample, double sampleRate, double freqHz, double decayMs, float peak)
+{
+    constexpr double twoPi = 6.283185307179586476925286766559;
+    const double tau = decayMs * 1.0e-3 * sampleRate;
+    const int len = (int) (tau * 8.0);
+
+    for (int i = 0; i < len && startSample + i < (int) buf.size(); ++i)
+        buf[(size_t) (startSample + i)] += (float) ((double) peak * std::exp (-(double) i / tau) * std::sin (twoPi * freqHz * (double) i / sampleRate));
+}
+
+// 相互相関による遅延の測定。ref[i]とtest[i + lag]の相関が最大のlag（放物線補間つき、サンプル）を返す。
+// 探索範囲は[minLag, maxLag]。相関は両端を除いた区間（[maxLag, n - maxLag)）で取る。
+inline double measureDelaySamples (const std::vector<float>& ref, const std::vector<float>& test, int minLag, int maxLag)
+{
+    const int n = (int) std::min (ref.size(), test.size());
+    const int begin = std::max (0, maxLag);
+    const int end = n - maxLag;
+
+    std::vector<double> corr ((size_t) (maxLag - minLag + 1), 0.0);
+
+    for (int lag = minLag; lag <= maxLag; ++lag)
+    {
+        double c = 0.0;
+
+        for (int i = begin; i < end; ++i)
+            c += (double) ref[(size_t) i] * (double) test[(size_t) (i + lag)];
+
+        corr[(size_t) (lag - minLag)] = c;
+    }
+
+    const auto best = (int) (std::max_element (corr.begin(), corr.end()) - corr.begin());
+    double delta = 0.0;
+
+    if (best > 0 && best + 1 < (int) corr.size())
+    {
+        const double a = corr[(size_t) (best - 1)];
+        const double b = corr[(size_t) best];
+        const double c = corr[(size_t) (best + 1)];
+        const double denom = a - 2.0 * b + c;
+        delta = denom != 0.0 ? 0.5 * (a - c) / denom : 0.0;
+    }
+
+    return (double) (minLag + best) + delta;
+}
+
+// [loHz, hiHz]のパワー（平均スペクトルの振幅の2乗和。dB、任意の基準）。
+inline double bandPowerDb (const std::vector<double>& avgMag, double sampleRate, int fftSize, double loHz, double hiHz)
+{
+    const double binHz = sampleRate / (double) fftSize;
+    double p = 0.0;
+
+    for (int b = std::max (1, (int) std::ceil (loHz / binHz)); b < (int) avgMag.size() && (double) b * binHz <= hiHz; ++b)
+        p += avgMag[(size_t) b] * avgMag[(size_t) b];
+
+    return 10.0 * std::log10 (std::max (p, 1.0e-30));
+}
+
+
 } // namespace vc::test

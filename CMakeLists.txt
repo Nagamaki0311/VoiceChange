@@ -84,7 +84,6 @@ if(MSVC)
     #   include するos_support.hはv0.2に存在せずコンパイルできない。MSVCは__SSE2__を定義しないため、
     #   x86_arch_macros.h（_MSC_VER節）がこれらから__SSE__/__SSE2__を作り、vec_avx.hのSSE2経路
     #   （GCCのx86_64既定と同じ経路）を有効にする。x86/x64はSSE2が前提。ARM64のWindowsは対象外（NEON経路は__ARM_NEONが必要）。
-    # restrict: 上記の使われない経路のみが使う。MSVCのCは__restrictだけのため念のため対応付ける。
     # _CRT_SECURE_NO_WARNINGS: fopen等（ファイルからモデルを読む経路。本アプリでは使わない）。
     # M_PIはpitch.cのコメント内だけで、_USE_MATH_DEFINESは不要。
     if(CMAKE_C_COMPILER_ARCHITECTURE_ID MATCHES "ARM" OR CMAKE_VS_PLATFORM_NAME MATCHES "ARM")
@@ -93,7 +92,6 @@ if(MSVC)
     target_compile_definitions(vc_rnnoise PRIVATE
         OPUS_X86_MAY_HAVE_SSE
         OPUS_X86_MAY_HAVE_SSE2
-        restrict=__restrict
         _CRT_SECURE_NO_WARNINGS
     )
 else()

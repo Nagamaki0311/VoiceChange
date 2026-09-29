@@ -455,10 +455,9 @@ const char* eqTypeId (EqType) noexcept;  EqType eqTypeFromId (const juce::String
 // MicProcessing.h
 class NoiseReducer {
 public:
-    ~NoiseReducer();                                   // rnnoise_destroy
-    void prepare (double fs, int maxBlock);            // メッセージスレッド。初回はrnnoise_create、以後はrnnoise_init。FIFO・遅延線・補間器を確保
+    void prepare (double fs, int maxBlock);            // メッセージスレッド。初回はrnnoise_create、以後はrnnoise_init。FIFO・遅延線・補間器を確保。rnnoise_destroyは、unique_ptrのデリータ（デストラクタ）
     void setTarget (bool run, float background, float impact) noexcept;
-    void process (float* buf, int n) noexcept;         // その場で処理、n ≤ maxBlock。Restingなら何もしない
+    bool process (float* buf, int n) noexcept;         // その場で処理、n ≤ maxBlock。Restingなら何もしない。入力に非有限値があればfalse（bufとパイプラインは触れない。呼び出し側がreset()）
     void reset() noexcept;                             // → Resting。rnnoise_init、FIFO・遅延線・包絡を消去（確保なし）
     int  getLatencySamples() const noexcept;           // FadingIn/Active/FadingOutでD、それ以外は0（PitchShifterと同じ規則）
 };
@@ -472,7 +471,7 @@ public:
 ```
 
 - NoiseReducerの状態遷移は2.5節PitchShifterの表と同じ（Priming完了条件は「送り込み量 ≥ D」）。共通化はしない（同じ表の2か所目。3か所目が出たら検討する）。
-- D（ノイズ除去の遅延）は、48kHzでは480 + RNNoise固有の遅延（T-009の実測値を定数にする）。48kHz以外では出力レートへ換算し、補間器の遅延を加えて整数に丸める。原音側の遅延線も同じDを使う。
+- D（ノイズ除去の遅延）は、48kHzでは480 + RNNoise固有の遅延（T-009の実測960。D = 1440）。48kHz以外では出力レートへ換算し、補間器の遅延を加えて整数に丸める（実装: 出力FIFOの初期充填P = ceil(480×fs/48000) + 4 + 2×ceil(fs/48000)、D = P + round(959.7×fs/48000 + 2 + 2×fs/48000)。余裕はレート比に比例させる（下げ側の端数の持ち越しがレート比に比例するため。192kのblock 1/2/7で枯渇した）。959.7はRNNoise固有遅延の実測値［放物線補間］で、960に丸めると192kで1サンプル超ずれる。44.1kで1333、96kで2893、192kで5781）。原音側の遅延線も同じDを使う。
 - 48kHz以外: 入力FIFO（出力レート）→ 上げ用のLagrange（速度比 = fs/48000）で480サンプルを作る → RNNoise → 下げ用のLagrange（速度比 = 48000/fs）→ 出力FIFO。出力FIFOは初期充填（ceil(480×fs/48000) + 余裕）を持ち、どんなブロック列でも枯れないこと（テストN11）。
 - RNNoiseの計算はフレームがそろったコールバックに集中する。小さいバッファでは、そのコールバックだけ処理時間が伸びる（CPU表示は平滑化されるため影響は小さい）。
 
@@ -499,7 +498,7 @@ public:
 |---|---|---|
 | N0a | フレーム長 | `rnnoise_get_frame_size() == 480` |
 | N0b | 基本動作 | 48kHzの正弦・白色雑音・無音を各1秒処理して、出力がすべて有限値 |
-| N0c | 固有遅延 | インパルス列（または1kHz正弦のバースト）の相互相関で遅延を測り、480または960サンプル（±2）であること。値を出力して記録する |
+| N0c | 固有遅延 | 合成母音（ビブラート付き・不規則な音節長。インパルス列・1kHz正弦のバースト・雑音バーストはRNNoiseが雑音として抑えるため使わない）の相互相関で遅延を測り、480または960サンプル（±2）であること。値を出力して記録する |
 | N0d | 確保 | `rnnoise_process_frame`と`rnnoise_init`（既定モデル）の呼び出し中の確保0回（new・malloc） |
 | N0e | CPU（参考値） | 10秒分の処理時間÷音声時間を出力する（失敗判定なし） |
 
@@ -597,7 +596,7 @@ public:
 
 ### 8.5 既知のリスク
 
-- 遅延の増加（約20〜30ms）で、シフター休止時の合計が50msを超えうる。出力ブロックが480の倍数なら、フレーミングの遅延は480 − gcd(ブロック長, 480)まで縮められる。ただし、ブロック列の揺れに弱くなるため初期実装では採らない。必要になったらManager判断で検討する。
+- 遅延の増加（30ms、1440サンプル@48kHz）で、シフター休止時の合計が50msを超えうる。出力ブロックが480の倍数なら、フレーミングの遅延は480 − gcd(ブロック長, 480)まで縮められる。ただし、ブロック列の揺れに弱くなるため初期実装では採らない。必要になったらManager判断で検討する。
 - 合成信号の評価はRNNoiseの実音声での挙動を代表しない。合成母音を雑音と誤認する、または逆がありうる。最終判断は実録音と聴感で行う。
 - ゲートとインパクト抑制による、低い声の語尾・子音・破裂音の欠け。初期値はインパクト0%、ゲートは背景ノイズ50%超でのみ働く。
 - ゲートで無音に近づいた信号でSignalsmith Stretchの無音モード（エネルギー<1e-15が2ブロック）に入る可能性。ノイズ除去ONでのプリセット切り替えを、E9と同じ判定器で確認する（T-011のN9b）。

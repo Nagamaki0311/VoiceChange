@@ -64,6 +64,9 @@ constexpr std::array<PresetSpec, 8> kPresets { {
     { "talkbox",  0.0f, 1.00f, Effect::Talkbox, true  },
 } };
 
+// マイク処理（ノイズ除去）の背景ノイズの初期値。AtomicParamsの初期値と、Engineが非有限値を読んだときの代替値。
+constexpr float kNrBackgroundDefault = 0.7f;
+
 // UIスレッドと音声スレッド間で受け渡す層1パラメータ。すべてatomicのみ（音声スレッドはロックしない）。
 struct AtomicParams
 {
@@ -72,6 +75,11 @@ struct AtomicParams
     std::atomic<int> pitch { 0 };        // -12〜+12半音（層1ピッチ、1半音刻み）
     std::atomic<int> preset { 0 };       // Presetのint値
     std::atomic<bool> enabled { true };  // 全体ON/OFF（false = バイパス）
+
+    // マイク処理（ノイズ除去）。全体ON/OFFの対象外（D-020）。docs/spec.md「マイク処理: ノイズ除去」。
+    std::atomic<bool> nrEnabled { false };
+    std::atomic<float> nrBackground { kNrBackgroundDefault }; // 背景ノイズ 0〜1（0〜100%）
+    std::atomic<float> nrImpact { 0.0f };                     // インパクトノイズ 0〜1。保持するだけで、使うのはT-011
 };
 
 static_assert (std::atomic<float>::is_always_lock_free);

@@ -35,6 +35,7 @@ void Engine::prepare (const EngineConfig& config)
     fxInScratch.assign ((size_t) maxBlockSamples, 0.0f);
     fxOldScratch.assign ((size_t) maxBlockSamples, 0.0f);
 
+    noiseReducer.prepare (sampleRate, maxBlockSamples);
     shifter.prepare (sampleRate, maxBlockSamples);
     detector.prepare (sampleRate, maxBlockSamples);
     echo.prepare (sampleRate, maxBlockSamples);
@@ -109,10 +110,16 @@ void Engine::resetChain() noexcept
     compressor.reset();
 }
 
+void Engine::resetMic() noexcept
+{
+    noiseReducer.reset();
+}
+
 void Engine::handleNonFinite (float* buf, int n) noexcept
 {
     juce::FloatVectorOperations::clear (buf, n);
     resetChain();
+    resetMic(); // 非有限値の検出時はマイク処理もリセットする（D-020）。バイパス解除時とは違う
     errorFlags.fetch_or (0x1u, std::memory_order_relaxed);
 }
 
@@ -306,6 +313,23 @@ void Engine::processChunk (float* buf, int n) noexcept
 
     updateInputPeak (buf, n);
 
+    // マイク処理（D-020）: バイパス判定の前。全体OFFでも動き、バイパス解除でリセットしない。
+    // 以降のdryScratch・バイパスの素通しは、マイク処理後の信号になる。
+    const float rawNrBackground = atomicParams.nrBackground.load (std::memory_order_relaxed);
+    const float rawNrImpact = atomicParams.nrImpact.load (std::memory_order_relaxed);
+    noiseReducer.setTarget (atomicParams.nrEnabled.load (std::memory_order_relaxed),
+                            std::isfinite (rawNrBackground) ? rawNrBackground : kNrBackgroundDefault,
+                            std::isfinite (rawNrImpact) ? rawNrImpact : 0.0f);
+
+    if (! noiseReducer.process (buf, n))
+    {
+        // 入力に非有限値がある。RNNoiseは遅延の後で出力へ出すため、出力の検査では遅れて検出することになる。
+        // 入力の時点で、このブロックを無音にして全体をリセットする（チェーンの先頭がノイズ除去のとき、
+        // E5の「そのブロックを無音・フラグ」と同じ挙動にそろえる）。
+        handleNonFinite (buf, n);
+        return;
+    }
+
     if (! targetOn && chainGain <= 0.0)
     {
         // 完全バイパス: チェーン未処理。最終出力の非有限値検査（D-010）と±1.0へのクリップだけは常に行う。
@@ -317,7 +341,7 @@ void Engine::processChunk (float* buf, int n) noexcept
     }
 
     if (targetOn && chainGain <= 0.0)
-        resetChain(); // 解除時はチェーンをreset()する（シフターはPriming経由で復帰）
+        resetChain(); // 解除時は層1・層2だけreset()する（シフターはPriming経由で復帰）。マイク処理はリセットしない（D-020）
 
     std::memcpy (dryScratch.data(), buf, sizeof (float) * (size_t) n);
 
