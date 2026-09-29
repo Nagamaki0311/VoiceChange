@@ -51,6 +51,11 @@
 ### 次回開始位置
 - T-011（VAD連動ゲートとインパクト抑制。`src/core/MicProcessing.*`、`tests/MicTests.cpp`）。NoiseReducer::processFrameはVADの戻り値を捨てているので、ゲートで使う。`impactTarget`はT-011で使う。
 
+### コミット
+- `60c497c` T-010: NoiseReducer本体とEngineへの組み込み（混合まで）・遅延内訳・N3a/N4a/N6〜N11
+- `72151c2` T-009レビューの後追い修正（Low 3件・Nit）
+- `a1612c7` T-010: 遅延の実測値をdocsへ反映、CPU参考値に44.1kHzを追加、作業履歴と状態（レビュー中）
+
 ---
 
 ## 2026-09-29 T-009 RNNoiseの取り込み・N0a〜N0e・遅延とCPUの実測
