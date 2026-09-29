@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # RNNoiseのモデル（21MB、media.xiph.org）。キーはファイル名。CMake側のSHA256検査は取得元によらず効く。
+      # RNNoiseのモデル（21MB、media.xiph.org）。キーはファイル名。モデルを変えるとき（CMakeLists.txtのURL・SHA256）は、両ジョブのキーも一緒に変える。CMake側のSHA256検査は取得元によらず効く。
       - uses: actions/cache@v4
         with:
           path: .cache/rnnoise-model
@@ -99,7 +99,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # RNNoiseのモデル（21MB、media.xiph.org）。キーはファイル名。CMake側のSHA256検査は取得元によらず効く。
+      # RNNoiseのモデル（21MB、media.xiph.org）。キーはファイル名。モデルを変えるとき（CMakeLists.txtのURL・SHA256）は、両ジョブのキーも一緒に変える。CMake側のSHA256検査は取得元によらず効く。
       - uses: actions/cache@v4
         with:
           path: .cache/rnnoise-model

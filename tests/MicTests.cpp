@@ -188,20 +188,28 @@ public:
             }
 
 #if defined(__GLIBC__)
-            // 陽性対照: Cのmallocがガード中に数えられること（数えられないと上の0回が意味を持たない）。
+            // 陽性対照: Cライブラリ内部のmalloc/freeがガード中に数えられること（数えられないと上の0回が意味を持たない）。
+            // rnnoise_createはCの確保（calloc/malloc）、rnnoise_destroyは解放（free）を行う。
             {
-                std::size_t mallocCount = 0;
+                std::size_t createCount = 0;
+                std::size_t destroyCount = 0;
+                DenoiseState* created = nullptr;
 
                 {
                     vc::test::ScopedAllocationGuard guard;
-                    // 関数ポインタ経由にして、コンパイラがmalloc/freeの対を除去できないようにする。
-                    void* (*volatile allocate) (std::size_t) = std::malloc;
-                    void (*volatile release) (void*) = std::free;
-                    release (allocate (64));
-                    mallocCount = guard.count();
+                    created = rnnoise_create (nullptr);
+                    createCount = guard.count();
                 }
 
-                expect (mallocCount >= 2, "C malloc/free were not counted by the guard: " + juce::String ((int) mallocCount));
+                {
+                    vc::test::ScopedAllocationGuard guard;
+                    rnnoise_destroy (created);
+                    destroyCount = guard.count();
+                }
+
+                expect (createCount >= 1, "rnnoise_create was not counted by the guard: " + juce::String ((int) createCount));
+                expect (destroyCount >= 1, "rnnoise_destroy was not counted by the guard: " + juce::String ((int) destroyCount));
+                expect (createCount + destroyCount >= 2, "C allocations inside the library were not counted");
             }
 #endif
         }
