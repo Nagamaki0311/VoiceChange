@@ -60,14 +60,18 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-依存ソース（JUCE / signalsmith-stretch / signalsmith-linear）はCMakeの`FetchContent`で取得する。ネットワークなしでローカルの取得済みソースを使う場合は次のように指定する。
+依存ソース（JUCE / signalsmith-stretch / signalsmith-linear / RNNoise本体 / RNNoiseのモデル）はCMakeの`FetchContent`で取得する。RNNoiseはCMakeファイルを持たないため、本リポジトリのCMakeLists.txtが`vc_rnnoise`（Cの静的ライブラリ）としてビルドする。ネットワークなしでローカルの取得済みソースを使う場合は次のように指定する（RNNOISE_MODELはモデルのtar.gzを展開したディレクトリで、`src/rnnoise_data.c`を含む）。
 
 ```
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DFETCHCONTENT_SOURCE_DIR_JUCE=<JUCEのパス> \
   -DFETCHCONTENT_SOURCE_DIR_SIGNALSMITH-STRETCH=<stretchのパス> \
-  -DFETCHCONTENT_SOURCE_DIR_SIGNALSMITH-LINEAR=<linearのパス>
+  -DFETCHCONTENT_SOURCE_DIR_SIGNALSMITH-LINEAR=<linearのパス> \
+  -DFETCHCONTENT_SOURCE_DIR_RNNOISE=<rnnoise v0.2のパス> \
+  -DFETCHCONTENT_SOURCE_DIR_RNNOISE_MODEL=<モデルを展開したパス>
 ```
+
+モデル（21MB）は`-DVC_RNNOISE_MODEL_DOWNLOAD_DIR=<ディレクトリ>`を指定すると、tar.gzをそこへ保存し、SHA256が一致すれば再取得しない（CIはこのディレクトリを`actions/cache`で保存する）。
 
 ## 実機での確認手順
 
@@ -170,6 +174,7 @@ Linux（開発環境、Release）で、48kHz・480サンプルブロック・10�
 | 言語 | C++20 |
 | フレームワーク | JUCE 9.0.2（CMake、FetchContentでタグ固定） |
 | ピッチ/フォルマント | Signalsmith Stretch 1.4.0（依存: signalsmith-linear 0.6.4） |
+| ノイズ除去 | RNNoise v0.2（組み込みモデル`rnnoise_data-0b50c45`。Cの静的ライブラリ`vc_rnnoise`、CPU別最適化なし） |
 | ビルド | MSVC、`/MT`（GitHub Actions windows-latest） |
 
 ### 選定理由
@@ -188,6 +193,7 @@ Linux（開発環境、Release）で、48kHz・480サンプルブロック・10�
 
 - JUCE 9はAGPLv3と商用ライセンスのデュアルライセンス。本アプリの.exeを配布する場合、ソースコード全体をAGPLv3で公開するか、JUCEの商用ライセンスを取得する必要がある。
 - Signalsmith Stretch / signalsmith-linearはMITライセンス。
+- RNNoise（[xiph/rnnoise](https://github.com/xiph/rnnoise) v0.2、Copyright Jean-Marc Valin / Amazon / Mozilla / Xiph.Org Foundation / Mark Borgerding）はBSD-3-Clauseライセンス。学習済みモデル`rnnoise_data-0b50c45.tar.gz`は`https://media.xiph.org/rnnoise/models/`から取得する（RNNoiseのREADMEによれば、配布モデルは公開データセットのみで学習されている）。.exeを配布する場合はBSD-3-Clauseの著作権表示を同梱する。
 - 現時点の利用形態は個人利用のみで、.exeの配布は行わない（D-011）。配布する場合はこの判断とライセンス条件を見直す。
 
 ## ドキュメント

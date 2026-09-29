@@ -5,6 +5,7 @@
 // ===== SECTION: AllocationGuard =====
 // グローバルoperator new/new[]/aligned版/nothrow版（対応するdelete含む）の置き換えはTestMain.cppで行う。
 // ここでは各テストファイルから使う薄いRAIIガードだけを公開する（docs/plan.md 5章）。
+// glibc環境ではCのmalloc/calloc/realloc/free等も数える（Cライブラリ[RNNoise]の確保の検出用）。Windowsでは数えない。
 // 使い方: ScopedAllocationGuardでpush/pull/Engine::process等の呼び出しを囲み、guard.count()を
 // ガードが生きている間に読み取って変数へ控え、expect()自体はガードのスコープを抜けた後に呼ぶ
 // （expectが内部でString生成等のアロケーションをする可能性があるため、計測に混ぜない）。
@@ -12,7 +13,7 @@
 namespace vc::test
 {
 
-// TestMain.cppが定義する。有効な間だけグローバルoperator new/deleteの呼び出し回数を数える。
+// TestMain.cppが定義する。有効な間だけグローバルoperator new/delete（glibcではCのmalloc/free等も）の呼び出し回数を数える。
 extern thread_local bool g_allocationGuardActive;
 extern thread_local std::size_t g_allocationCount;
 

@@ -16,8 +16,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # RNNoiseのモデル（21MB、media.xiph.org）。キーはファイル名。CMake側のSHA256検査は取得元によらず効く。
+      - uses: actions/cache@v4
+        with:
+          path: .cache/rnnoise-model
+          key: rnnoise-model-0b50c45
+
       - name: Configure
-        run: cmake -S . -B build -A x64
+        run: cmake -S . -B build -A x64 "-DVC_RNNOISE_MODEL_DOWNLOAD_DIR:PATH=${{ github.workspace }}/.cache/rnnoise-model"
 
       - name: Build (Release)
         run: cmake --build build --config Release --parallel
@@ -93,6 +99,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # RNNoiseのモデル（21MB、media.xiph.org）。キーはファイル名。CMake側のSHA256検査は取得元によらず効く。
+      - uses: actions/cache@v4
+        with:
+          path: .cache/rnnoise-model
+          key: rnnoise-model-0b50c45
+
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -108,7 +120,7 @@ jobs:
             libfontconfig1-dev
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DVC_RNNOISE_MODEL_DOWNLOAD_DIR=${{ github.workspace }}/.cache/rnnoise-model
 
       - name: Build
         run: cmake --build build --parallel

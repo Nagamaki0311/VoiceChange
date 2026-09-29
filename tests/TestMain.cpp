@@ -183,6 +183,76 @@ void operator delete[] (void* p, std::align_val_t, const std::nothrow_t&) noexce
     alignedFree (p);
 }
 
+// ===== SECTION: Cのmalloc計数フック（glibcのみ） =====
+// RNNoise等のCライブラリの確保はoperator newを通らないため、glibc環境ではmalloc/calloc/realloc/free/
+// aligned_alloc/memalign/posix_memalignも置き換えて__libc_*へ転送し、ガード中の呼び出しを数える
+// （docs/plan.md 8.2「RT制約のテストでの担保」）。Windows（MSVC）では置き換えず、ソースレビューで代える。
+// 上のoperator newはstd::mallocを呼ぶため、ガード中のnewはoperator newとmallocで2回数えられる（0か否かの判定には影響しない）。
+#if defined(__GLIBC__)
+extern "C"
+{
+void* __libc_malloc (std::size_t);
+void* __libc_calloc (std::size_t, std::size_t);
+void* __libc_realloc (void*, std::size_t);
+void* __libc_memalign (std::size_t, std::size_t);
+void __libc_free (void*);
+
+void* malloc (std::size_t size) noexcept
+{
+    noteAllocationEvent();
+    return __libc_malloc (size);
+}
+
+void* calloc (std::size_t n, std::size_t size) noexcept
+{
+    noteAllocationEvent();
+    return __libc_calloc (n, size);
+}
+
+void* realloc (void* p, std::size_t size) noexcept
+{
+    noteAllocationEvent();
+    return __libc_realloc (p, size);
+}
+
+void free (void* p) noexcept
+{
+    if (p != nullptr)
+        noteAllocationEvent();
+
+    __libc_free (p);
+}
+
+void* aligned_alloc (std::size_t alignment, std::size_t size) noexcept
+{
+    noteAllocationEvent();
+    return __libc_memalign (alignment, size);
+}
+
+void* memalign (std::size_t alignment, std::size_t size) noexcept
+{
+    noteAllocationEvent();
+    return __libc_memalign (alignment, size);
+}
+
+int posix_memalign (void** out, std::size_t alignment, std::size_t size) noexcept
+{
+    // 要求（2の累乗かつsizeof(void*)の倍数）を満たさなければEINVAL(22)。
+    if (alignment < sizeof (void*) || (alignment & (alignment - 1)) != 0)
+        return 22;
+
+    noteAllocationEvent();
+    void* p = __libc_memalign (alignment, size);
+
+    if (p == nullptr)
+        return 12; // ENOMEM
+
+    *out = p;
+    return 0;
+}
+} // extern "C"
+#endif
+
 // ===== SECTION: TestMain =====
 // juce::UnitTestランナー。`--category <名前>`で対象カテゴリを絞ってctestに複数登録する。
 
