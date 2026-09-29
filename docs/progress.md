@@ -19,6 +19,39 @@
 
 ---
 
+## 2026-09-29 T-009 RNNoiseの取り込み・N0a〜N0e・遅延とCPUの実測
+
+### 実施内容
+- CMakeLists.txt: RNNoise v0.2（GIT_TAG v0.2、GIT_SHALLOW）とモデル`rnnoise_data-0b50c45.tar.gz`（URL_HASH SHA256=4ac81c5c0884ec4bd5907026aaae16209b7b76cd9d7f71af582094a2f98f4b43。ダウンロードしたファイルから算出）をFetchContentで取得。自前の`vc_rnnoise`（Cの静的ライブラリ。denoise・rnn・pitch・kiss_fft・celt_lpc・nnet・nnet_default・parse_lpcnet_weights・rnnoise_tables＋モデルのrnnoise_data.c。x86/は含めない）をビルドし、`vc_core`のINTERFACEにリンク。`vc_add_test(mic Mic)`を追加。rnnoiseのソースは改変していない。
+- MSVC向け: `OPUS_X86_MAY_HAVE_SSE/SSE2`を定義（必須。v0.2の`vec.h`は`__SSE2__`が無いとSIMD無しの経路へ進むが、その経路が`#include`する`os_support.h`がv0.2に存在せずコンパイルできないことをソースで確認した。MSVCは`__SSE2__`を定義しないため、`x86_arch_macros.h`の`_MSC_VER`節がこれらから作る）。`restrict=__restrict`、`_CRT_SECURE_NO_WARNINGS`も定義。ARM64のWindowsは`FATAL_ERROR`（対象外）。VLA・M_PI・`#warning`はソースを調べて問題なし（GCCの`-std=c99 -Wvla`、clangの`-Wvla -Wdeclaration-after-statement`で警告なし。nnet.h/nnet.cの`#warning`はMSVCでは`#pragma message`）。
+- CIのモデルキャッシュ: `VC_RNNOISE_MODEL_DOWNLOAD_DIR`（FetchContentの`DOWNLOAD_DIR`）へtar.gzを保存し、ハッシュが一致すれば再取得しない。両ジョブに`actions/cache@v4`（path `.cache/rnnoise-model`、key `rnnoise-model-0b50c45`）を追加。ローカルの別プロジェクトで、1回目の取得→2回目（プロキシを無効にして）キャッシュから展開できること、キャッシュ無し＋ネットワーク無しで失敗することを確認した。
+- tests/TestMain.cpp: glibc環境（`__GLIBC__`）でのみ、`malloc/calloc/realloc/free/aligned_alloc/memalign/posix_memalign`を置き換えて`__libc_*`へ転送し、ガード中の呼び出しを数える。tests/AllocationGuard.hのコメントを更新。既存のアロケーション検査（E系・LongRun・RingBuffer）は変更なしで通る。
+- tests/MicTests.cpp: N0a〜N0e（カテゴリMic、quick）。N0dには陽性対照（ガード中のCのmalloc/freeが数えられること。glibcのみ）を含める。N0cのテスト信号は合成母音（f0 110〜140Hz・ビブラート・不規則な音節長。T-010で`TestSignals.h`の合成母音へ移す）。
+- README: RNNoise（BSD-3-Clause、著作権者）とモデルの出典、ローカル取得の指定方法、モデルのキャッシュ、技術スタック表。
+
+### 結果
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 9件（既存8件＋mic）すべて成功（Linux、GCC 13.3、Release）。
+- N0a: フレーム長480。N0b: 正弦・白色雑音・無音の出力がすべて有限、VAD確率は[0,1]。
+- N0c（固有遅延）: **960サンプル（20ms@48kHz）**。相互相関のピークは957〜963で滑らかに960が最大（ピーク値に対し958:0.975、959:0.996、961:0.986）。インパルス列・1kHzバースト・雑音バーストはRNNoiseが雑音として抑える（出力エネルギー比0.007以下）が、遅延は同じ960。したがってNoiseReducerのD（48kHz）は、フレーム収集の480を加えて1440サンプル（30ms）になる見込み（plan.md 8.2のD = 480 + 固有遅延）。
+- N0d: `rnnoise_process_frame`（100フレーム）と`rnnoise_init(st, NULL)`の呼び出し中の確保は0回（operator newとC malloc）。
+- N0e（CPU、参考値）: 10秒分（合成母音＋白色雑音）で、**約2.4〜2.8%（5回: 2.65/2.57/2.62/2.76/2.54%）**、1フレームの最大0.67〜0.83ms。環境: Intel Xeon 2.10GHz（AVX2/AVX-512対応）、Linux、GCC -O3、SSE2経路（CPU別最適化なし）。参考として`-march=native`（AVX2）でビルドしても2.3〜2.4%でほぼ同じ。RNNoise単体でD-025の増分目標（3%）にほぼ達するため、48kHz変換・ゲート・EQの加算分で超える可能性がある。
+
+### 未解決事項
+- MSVCでのビルド・`/MT`のdumpbin検査はローカルで検証できない。CIのwindowsジョブで確認する（Manager）。最も疑わしい箇所: (1) vec_avx.hのSSE2エミュレーション経路（`__m256`のマクロ置換）、(2) 29MBのrnnoise_data.cのコンパイル時間・メモリ、(3) `restrict=__restrict`のマクロ。
+- CIの`actions/cache`とFetchContent`DOWNLOAD_DIR`の組み合わせは、初回（キャッシュ無し）と2回目（キャッシュ有り）のログで確認が必要。Windowsのパス指定（`-D...:PATH=${{ github.workspace }}/...`）も未確認。
+- WindowsのCPU・遅延は実機未測定（Linuxの値は参考）。
+- spec.md・D-025の「約20〜30ms」「3%」は、実測値（遅延30ms、RNNoise単体約2.6%）に基づく更新案をManagerへ報告済み（docsは未変更）。
+- RNNoiseに半分の大きさの`rnnoise_data_little.c`（同じtar.gz内、インターフェース同じ）がある。CPUが目標を超える場合の選択肢（D-019の変更が必要）。
+
+### 次回開始位置
+- T-010（NoiseReducer本体とEngineへの組み込み。src/core/MicProcessing.*、Params.h、Engine.*、AudioIO.*）。前提としてCIのwindowsジョブの成功を確認する。
+
+### コミット
+- `22ab227` T-009: RNNoise v0.2の取り込み・N0a〜N0e・Cのmalloc計数
+- `3fa93d6` docs: T-009の作業履歴と状態（レビュー中）
+
+---
+
 ## 2026-09-29 マイク処理（ノイズ除去＋EQ）の仕様追記
 
 ### 実施内容
