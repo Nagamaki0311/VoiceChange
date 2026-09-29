@@ -1,6 +1,6 @@
-# VoiceChange 実装計画（T-002〜T-008）
+# VoiceChange 実装計画（T-002〜T-015）
 
-Plannerが作成し、Managerが7章の判断を確定した計画。要件はdocs/spec.md、UIはdocs/design.md、判断の経緯はdocs/decisions.mdを正とし、本書と食い違う場合はそちらを優先する。各タスクの完了時に、実際の構成と本書がずれた箇所は本書を更新する。
+Plannerが作成し、Managerが7章の判断を確定した計画。要件はdocs/spec.md、UIはdocs/design.md、判断の経緯はdocs/decisions.mdを正とし、本書と食い違う場合はそちらを優先する。各タスクの完了時に、実際の構成と本書がずれた箇所は本書を更新する。T-009〜T-015（マイク処理）は8章に追加した（2026-09-29、要件はspec.md、判断はD-019〜D-025）。
 
 ## 1. 依存ソースから確認した事実（計画に影響するもの）
 
@@ -399,3 +399,221 @@ F1〜F3が通らなかった場合は閾値を緩めず、測定値を添えて�
 - ジッタ余裕が増えた後もブロック長は再計算しない（開いたときだけ計算する）。合計が50msを超えたらUIに表示される。
 - 同名デバイスに付く番号（例「(2)」）は接続順で変わり得るため、保存したデバイス名と一致しなくなることがある（低）。
 - プリセット名「ミニオン」は既存キャラクター名。一般配布する場合は名称の検討が必要（低）。
+
+## 8. 追加計画: マイク処理（ノイズ除去＋EQ、T-009〜T-015）
+
+要件はdocs/spec.md「マイク処理: ノイズ除去」「マイク処理: EQ」、判断はD-019〜D-025、UIはdocs/design.md 10章を正とする。
+
+### 8.1 依存ソースから確認した事実
+
+1. RNNoiseのビルド手段はautotoolsだけで、CMakeファイルはない。学習済みモデルはGitに含まれず、`src/rnnoise_data.c/.h`を含むtar.gz（v0.2は`rnnoise_data-0b50c45.tar.gz`、21MB）をmedia.xiph.orgから取得する。v0.2のスクリプトにチェックサム検査はない。
+2. ライブラリのソースはdenoise.c、rnn.c、pitch.c、kiss_fft.c、celt_lpc.c、nnet.c、nnet_default.c、parse_lpcnet_weights.c、rnnoise_tables.c、および（モデル側の）rnnoise_data.c。x86/以下はCPU別最適化を有効にした場合のみ。
+3. `rnnoise_create`は`malloc`を使う。`rnnoise_process_frame`（denoise.c・rnn.c・nnet.c）はスタック配列だけを使う。parse_lpcnet_weights.cの確保はファイル/バッファからモデルを読むときだけ。
+4. 入出力はint16の値域のfloat。FRAME_SIZE 480、WINDOW_SIZE 960。v0.2には1フレームの先読み遅延を足すコミット（84fe83b）が入っている。
+5. JUCEの`IIR::ArrayCoefficients`は`std::array`を返し、`Coefficients::operator=(std::array)`は`clearQuick()`＋`ensureStorageAllocated(max(8, Num))`で代入するため、容量があれば再確保しない（JUCE masterで確認。9.0.2での一致はT-012で確認）。
+6. 既存のアロケーション検出（tests/TestMain.cpp）はC++の`operator new`だけを数え、Cの`malloc`は数えない。
+
+### 8.2 実装方針
+
+#### ファイル構成（追加分）
+
+```
+src/core/MicProcessing.h/.cpp   NoiseReducer（フレーミング・48kHz変換・RNNoise・混合・ゲート・インパクト抑制・状態遷移）、Equalizer
+src/app/MicPanel.h/.cpp         マイク処理ウィンドウの内容（design.md 10章）
+tests/MicTests.cpp              カテゴリ Mic（N0〜N12、EQ1〜EQ9、M1）
+```
+
+#### CMake
+
+- FetchContent（既存と同じく、どのターゲットよりも前）:
+  - `rnnoise`: GIT_REPOSITORY https://github.com/xiph/rnnoise.git、GIT_TAG v0.2、GIT_SHALLOW ON。CMakeLists.txtがないため、FetchContent_MakeAvailableは取得だけを行う。
+  - `rnnoise_model`: URL https://media.xiph.org/rnnoise/models/rnnoise_data-0b50c45.tar.gz、URL_HASH SHA256=（T-009で取得したファイルから算出して固定）、DOWNLOAD_EXTRACT_TIMESTAMP ON。
+- `add_library(vc_rnnoise STATIC …)`: 8.1-2のソース（x86/以下を除く）と`${rnnoise_model_SOURCE_DIR}/src/rnnoise_data.c`。includeは`${rnnoise_SOURCE_DIR}/include`（PUBLIC、SYSTEM）と、`${rnnoise_SOURCE_DIR}/src`・`${rnnoise_model_SOURCE_DIR}/src`（PRIVATE）。UNIXでは`m`をリンク。必要なコンパイル定義（`_USE_MATH_DEFINES`等）はT-009で決める。rnnoiseのソースは改変しない（必要になったら報告する）。
+- JUCEを含まないCのライブラリなので、STATICでもD-005の懸念（JUCEソースの二重コンパイル）はない。`vc_core`のINTERFACEに`vc_rnnoise`を加える。`CMAKE_MSVC_RUNTIME_LIBRARY`はadd_libraryより前に設定済みのため、`/MT`が適用される。
+- ローカル検証: `-DFETCHCONTENT_SOURCE_DIR_RNNOISE=<scratchpad>/rnnoise -DFETCHCONTENT_SOURCE_DIR_RNNOISE_MODEL=<scratchpad>/rnnoise_model`（モデルはscratchpadにtar.gzを展開したディレクトリ）。
+- `VoiceChangeTests`にだけ`juce::juce_audio_formats`をリンクする（T-014のWAV入出力用）。新規パッケージではない。
+- ctest: `vc_add_test(mic Mic)`（quick）。
+- CI: モデルのtar.gzを`actions/cache`（キーはファイル名）で保存し、CMakeのURLに「ローカルのキャッシュ → media.xiph.org」の順で渡す（ハッシュ検査は両方に効く）。方式の細部はT-009で決める。
+
+#### 公開インターフェース
+
+```cpp
+// Params.h（追加）
+enum class EqType { Peak, LowShelf, HighShelf, LowCut, HighCut };
+constexpr int kEqBands = 5;
+struct EqBandSettings { bool on; EqType type; float hz, gainDb, q; };
+constexpr std::array<EqBandSettings, kEqBands> kEqDefaults;  // spec.mdの初期値（仮）。T-015でSonarの再現値に置き換える
+struct EqBandAtomic { std::atomic<bool> on; std::atomic<int> type; std::atomic<float> hz, gainDb, q; };
+// AtomicParams に追加
+std::atomic<bool>  nrEnabled { false };
+std::atomic<float> nrBackground { 0.7f }, nrImpact { 0.0f };   // 0〜1
+std::atomic<bool>  eqEnabled { false };
+std::array<EqBandAtomic, kEqBands> eqBands;                    // 初期値はkEqDefaults
+// SavedSettings に同じ項目を追加し、sanitize()で非有限値→初期値、範囲の端へ丸める
+const char* eqTypeId (EqType) noexcept;  EqType eqTypeFromId (const juce::String&) noexcept;  // 不明ならPeak
+
+// MicProcessing.h
+class NoiseReducer {
+public:
+    ~NoiseReducer();                                   // rnnoise_destroy
+    void prepare (double fs, int maxBlock);            // メッセージスレッド。初回はrnnoise_create、以後はrnnoise_init。FIFO・遅延線・補間器を確保
+    void setTarget (bool run, float background, float impact) noexcept;
+    void process (float* buf, int n) noexcept;         // その場で処理、n ≤ maxBlock。Restingなら何もしない
+    void reset() noexcept;                             // → Resting。rnnoise_init、FIFO・遅延線・包絡を消去（確保なし）
+    int  getLatencySamples() const noexcept;           // FadingIn/Active/FadingOutでD、それ以外は0（PitchShifterと同じ規則）
+};
+class Equalizer {
+public:
+    void prepare (double fs, int maxBlock);            // Coefficientsをmake*で作成（ここだけで確保）
+    void setTarget (bool run, const std::array<EqBandSettings, kEqBands>&) noexcept;
+    void process (float* buf, int n) noexcept;         // OFFのフェード完了後は何もしない
+    void reset() noexcept;
+};
+```
+
+- NoiseReducerの状態遷移は2.5節PitchShifterの表と同じ（Priming完了条件は「送り込み量 ≥ D」）。共通化はしない（同じ表の2か所目。3か所目が出たら検討する）。
+- D（ノイズ除去の遅延）は、48kHzでは480 + RNNoise固有の遅延（T-009の実測値を定数にする）。48kHz以外では出力レートへ換算し、補間器の遅延を加えて整数に丸める。原音側の遅延線も同じDを使う。
+- 48kHz以外: 入力FIFO（出力レート）→ 上げ用のLagrange（速度比 = fs/48000）で480サンプルを作る → RNNoise → 下げ用のLagrange（速度比 = 48000/fs）→ 出力FIFO。出力FIFOは初期充填（ceil(480×fs/48000) + 余裕）を持ち、どんなブロック列でも枯れないこと（テストN11）。
+- RNNoiseの計算はフレームがそろったコールバックに集中する。小さいバッファでは、そのコールバックだけ処理時間が伸びる（CPU表示は平滑化されるため影響は小さい）。
+
+#### Engineへの組み込み
+
+- `processChunk`: `updateInputPeak`の直後、バイパス判定の前に`noiseReducer.setTarget/process` → `equalizer.setTarget/process`を置く（D-020）。以降の`dryScratch`はマイク処理後の信号になる。
+- `resetChain()`は層1・層2だけにする（現状の内容のまま）。`resetMic()`（noiseReducer/equalizerのreset）を新設し、`handleNonFinite`は両方を呼ぶ。バイパス解除時は`resetChain()`だけを呼ぶ。
+- `int getNoiseReducerLatencySamples() const noexcept`を追加する。`AudioIO::getLatency()`は`LatencyBreakdown::noiseMs`を加えてtotalに含める。W2（device + ring > 48ms）の式は変えない。
+- atomicは各フィールドを独立に読む（1バンドの周波数とゲインが1ブロックだけ新旧混在しうるが、どちらも有効値で補間されるため許容する）。
+
+#### RT制約のテストでの担保（追加）
+
+- tests/TestMain.cppに、glibc環境（`#if defined(__GLIBC__)`）でのみ`malloc/calloc/realloc/free/aligned_alloc/posix_memalign`を置き換えて`__libc_*`へ転送し、ガード中の呼び出しを数える処理を足す。Cライブラリ（RNNoise）の確保も検出できるようにするため。Windowsではソースレビューで代える。
+
+### 8.3 作業手順
+
+依存関係: T-009 → T-010 → {T-011, T-012} → T-013（design.md 10章をDesignerが確定してから）→ T-014 → T-015（ユーザーの素材を受け取ってから）。
+
+#### T-009: RNNoiseの取り込み・ビルド確認（MSVC /MT・Linux）と遅延・CPUの実測
+
+- 変更対象: `CMakeLists.txt`、`.github/workflows/build.yml`（モデルのキャッシュ）、`tests/MicTests.cpp`（N0のみ）、`tests/TestMain.cpp`（mallocの計数）、`README.md`（依存とライセンス: RNNoise BSD-3-Clause、モデルの出典）。
+
+| ID | 内容 | 合格条件 |
+|---|---|---|
+| N0a | フレーム長 | `rnnoise_get_frame_size() == 480` |
+| N0b | 基本動作 | 48kHzの正弦・白色雑音・無音を各1秒処理して、出力がすべて有限値 |
+| N0c | 固有遅延 | インパルス列（または1kHz正弦のバースト）の相互相関で遅延を測り、480または960サンプル（±2）であること。値を出力して記録する |
+| N0d | 確保 | `rnnoise_process_frame`と`rnnoise_init`（既定モデル）の呼び出し中の確保0回（new・malloc） |
+| N0e | CPU（参考値） | 10秒分の処理時間÷音声時間を出力する（失敗判定なし） |
+
+- 完了条件: CIの両ジョブが成功し、dumpbinにVCランタイム/UCRTのDLLがない。N0が通る。N0c・N0eの値をprogress.mdに記録し、spec.mdの「約20〜30ms」「3%」を実測値で更新する案をManagerへ出す。MSVCでビルドできない場合は、原因と回避案（コンパイル定義、CPU別最適化の無効化、v0.1.1の検討）を添えて報告し、先へ進まない。
+
+#### T-010: NoiseReducer本体とEngineへの組み込み（混合まで）
+
+- 変更対象: `src/core/MicProcessing.*`、`src/core/Params.h`、`src/core/Engine.*`、`src/app/AudioIO.*`（LatencyBreakdown）、`tests/MicTests.cpp`、`tests/TestSignals.h`（話し声に近い合成母音［ビブラート±2%・5Hz、4Hzの音節抑揚］、ピンク/ブラウン雑音、クリック、相互相関による遅延測定）。
+- 範囲: フレーミング、48kHz変換、RNNoise、原音との混合（背景ノイズ0〜50%）、状態遷移、遅延の報告、異常値。ゲートとインパクト抑制はT-011。
+
+| ID | 内容 | 合格条件 |
+|---|---|---|
+| N6 | 遅延 | 48k/44.1k/96kで、報告値 = 実測値±1サンプル。ブロック長を変えても一定 |
+| N7 | アロケーション | ON/OFFの全遷移・パラメータ掃引・44.1k経路で`Engine::process`中の確保0回（new・malloc） |
+| N8 | NaN/Inf | ノイズ除去ON（Active）で1ブロックにNaN（別ケースでInf）→ そのブロックの出力0、フラグ。以後D + 2ブロック以内に非ゼロへ復帰し、以後すべて有限。バイパス中でもノイズ除去ONなら同じ |
+| N9a | 切り替えのクリック | ノイズ除去のOFF→ON、ON→OFF、Priming中の中止、FadingIn中の反転、FadingOut中の反転、背景ノイズ0↔100%の急変を、200Hz・A=0.3の正弦（-80dBFSの雑音付き）でクリック判定器に合格 |
+| N10 | OFF時のビット一致 | ノイズ除去OFFのとき`NoiseReducer::process`の前後でmemcmp一致（\|x\|>1を含む乱数入力）。ON→OFFの遷移完了後も一致。既存のE4aが通る |
+| N11 | 分割処理 | ブロック長{1, 7, 128, 441, 480, 4096}の混在列と一括処理（3×maxBlock+17）の出力がビット一致。44.1kで出力FIFOのアンダーフロー0回 |
+| N3a | 清音の歪み（RNNoiseのみ） | 雑音のない合成母音（f0 = 120/200Hz）を背景ノイズ50%で処理し、レベル変化 ≤ 1.5dB、100〜4000Hzの1/3オクターブ長時間スペクトルの差 ≤ 3dB（暫定閾値） |
+| N4a | 低い声（RNNoiseのみ） | f0 = 85/100/120Hzの清音の母音で、基本波成分の減衰 ≤ 3dB、全体 ≤ 1.5dB（暫定閾値） |
+
+- 完了条件: MicとEngine（E1〜E10を変更なしで）、LongRunが通り、CIの両ジョブが成功する。暫定閾値から大きく外れた場合は閾値を緩めずに実測値を添えて報告する（D-013と同じ運用）。
+
+#### T-011: VAD連動ゲートとインパクト抑制
+
+- 変更対象: `src/core/MicProcessing.*`、`tests/MicTests.cpp`。
+
+| ID | 内容 | 合格条件（暫定。実測基準値を記録する） |
+|---|---|---|
+| N1 | SNR改善量 | 合成母音（抑揚付き、発話1秒・無音1秒の繰り返し）にピンク雑音をSNR 10dBで重ね、背景ノイズ70%で、遅延を揃えた清音との区間SNRが入力比+6dB以上 |
+| N2 | 無声区間の残留雑音 | 雑音だけの区間（開始1秒以降）の出力RMSが入力雑音比で、50%で−12dB以下、100%で−25dB以下。0/25/50/75/100%で残留量が単調に減る |
+| N3b | 発話区間の歪み | N3aの条件で背景ノイズ100%でもレベル変化 ≤ 1.5dB。有声区間（冒頭50msを除く）でゲートが閉じたサンプルが0 |
+| N4b | 低い声・語尾 | f0 = 85/100/120Hzで150msの指数減衰の語尾を持つ母音について、減衰開始から100msのエネルギーが背景ノイズ0%比で−3dB以内 |
+| N5a | クリック除去量 | -50dBFSのピンク雑音上に、3kHzの1ms・5ms減衰のクリック（ピーク-20dBFS）。インパクト100%でクリック区間のピークがインパクト0%比で−12dB以下 |
+| N5b | 誤検出 | 10msアタックの母音の立ち上がりと、合成の破裂音（5msの雑音バースト、30ms後に母音）で、インパクト100%でも後続母音の減衰 ≤ 1dB。インパクト0%では抑制段を通らない（0%と未使用でビット一致） |
+| N7/N9b | 確保・クリック | ゲート・インパクトを含めてN7・N9aを再実行する。N9b: ノイズ除去ON（ゲートが働く背景ノイズ100%を含む）でのプリセット切り替え56通りを、E9と同じ判定器で確認する（ゲートで無音に近づいた信号でSignalsmith Stretchの無音モードに入らないか） |
+| N12 | CPU（参考値） | 48kHz・480ブロック・10秒で、ノイズ除去ON（背景70%・インパクト50%、EQはOFF）のとき、ノーマル・トークボックス・ミニオンの処理時間÷音声時間を出力（失敗判定なし）。増分が3%を超えたら報告する。EQ込みの測定はT-012のEQ9 |
+
+- 完了条件: MicとEngineが通り、CIの両ジョブが成功する。N1〜N5の実測値をREADMEに記載する。
+
+#### T-012: EQ（Equalizer）とEngineへの組み込み、LongRunの拡張
+
+- 変更対象: `src/core/MicProcessing.*`、`src/core/Params.h`、`src/core/Engine.*`、`tests/MicTests.cpp`、`tests/LongRunTests.cpp`。
+
+| ID | 内容 | 合格条件 |
+|---|---|---|
+| EQ1 | 周波数特性 | 各タイプ（ピーキング1kHz +6dB Q1、ローシェルフ200Hz +6dB Q0.71、ハイシェルフ5kHz −4dB Q0.71、ローカット80Hz、ハイカット12kHz）で、インパルス応答（65536点FFT）の振幅が`getMagnitudeForFrequency`の解析値と20Hz〜0.45fsで0.1dB以内。48k/44.1k |
+| EQ2 | 直列 | 5バンド同時の特性が各バンドのdB和と0.1dB以内 |
+| EQ3 | クリック | ゲイン−12→+12dB、周波数100→5000Hz、Q 0.5→8、タイプ変更、バンドの有効/無効、EQ全体のON/OFFで、クリック判定器に合格 |
+| EQ4 | 極端な値 | f = 20kHz（44.1kでは0.45fsへ丸め）、Q = 0.1/10、ゲイン±18dBで白色雑音を10秒処理し、有限・発散なし |
+| EQ5 | アロケーション | パラメータ・タイプ変更中を含めて確保0回 |
+| EQ6 | OFF時のビット一致 | EQ OFF（フェード完了後）でmemcmp一致 |
+| EQ7 | 低い声 | 全バンドのゲインが0dBのフラット設定（kEqDefaultsの値には依存しない。T-015で置き換わるため）で85Hz正弦の変化 ≤ 0.1dB |
+| EQ9 | CPU（参考値） | 48kHz・480ブロック・10秒で、EQのみON、およびノイズ除去（N12と同条件）＋EQ ONのとき、ノーマル・トークボックス・ミニオンの処理時間÷音声時間を出力（失敗判定なし）。ON時の増分が3%を超えたら報告する |
+
+- LongRun: 既存のシナリオに「90秒ごとにノイズ除去のON/OFF、45秒ごとに背景ノイズとEQバンド1のゲインを変更」を加える。合格条件は既存と同じ（確保0回を含む）。
+- 完了条件: Mic・Engine・LongRunが通り、CIの両ジョブが成功する。
+
+#### T-013: 設定の保存・UI（マイク処理ボタン・マイク処理ウィンドウ・内訳表示）・統計ログ
+
+- 前提: Designerがdesign.md 10章（Plannerの案）を確定していること。
+- 変更対象: `src/core/Params.h`（SavedSettings・sanitize・タイプ名）、`src/app/Main.cpp`（設定キー、マイク処理ウィンドウの所有と表示/非表示、`--screenshot-mic <path>`）、`src/app/MainComponent.*`（ボタン、内訳、バイパス時の文言、Tab順）、`src/app/MicPanel.*`、`src/core/StatsLog.*`（`nr=` `eq=`）、`tests/AppLogicTests.cpp`。
+- 設定キー: `nrEnabled`、`nrBackground`、`nrImpact`、`eqEnabled`、`eqBand{1..5}On`、`eqBand{1..5}Type`（`peak/lowshelf/highshelf/lowcut/highcut`）、`eqBand{1..5}Hz`、`eqBand{1..5}GainDb`、`eqBand{1..5}Q`。
+- テスト AppLogic: 範囲外（背景2.0/−1、周波数5/50000、ゲイン±100、Q 0/100）が端へ丸まる。NaN/Inf → 初期値。不明なタイプ名 → peak。キーがない → 初期値。StatsLogの行に`nr=`・`eq=`が含まれる。
+- 完了条件: AppLogicが通る。`--screenshot`と`--screenshot-mic`のPNGが460×600で、design.mdと目視で一致する（日本語の表示、要素の順序、内訳行がはみ出さない）。非表示中にタイマーが止まること、トレイ格納時にマイク処理ウィンドウも閉じることはコードレビューで確認する。
+
+#### T-014: 実録音比較のオフライン処理ツールと手順
+
+- 変更対象: `tests/TestMain.cpp`（`--process-wav`・`--compare`モード）、`tests/MicTests.cpp`（M1）、`CMakeLists.txt`（juce_audio_formats）、`README.md`（手順）。
+- `VoiceChangeTests --process-wav <in.wav> <out.wav> [--settings <VoiceChange.settingsのパス>] [--bg 0.7 --impact 0.3 --eq on]`: WAVを読み、出力レート＝WAVのレートでEngine（プリセットはノーマル、ゲイン0）に通して書き出し、遅延を表示する。
+- `VoiceChangeTests --compare <raw.wav> <sonar.wav> <ours.wav> [--segments <区間ファイル>]`: 区間（無音・発話・打鍵のみ・発話＋打鍵）ごとに次を表で出す。区間は台本の時刻ファイルで指定し、省略時は生音声のエネルギーで自動判定する。遅延は相互相関で揃える。
+  - 無声区間の残留雑音RMS [dBFS] と1/3オクターブスペクトル
+  - 発話区間のレベル
+  - 発話と残留雑音の比（レベルに依存しない比較量）
+  - 打鍵区間のピークとRMS
+  - 発話区間の長時間平均スペクトルの比（sonar/raw＝Sonarの実効的なEQ、ours/raw）の差（63Hz〜8kHz、1/3オクターブ）
+- M1: 既知の合成WAV（雑音床と発話レベルが既知）で、ツールの指標が期待値と0.5dB以内。
+- READMEの録音手順（要点。詳細はT-014で書く）: OBSで物理マイクとSonarの仮想マイクを別トラックで同時に録音する。台本は約90秒（無音10秒 → 普通に話す30秒 → 話さずに打鍵10秒 → 話しながら打鍵20秒 → 無音10秒 → 小声と語尾を伸ばす発話10秒。空調・PCファンは普段どおり）。48kHzのWAVでraw.wavとsonar.wavを書き出し、区間の時刻を書いたメモを添える。Developerが`--process-wav`と`--compare`で比較表を作り、発話レベルを揃えたraw・sonar・oursの3本をユーザーへ渡す。ユーザーが聴き比べて採否と調整値を返す。
+- 完了条件: M1が通り、READMEに録音と比較の手順がある。
+
+#### T-015: Sonarの設定を初期値に反映し、実録音で評価する（ユーザーの素材待ち）
+
+- 前提: ユーザーからSonarのスクリーンショット（EQと、Noise Reductionのスライダー値）と、同時録音のWAV 2種を受け取っていること。スクリーンショットには、使っているバンド数（5を超えるなら実装のバンド数を増やす）、各バンドのフィルタタイプと周波数・ゲイン・Q、ローカット等の傾きが写っていること。
+- 変更対象: `src/core/Params.h`（kEqDefaults、背景ノイズ・インパクトの初期値）、`docs/spec.md`（初期値の表）、`tests/MicTests.cpp`（EQ8）、`README.md`（評価結果）。
+- EQ8: kEqDefaultsの周波数特性が、スクリーンショットから読み取った曲線上の点と±1dB以内で一致する。Sonarとフィルタの定義が違う場合は換算の根拠をdecisions.mdに記録する。
+- 評価: T-014のツールで比較表を作り、目標（本アプリの「発話と残留雑音の比」がSonar比で−3dB以内、打鍵区間でSonar比+3dB以内、80〜300Hzの長時間スペクトル差±2dB以内）と照らして報告する。目標は判断材料で、合否はユーザーの聴感で決める。
+- 完了条件: 比較表と3ファイル（raw・sonar・ours、発話レベルを揃えたもの）をユーザーへ渡し、ユーザーの聴感の結果（採否・調整値）をprogress.mdとspec.mdに反映した。
+
+### 8.4 完了条件（追加計画全体）
+
+- T-009〜T-015の各完了条件を満たす。
+- 最終コミットで、ローカル検証の`ctest --output-on-failure`（quickとlong）が全件成功し、CIのwindowsジョブとlinuxジョブが成功している。
+- 証拠（ctestの要約、CIのrun URL、dumpbinの出力、2枚のUIのPNG、N0c/N12/EQ9の実測値、T-015の比較表）を示す。
+- 実機でのCPU・遅延（統計ログ）と聴感は未検証として明記し、READMEの手順でユーザーに委ねる。
+
+### 8.5 既知のリスク
+
+- 遅延の増加（約20〜30ms）で、シフター休止時の合計が50msを超えうる。出力ブロックが480の倍数なら、フレーミングの遅延は480 − gcd(ブロック長, 480)まで縮められる。ただし、ブロック列の揺れに弱くなるため初期実装では採らない。必要になったらManager判断で検討する。
+- 合成信号の評価はRNNoiseの実音声での挙動を代表しない。合成母音を雑音と誤認する、または逆がありうる。最終判断は実録音と聴感で行う。
+- ゲートとインパクト抑制による、低い声の語尾・子音・破裂音の欠け。初期値はインパクト0%、ゲートは背景ノイズ50%超でのみ働く。
+- ゲートで無音に近づいた信号でSignalsmith Stretchの無音モード（エネルギー<1e-15が2ブロック）に入る可能性。ノイズ除去ONでのプリセット切り替えを、E9と同じ判定器で確認する（T-011のN9b）。
+- RNNoiseのMSVCビルドとモデル取得（media.xiph.orgへの依存）。
+- EQで持ち上げた信号は、バイパス中はリミッターを通らず±1.0のクリップだけになる（D-018、D-020）。
+
+### 8.6 レビューで確かめる点（Reviewer向け）
+
+1. 音声スレッドでの確保: `rnnoise_create`/`destroy`がprepareとデストラクタ以外から呼ばれていないか。`Coefficients`への代入で再確保が起きないか（EQ5とglibcのmalloc計数が有効か）。`std::function`や`juce::String`の生成、ロックが音声パスに入っていないか（`grep -rnE "malloc|mutex|CriticalSection|DBG\(|Logger::" src/core`）。
+2. ブロックの区切りへの非依存: 係数の再計算周期・ゲートのホールド・FIFOがサンプル数基準か（N11とE6で確認）。
+3. 遅延の整合: 報告値と実測値が一致するか。原音側の遅延がRNNoise側と揃っているか（背景25%で清音の特性が平坦か。ずれると櫛形フィルタになる）。44.1kでの端数の丸め。
+4. リセットの意味: バイパス解除でマイク処理をリセットしていないか。NaNではリセットしているか。`prepare`の再入（デバイスの開き直し）で二重生成やリークがないか。
+5. 状態遷移: 全遷移でクリックがないか。遷移途中の報告遅延がPitchShifterと同じ規則か。
+6. 低い声での誤動作: ゲートとインパクトの誤作動（N3b・N4b・N5b）。閾値が黙って緩められていないか。
+7. ビット一致: OFF時のビット一致と、既存E4a（ノイズ除去・EQがOFFのときに限る）。バイパス時の文言がD-020の挙動と一致しているか。
+8. 設定の検証: 非有限値・範囲外・不明なタイプ名の扱い。UIスレッドだけがatomicを書いているか。
+9. EQの境界値: 44.1k/96kでの周波数の丸め、Q=10やナイキスト付近での安定性、補間中のタイプ変更。
+10. CMake: Cターゲットに`/MT`がかかっているか（dumpbin）。モデルのハッシュを固定したか。FETCHCONTENT_SOURCE_DIR指定時にネットワークへ出ないか。READMEのライセンス記載。
+11. UI: ミントの規則（バイパス中もマイク処理はミントのまま）。Tab順とスクリーンリーダーの題名。内訳行のはみ出し（スクリーンショットで確認）。マイク処理ウィンドウの初期フォーカスがスイッチではないこと。
