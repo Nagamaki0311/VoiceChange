@@ -649,4 +649,72 @@ inline double bandPowerDb (const std::vector<double>& avgMag, double sampleRate,
 }
 
 
+// ===== SECTION: ゲート・インパクト抑制用の合成信号（docs/plan.md 8.3 T-011） =====
+
+// bufのstartから、makeSpeechLikeVowel（f0、ピークamp）に包絡を掛けて足す。
+// 包絡: attackMsの二乗余弦の立ち上がり → sustainMsの間一定 → 時定数decayTauMsの指数減衰（decayMs続く。0なら減衰なし）。
+// 立ち上がりが10msの母音（D-017の10msアタックに近い）や、150msの指数減衰の語尾を作る。
+inline void addEnvelopedVowel (std::vector<float>& buf, int start, double f0Hz, double sampleRate, float amp,
+                               double attackMs, double sustainMs, double decayTauMs = 0.0, double decayMs = 0.0)
+{
+    const int attack = (int) std::lround (attackMs * 1.0e-3 * sampleRate);
+    const int sustain = (int) std::lround (sustainMs * 1.0e-3 * sampleRate);
+    const int decay = (int) std::lround (decayMs * 1.0e-3 * sampleRate);
+    const int len = attack + sustain + decay;
+    const auto vowel = makeSpeechLikeVowel (f0Hz, sampleRate, len, amp);
+
+    for (int i = 0; i < len && start + i < (int) buf.size(); ++i)
+    {
+        double env = 1.0;
+
+        if (i < attack)
+            env = 0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * (double) i / (double) attack); // D-017・E9と同じ二乗余弦のアタック
+        else if (i >= attack + sustain)
+            env = std::exp (-(double) (i - attack - sustain) / (decayTauMs * 1.0e-3 * sampleRate));
+
+        buf[(size_t) (start + i)] += (float) ((double) vowel[(size_t) i] * env);
+    }
+}
+
+// 合成の破裂音: lenMsの一様乱数の雑音バースト（ピークpeak）。両端の0.5msは直線でならす。
+inline void addNoiseBurst (std::vector<float>& buf, int start, double sampleRate, double lenMs, float peak, int seed = 55)
+{
+    const int len = (int) std::lround (lenMs * 1.0e-3 * sampleRate);
+    const int edge = std::max (1, (int) std::lround (0.5e-3 * sampleRate));
+    juce::Random rng (seed);
+
+    for (int i = 0; i < len && start + i < (int) buf.size(); ++i)
+    {
+        const double w = std::min ({ 1.0, (double) (i + 1) / (double) edge, (double) (len - i) / (double) edge });
+        buf[(size_t) (start + i)] += (float) ((double) peak * w * (rng.nextFloat() * 2.0f - 1.0f));
+    }
+}
+
+// 発話onSeconds・無音offSecondsの繰り返し（N1）。発話の母音は区間ごとにf0を変える（120/150/100/180Hz）。立ち上がりは10ms、立ち下がりは時定数3msの指数減衰（20ms）。
+// isSpeechに、発話のサンプルを1、それ以外を0で返す。
+inline std::vector<float> makeSpeechAndPauses (int n, double sampleRate, double onSeconds, double offSeconds, float amp,
+                                                std::vector<char>* isSpeech = nullptr)
+{
+    std::vector<float> out ((size_t) n, 0.0f);
+
+    if (isSpeech != nullptr)
+        isSpeech->assign ((size_t) n, 0);
+
+    constexpr double f0s[] = { 120.0, 150.0, 100.0, 180.0 };
+    const int on = (int) std::lround (onSeconds * sampleRate);
+    const int off = (int) std::lround (offSeconds * sampleRate);
+    int seg = 0;
+
+    for (int pos = 0; pos < n; pos += on + off, ++seg)
+    {
+        addEnvelopedVowel (out, pos, f0s[seg % 4], sampleRate, amp, 10.0, onSeconds * 1000.0 - 30.0, 3.0, 20.0);
+
+        if (isSpeech != nullptr)
+            for (int i = 0; i < on && pos + i < n; ++i)
+                (*isSpeech)[(size_t) (pos + i)] = 1;
+    }
+
+    return out;
+}
+
 } // namespace vc::test
