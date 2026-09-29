@@ -1013,24 +1013,27 @@ private:
     // ----- N12相当（T-010時点の参考値。失敗判定なし） -----
     void runCpuReference()
     {
-        beginTest ("N12 (reference, T-010: mixing only): CPU cost of 10 s of 48 kHz audio at 480-sample blocks (never fails)");
+        beginTest ("N12 (reference, T-010: mixing only): CPU cost of 10 s of audio at 480-sample blocks (never fails)");
 
-        const int n = (int) (10.0 * kFs);
-        auto signal = vc::test::makeSpeechLikeVowel (140.0, kFs, n, 0.3f);
-        const auto pink = vc::test::makePinkNoise (n, 0.03f);
-        for (size_t i = 0; i < signal.size(); ++i)
-            signal[i] += pink[i];
+        struct Case { double fs; vc::Preset preset; };
 
-        for (const auto preset : { vc::Preset::Normal, vc::Preset::Talkbox, vc::Preset::Minion })
+        for (const Case c : { Case { kFs, vc::Preset::Normal }, Case { kFs, vc::Preset::Talkbox }, Case { kFs, vc::Preset::Minion },
+                              Case { 44100.0, vc::Preset::Normal } })
         {
+            const int n = (int) (10.0 * c.fs);
+            auto signal = vc::test::makeSpeechLikeVowel (140.0, c.fs, n, 0.3f);
+            const auto pink = vc::test::makePinkNoise (n, 0.03f);
+            for (size_t i = 0; i < signal.size(); ++i)
+                signal[i] += pink[i];
+
             double percent[2] = { 0.0, 0.0 };
             double maxBlockMs[2] = { 0.0, 0.0 };
 
             for (int nr = 0; nr < 2; ++nr)
             {
                 vc::Engine engine;
-                engine.prepare ({ kFs, 480 });
-                engine.params().preset.store ((int) preset);
+                engine.prepare ({ c.fs, 480 });
+                engine.params().preset.store ((int) c.preset);
                 engine.params().nrEnabled.store (nr == 1);
                 engine.params().nrBackground.store (0.7f);
 
@@ -1050,9 +1053,10 @@ private:
                 percent[nr] = 100.0 * totalMs / 10000.0;
             }
 
-            logMessage ("N12(ref) " + juce::String (vc::kPresets[(size_t) preset].id) + ": OFF " + juce::String (percent[0], 3)
-                        + " %, noise reduction ON (background 70 %) " + juce::String (percent[1], 3) + " % (increase "
-                        + juce::String (percent[1] - percent[0], 3) + " points), max block " + juce::String (maxBlockMs[1], 3) + " ms");
+            logMessage ("N12(ref) " + juce::String (c.fs, 0) + " Hz " + juce::String (vc::kPresets[(size_t) c.preset].id) + ": OFF "
+                        + juce::String (percent[0], 3) + " %, noise reduction ON (background 70 %) " + juce::String (percent[1], 3)
+                        + " % (increase " + juce::String (percent[1] - percent[0], 3) + " points), max block "
+                        + juce::String (maxBlockMs[1], 3) + " ms");
         }
     }
 };

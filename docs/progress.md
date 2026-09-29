@@ -19,6 +19,40 @@
 
 ---
 
+## 2026-09-29 T-010 NoiseReducer本体とEngineへの組み込み（混合まで）
+
+### 実施内容
+- src/core/MicProcessing.h/.cpp: `NoiseReducer`。入力FIFO→480サンプルごとにRNNoise（入力を32768倍、出力を1/32768倍）→出力FIFO（初期充填480）。48kHz以外は上げ側・下げ側の固定比`LagrangeInterpolator`（上げ: 速度比 fs/48000、下げ: 48000/fs。下げ側は1個ずつ出し、端数を次のフレームへ持ち越す）。原音はDサンプルの遅延線を通し、出力 = (1−d)・RNNoise + d・原音（d = (1−2s)²、s ≤ 50%。s > 50%はd = 0でゲートなし。dは`SmoothedValue`で50ms補間）。状態遷移はPitchShifterと同じ表（共通化せず）で、Priming→FadingInとFadingIn→Activeは**サンプル単位**で切り替える（ブロック長に依存させないためN11のビット一致に必要）。`process`は入力に非有限値があれば`false`を返し（バッファ・パイプラインは触れない）、Engineがそのブロックを無音にして全体をリセットする（RNNoiseは遅延の後で出力へ出すため、出力側の検査だと検出がD遅れる）。RNNoiseの`create`は初回の`prepare`だけ、`destroy`は`unique_ptr`のデリータ（デストラクタ）、音声スレッドでのリセットは`rnnoise_init`。
+- 遅延D（出力レートのサンプル）: 48kHz = 480 + 960 = 1440。48kHz以外 = P + round(960×fs/48000 + 2 + 2×fs/48000)、P = ceil(480×fs/48000) + 4（44.1kで1331、96kで2890）。
+- Engine: `processChunk`の`updateInputPeak`直後・バイパス判定の前に`noiseReducer.setTarget/process`。`resetMic()`を新設（`handleNonFinite`は`resetChain`と`resetMic`の両方）。バイパス解除は`resetChain`のみ。`getNoiseReducerLatencySamples()`を追加。Params.hに`nrEnabled`・`nrBackground`（初期0.7）・`nrImpact`（初期0。保持するだけでT-011で使う）。Engineは非有限の背景・インパクトを初期値として扱う。
+- AudioIO: `LatencyBreakdown::noiseMs`を追加して`totalMs`に含めた（W2の式は変えていない）。UIへの表示はT-013。
+- tests/TestSignals.h: `makeSyllables`（T-009のN0c用をレート対応にして移動）、`makeSpeechLikeVowel`（ビブラート±2%・5Hz、4Hzの抑揚、フォルマント730/1090/2440Hz）、`makePinkNoise`・`makeBrownNoise`・`addClick`・`normalizeRms`・`measureDelaySamples`（相互相関＋放物線補間）・`bandPowerDb`。
+- tests/MicTests.cpp: N3a・N4a・N6（＋状態ごとの報告値）・N7・N8・N9a・N10・N11、D-020のバイパス確認（バイパス中もノイズ除去が働く／解除でリセットしない／OFFならビット一致）、N3aの前提確認（雑音の減衰・背景0%は遅延した原音とビット一致）、N12相当のCPU参考値。
+- docs: spec.md・plan.md・D-025の「約20〜30ms」を「30ms（1440サンプル@48kHz）」に更新（事実の更新のみ。CPU目標3%は据え置き）。plan.md 8.2にD（48kHz以外）の式を追記。
+- T-009レビューの後追い修正（別コミット）: `restrict=__restrict`の削除、N0dの陽性対照（`rnnoise_create/destroy`）、plan.mdのN0c記述、progress.mdのT-009コミット欄、build.ymlのキャッシュキーのコメント。
+
+### 結果
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 9件（smoke・ring_buffer・ring_buffer_long・shifter・engine・effects・app_logic・mic・long_run）すべて成功（Linux、GCC 13.3、Release）。E1〜E10（E4aを含む）・LongRunは変更なしで通る。
+- N6（報告値 / 実測値[RNNoise経路] / 実測値[原音の遅延線、背景0%]。ブロック長480・128・441で同じ）: 48kHz 1440 / 1439.71 / 1440.00、44.1kHz 1331 / 1330.57 / 1331.00、96kHz 2890 / 2889.42 / 2890.00。閾値（±1）に対し最大差0.58。
+- N3a（閾値: レベル変化1.5dB、1/3オクターブ差3dB）: 48kHz・背景50%、f0 120Hz: −0.05dB・0.23dB、200Hz: 0.00dB・0.05dB。44.1kHzも同値。背景25%（遅延の整合の確認）でも0.18dB以下。
+- N4a（閾値: 基本波の減衰3dB、全体1.5dB）: f0 85/100/120Hz で基本波の変化 +0.05/+0.01/−0.01dB、全体 −0.04〜−0.05dB。
+- N9a（7シナリオ × 3位相 × 200Hz・210Hz）: 判定器の閾値に対する遷移区間の比は最大0.671（1.0未満で合格）。
+- N7: 48kHz・44.1kHzで確保0回（ON/OFFの全遷移、背景・インパクトの掃引［非有限値を含む］、バイパス、NaN注入によるリセット。glibc環境ではCのmallocも計数）。N8: Active・Active（バイパス中）・Priming・FadingInのNaN/Inf注入で、そのブロックが無音・フラグ・次のブロックで非ゼロへ復帰・以後有限・Activeへ復帰。N10・N11（48/44.1/96/88.2/32kHzで混在列・1サンプル刻みが480ブロックとビット一致、枯渇0回。Engine全体の一括処理［3×4096+17］とも一致）合格。
+- テスト自体の有効性: RNNoiseの固有遅延の定数を900にするとN6が、フェード長を1にするとN9aが不合格になることを確認した（元へ戻した）。
+- CPU参考値（N12相当、480ブロック・10秒、背景70%、Linux Xeon 2.1GHz。OFF→ON）: 48kHzノーマル 0.04→2.77%（増分2.7ポイント）、トークボックス 3.06→4.97%（+1.9）、ミニオン 1.53→4.61%（+3.1）、44.1kHzノーマル 0.04→2.87%（+2.8）。1ブロックの最大は0.84〜1.42ms。RNNoise単体は約2.5%なので、変換・混合の加算分は0.3ポイント程度。RNNoise単体でD-025の増分目標（3%）にほぼ達しており、ミニオンでは超える。
+- `grep -rnE "malloc|mutex|CriticalSection|DBG\(|Logger::" src/core` は該当なし。
+
+### 未解決事項
+- 合成母音（清音）とRNNoiseの相性: 清音の合成母音・正弦はRNNoiseがほぼ素通しにする（レベル変化0.05dB以下）ため、N3a・N4a・N9aは「RNNoiseが声を削る」ことに対する検出力が小さい（白色雑音は−80dB減衰するので処理自体は働いている）。実際の声での歪みは実録音と聴感で確認する（T-014・T-015）。
+- 増分CPUが3%を超えるケース（ミニオン+3.1、44.1kHzノーマル+2.8）がある。T-011のゲート・インパクト抑制・T-012のEQを足した後のN12・EQ9で確定する（`rnnoise_data_little.c`の選択肢はT-009の記録どおり）。
+- 48kHzより高いレートでは変換の間引き側にアンチエイリアスがない（Lagrange 1段。D-021の決定どおり。96kHzのN6・N11は通る）。声の帯域への影響は実機・実録音で確認する。
+- MSVCでのビルドと`/MT`の検査はCI（Manager）。
+
+### 次回開始位置
+- T-011（VAD連動ゲートとインパクト抑制。`src/core/MicProcessing.*`、`tests/MicTests.cpp`）。NoiseReducer::processFrameはVADの戻り値を捨てているので、ゲートで使う。`impactTarget`はT-011で使う。
+
+---
+
 ## 2026-09-29 T-009 RNNoiseの取り込み・N0a〜N0e・遅延とCPUの実測
 
 ### 実施内容

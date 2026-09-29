@@ -24,7 +24,7 @@
 | T-007 | システムトレイ常駐・デバイス切断時の処理・エラー表示・統計ログ | 中 | 完了 | developer | |
 | T-008 | 連続動作検証（オフライン模擬1時間）と実機テスト手順の整備 | 中 | 完了 | developer | 実機の1時間テストはユーザーが実施 |
 | T-009 | RNNoise取り込み（FetchContent・自前CMake・CI）とMSVC /MTビルド確認、遅延・CPUの実測 | 高 | 完了 | developer | MSVCで不可なら報告して停止。実測値でspecの遅延・CPUを更新（plan.md 8章） |
-| T-010 | NoiseReducer本体（フレーミング・48kHz変換・RNNoise・原音混合・状態遷移・遅延報告）とEngine組み込み | 高 | 未着手 | developer | マイク処理はバイパス対象外（D-020） |
+| T-010 | NoiseReducer本体（フレーミング・48kHz変換・RNNoise・原音混合・状態遷移・遅延報告）とEngine組み込み | 高 | レビュー中 | developer | マイク処理はバイパス対象外（D-020） |
 | T-011 | VAD連動ゲートとインパクト抑制、合成信号での客観指標 | 高 | 未着手 | developer | 閾値は暫定。外れたら緩めずに報告 |
 | T-012 | EQ（5バンド、ArrayCoefficients）とEngine組み込み、LongRun拡張 | 高 | 未着手 | developer | T-011と並行可（Engineの競合に注意） |
 | T-013 | 設定の保存・マイク処理ボタンとマイク処理ウィンドウ・内訳表示・統計ログ | 中 | 未着手 | designer / developer | design.md 10章をDesignerが確定してから |
