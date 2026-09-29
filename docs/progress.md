@@ -56,7 +56,8 @@
 - T-012（EQ。`src/core/MicProcessing.*`、`src/core/Params.h`、`src/core/Engine.*`、`tests/MicTests.cpp`、`tests/LongRunTests.cpp`）。T-011のレビュー承認と、N5b（立ち上がり）・ゲートの閉じる条件のManager判断の後。
 
 ### コミット
-- （最後に実際のハッシュを記入する）
+- `aa262bb` T-011: VAD連動ゲートとインパクト抑制をNoiseReducerに追加、N1/N2/N3b/N4b/N5a/N5bを追加
+- `1ad7a0a` T-011: N7/N9b/N12とゲート・インパクトの追加テスト、README・spec・progressを更新
 
 ## 2026-09-29 T-010 レビュー修正（Medium-1・Low-1〜3・Nit）
 
