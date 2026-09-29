@@ -14,8 +14,11 @@ namespace
 constexpr double kNativeRate = 48000.0;
 constexpr int kFrame = 480;            // RNNoiseの1フレーム（48kHzで10ms）
 constexpr int kRnnoiseDelay = 960;     // RNNoise固有の遅延（サンプル@48kHz）。T-009のN0cの実測値
+// 同じ遅延の相互相関による実測（放物線補間）は959.71。整数に丸めた誤差はレート比に比例して大きくなる（192kHzで1サンプル超）
+// ため、48kHz以外ではこちらを出力レートへ換算する。
+constexpr double kRnnoiseDelayMeasured = 959.7;
 constexpr int kInterpLatency = 2;      // juce::LagrangeInterpolatorのアルゴリズム遅延（入力側のサンプル数）
-constexpr int kPrefillMargin = 4;      // 48kHz以外の出力FIFOの初期充填の余裕（枯渇しない上限に対する余り）
+constexpr int kPrefillMargin = 4;      // 48kHz以外の出力FIFOの初期充填の余裕。これに 2×ceil(fs/48000) を足す（下げ側の持ち越し［最大 downNeed 個の48kHzサンプル = downNeed×fs/48000 サンプル］がレート比に比例するため）
 constexpr double kFadeSeconds = 0.020;
 constexpr double kMixRampSeconds = 0.050;
 constexpr float kInt16Scale = 32768.0f;
@@ -63,8 +66,8 @@ void NoiseReducer::prepare (double newSampleRate, int newMaxBlockSamples)
     }
     else
     {
-        prefill = (int) std::ceil (kFrame * ratio) + kPrefillMargin;
-        delaySamples = prefill + (int) std::lround (kRnnoiseDelay * ratio + kInterpLatency + kInterpLatency * ratio);
+        prefill = (int) std::ceil (kFrame * ratio) + kPrefillMargin + 2 * (int) std::ceil (ratio);
+        delaySamples = prefill + (int) std::lround (kRnnoiseDelayMeasured * ratio + kInterpLatency + kInterpLatency * ratio);
     }
 
     const int downOutCapacity = (int) std::ceil ((kFrame + downNeed) / downRatio) + 4;

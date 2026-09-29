@@ -455,10 +455,9 @@ const char* eqTypeId (EqType) noexcept;  EqType eqTypeFromId (const juce::String
 // MicProcessing.h
 class NoiseReducer {
 public:
-    ~NoiseReducer();                                   // rnnoise_destroy
-    void prepare (double fs, int maxBlock);            // メッセージスレッド。初回はrnnoise_create、以後はrnnoise_init。FIFO・遅延線・補間器を確保
+    void prepare (double fs, int maxBlock);            // メッセージスレッド。初回はrnnoise_create、以後はrnnoise_init。FIFO・遅延線・補間器を確保。rnnoise_destroyは、unique_ptrのデリータ（デストラクタ）
     void setTarget (bool run, float background, float impact) noexcept;
-    void process (float* buf, int n) noexcept;         // その場で処理、n ≤ maxBlock。Restingなら何もしない
+    bool process (float* buf, int n) noexcept;         // その場で処理、n ≤ maxBlock。Restingなら何もしない。入力に非有限値があればfalse（bufとパイプラインは触れない。呼び出し側がreset()）
     void reset() noexcept;                             // → Resting。rnnoise_init、FIFO・遅延線・包絡を消去（確保なし）
     int  getLatencySamples() const noexcept;           // FadingIn/Active/FadingOutでD、それ以外は0（PitchShifterと同じ規則）
 };
@@ -472,7 +471,7 @@ public:
 ```
 
 - NoiseReducerの状態遷移は2.5節PitchShifterの表と同じ（Priming完了条件は「送り込み量 ≥ D」）。共通化はしない（同じ表の2か所目。3か所目が出たら検討する）。
-- D（ノイズ除去の遅延）は、48kHzでは480 + RNNoise固有の遅延（T-009の実測960。D = 1440）。48kHz以外では出力レートへ換算し、補間器の遅延を加えて整数に丸める（実装: 出力FIFOの初期充填P = ceil(480×fs/48000) + 4、D = P + round(960×fs/48000 + 2 + 2×fs/48000)。44.1kで1331、96kで2890）。原音側の遅延線も同じDを使う。
+- D（ノイズ除去の遅延）は、48kHzでは480 + RNNoise固有の遅延（T-009の実測960。D = 1440）。48kHz以外では出力レートへ換算し、補間器の遅延を加えて整数に丸める（実装: 出力FIFOの初期充填P = ceil(480×fs/48000) + 4 + 2×ceil(fs/48000)、D = P + round(959.7×fs/48000 + 2 + 2×fs/48000)。余裕はレート比に比例させる（下げ側の端数の持ち越しがレート比に比例するため。192kのblock 1/2/7で枯渇した）。959.7はRNNoise固有遅延の実測値［放物線補間］で、960に丸めると192kで1サンプル超ずれる。44.1kで1333、96kで2893、192kで5781）。原音側の遅延線も同じDを使う。
 - 48kHz以外: 入力FIFO（出力レート）→ 上げ用のLagrange（速度比 = fs/48000）で480サンプルを作る → RNNoise → 下げ用のLagrange（速度比 = 48000/fs）→ 出力FIFO。出力FIFOは初期充填（ceil(480×fs/48000) + 余裕）を持ち、どんなブロック列でも枯れないこと（テストN11）。
 - RNNoiseの計算はフレームがそろったコールバックに集中する。小さいバッファでは、そのコールバックだけ処理時間が伸びる（CPU表示は平滑化されるため影響は小さい）。
 

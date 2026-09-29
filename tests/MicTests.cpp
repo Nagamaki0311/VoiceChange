@@ -358,8 +358,10 @@ public:
         runN6States();
         runN7();
         runN8();
+        runN8Huge();
         runN9a();
         runN10();
+        runReOnMatchesFresh();
         runN11();
         runN3a();
         runN3aControls();
@@ -374,9 +376,9 @@ private:
     // 原音の遅延線の経路（背景0%: d = 1）の両方を測る（後者はD丁度、前者はRNNoise・変換の遅延を含む）。
     void runN6()
     {
-        beginTest ("N6: reported latency equals measured delay (+-1 sample) at 48k/44.1k/96k, for several block sizes");
+        beginTest ("N6: reported latency equals measured delay (+-1 sample) at 48k/44.1k/96k/192k, for several block sizes");
 
-        for (const double fs : { 48000.0, 44100.0, 96000.0 })
+        for (const double fs : { 48000.0, 44100.0, 96000.0, 192000.0 })
         {
             const int n = (int) (3.0 * fs);
             auto in = vc::test::makeSyllables (n, fs);
@@ -610,6 +612,8 @@ private:
 
             expect (silenced, juce::String (c.name) + ": the block was not silenced");
             expect ((engine.getErrorFlags() & 0x1u) != 0, juce::String (c.name) + ": bit0 not set");
+            // 非有限値の検出でマイク処理もリセットされる（D-020）: Restingへ戻り、報告遅延が0になる。
+            expectEquals (engine.getNoiseReducerLatencySamples(), 0, juce::String (c.name) + ": noise reduction was not reset");
             engine.clearErrorFlags();
 
             int firstNonZeroBlocks = -1;
@@ -630,6 +634,61 @@ private:
                     juce::String (c.name) + ": non-finite output after recovery");
             expect (engine.getErrorFlags() == 0, juce::String (c.name) + ": a further error was flagged after recovery");
             expectEquals (engine.getNoiseReducerLatencySamples(), kNativeD, juce::String (c.name) + ": did not return to Active");
+        }
+    }
+
+    // Active中に「有限だが巨大な値」（1e35。RNNoiseの入力の32768倍でinfになり、内部状態がNaNになる）が入るケース。
+    // 入力の検査は通り、RNNoiseの出力側で遅れて検出される。マイク処理をリセットしないと、NaNの状態が残って
+    // 以後のフレームが毎回非有限になる。合格条件: 無音は数ブロックだけ、フラグは1回、以後有限、Activeへ復帰。
+    void runN8Huge()
+    {
+        beginTest ("N8: a finite huge value (1e35) during Active poisons RNNoise: silenced for a few blocks only, one error, recovers to Active");
+
+        constexpr int block = 480;
+        const int n = (int) (6.0 * kFs);
+        const auto signal = vc::test::makeSpeechLikeVowel (140.0, kFs, n, 0.3f);
+
+        for (const bool bypass : { false, true })
+        {
+            const juce::String label = bypass ? "bypass" : "chain";
+            vc::Engine engine;
+            engine.prepare ({ kFs, 512 });
+            engine.params().enabled.store (! bypass);
+            engine.params().nrEnabled.store (true);
+
+            auto data = signal;
+            int pos = 0;
+
+            for (int b = 0; b < 100; ++b, pos += block)
+                engine.process (data.data() + pos, block);
+
+            expectEquals (engine.getNoiseReducerLatencySamples(), kNativeD, label + ": not Active before the injection");
+            engine.clearErrorFlags();
+
+            data[(size_t) pos + 10] = 1.0e35f;
+            int flaggedBlocks = 0;
+            int silentBlocks = 0;
+            bool allOutputFinite = true;
+
+            for (int b = 0; pos + block <= n; ++b, pos += block)
+            {
+                engine.process (data.data() + pos, block);
+                allOutputFinite = allOutputFinite && vc::test::allFinite (data.data() + pos, block);
+
+                if (b > 0 && vc::test::peakAbs (data.data() + pos, block) <= 0.0)
+                    ++silentBlocks;
+
+                if (engine.getErrorFlags() != 0)
+                    ++flaggedBlocks;
+
+                engine.clearErrorFlags();
+            }
+
+            logMessage ("N8 huge (" + label + "): flagged blocks " + juce::String (flaggedBlocks) + ", silent blocks " + juce::String (silentBlocks));
+            expect (allOutputFinite, label + ": non-finite output");
+            expectEquals (flaggedBlocks, 1, label + ": the error must be flagged exactly once");
+            expect (silentBlocks >= 1 && silentBlocks <= 4, label + ": silent blocks " + juce::String (silentBlocks));
+            expectEquals (engine.getNoiseReducerLatencySamples(), kNativeD, label + ": did not return to Active");
         }
     }
 
@@ -797,13 +856,56 @@ private:
         checkIdentical (20, "not bit-identical after an aborted Priming");
     }
 
+    // ON→OFF（Restingまで）→ONの出力が、新しいインスタンスの初回ONと一致する（Resting→Primingでパイプラインを消去する）。
+    void runReOnMatchesFresh()
+    {
+        beginTest ("N10b: ON -> OFF (to Resting) -> ON gives the same output as a fresh instance's first ON");
+
+        for (const double fs : { 48000.0, 44100.0 })
+        {
+            const int n = (int) (1.0 * fs);
+            auto first = vc::test::makeSpeechLikeVowel (170.0, fs, n, 0.3f);
+            auto second = vc::test::makeSpeechLikeVowel (110.0, fs, n, 0.3f);
+            const auto pink = vc::test::makePinkNoise (n, 0.05f, 7);
+            for (size_t i = 0; i < second.size(); ++i)
+                second[i] += pink[i];
+
+            const auto run = [&] (vc::NoiseReducer& nr, std::vector<float>& data, bool on)
+            {
+                for (int pos = 0; pos < (int) data.size(); pos += 480)
+                {
+                    nr.setTarget (on, 0.3f, 0.0f);
+                    nr.process (data.data() + pos, std::min (480, (int) data.size() - pos));
+                }
+            };
+
+            vc::NoiseReducer reused;
+            reused.prepare (fs, 4096);
+            run (reused, first, true);
+            auto tail = vc::test::makeSpeechLikeVowel (90.0, fs, (int) (0.2 * fs), 0.3f);
+            run (reused, tail, false); // FadingOut → Resting
+            expectEquals (reused.getLatencySamples(), 0);
+
+            vc::NoiseReducer fresh;
+            fresh.prepare (fs, 4096);
+
+            auto outReused = second;
+            auto outFresh = second;
+            run (reused, outReused, true);
+            run (fresh, outFresh, true);
+
+            expect (std::memcmp (outReused.data(), outFresh.data(), sizeof (float) * (size_t) n) == 0,
+                    juce::String (fs, 0) + " Hz: the second ON differs from a fresh instance (pipeline not cleared)");
+        }
+    }
+
     // ----- N11: 分割処理 -----
     void runN11()
     {
         beginTest ("N11: mixed block lengths give bit-identical output to one-shot processing; no output FIFO underflow");
 
         // (a) NoiseReducer単体: 混在列（1, 7, 128, 441, 480, 4096）と、480ごとの処理が一致。複数のレートで枯渇0回。
-        for (const double fs : { 48000.0, 44100.0, 96000.0, 88200.0, 32000.0 })
+        for (const double fs : { 48000.0, 44100.0, 96000.0, 88200.0, 32000.0, 192000.0, 384000.0 })
         {
             const int n = (int) (1.5 * fs);
             auto signal = vc::test::makeSpeechLikeVowel (140.0, fs, n, 0.3f);
@@ -840,6 +942,16 @@ private:
             expect (std::memcmp (mixed.data(), ref.data(), sizeof (float) * (size_t) n) == 0, label + ": mixed blocks differ from 480-blocks");
             expect (std::memcmp (oneSample.data(), ref.data(), sizeof (float) * (size_t) n) == 0, label + ": 1-sample blocks differ from 480-blocks");
             expectEquals (underMixed + underRef + underOne, 0, label + ": output FIFO underflow");
+
+            // 端数の多いブロック長でも枯れず、結果が変わらない（高いレートでは端数の持ち越しが大きい）。
+            for (const int oddBlock : { 2, 7, 333, 1000 })
+            {
+                int underOdd = 0;
+                const auto odd = runSequence ({ oddBlock }, &underOdd);
+                expectEquals (underOdd, 0, label + ": output FIFO underflow with block " + juce::String (oddBlock));
+                expect (std::memcmp (odd.data(), ref.data(), sizeof (float) * (size_t) n) == 0,
+                        label + ": block " + juce::String (oddBlock) + " differs from 480-blocks");
+            }
             expect (vc::test::allFinite (ref.data(), n), label + ": non-finite output");
         }
 
