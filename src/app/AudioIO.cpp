@@ -514,11 +514,15 @@ LatencyBreakdown AudioIO::getLatency() const noexcept
 
     b.ringBufferMs = fifo.getLatencyMs();
 
+    b.noiseMs = outputInfo.rate > 0.0
+        ? (double) engine.getNoiseReducerLatencySamples() / outputInfo.rate * 1000.0
+        : 0.0;
+
     b.shifterMs = outputInfo.rate > 0.0
         ? (double) engine.getShifterLatencySamples() / outputInfo.rate * 1000.0
         : 0.0;
 
-    b.totalMs = b.deviceInMs + b.deviceOutMs + b.ringBufferMs + b.shifterMs;
+    b.totalMs = b.deviceInMs + b.deviceOutMs + b.ringBufferMs + b.noiseMs + b.shifterMs;
 
     return b;
 }

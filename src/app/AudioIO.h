@@ -52,6 +52,7 @@ struct LatencyBreakdown
     double deviceInMs = 0.0;
     double deviceOutMs = 0.0;
     double ringBufferMs = 0.0;
+    double noiseMs = 0.0;   // ノイズ除去が稼働中のみ非0（D-025。50ms目標＝W2の判定には含めない）
     double shifterMs = 0.0; // ピッチシフター稼働中のみ非0（休止中は0。D-002）
     double totalMs = 0.0;
 };
