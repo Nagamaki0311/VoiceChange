@@ -30,7 +30,9 @@ constexpr float kGateMaxAttenuationDb = 18.0f;
 constexpr float kGateOpenVad = 0.6f;
 constexpr float kGateCloseVad = 0.3f;
 constexpr double kGateOpenPower = 15.848931924611133;  // 12dB（パワー比）
-constexpr double kGateClosePower = 3.9810717055349722; // 6dB
+// ゲートを閉じる側の余裕（雑音床+8dB。パワー比）。開く側（+12dB）との間に4dBのヒステリシスを持つ。
+// 当初の+6dBは、ピンク雑音のように10ms窓のパワーが揺れる雑音で閉じにくかった（T-011の実測）。
+constexpr double kGateClosePower = 6.3095734448019325;
 constexpr double kGateRmsWindowSeconds = 0.010;
 constexpr double kGateHoldSeconds = 0.200;
 constexpr double kGateOpenSeconds = 0.005;
@@ -49,7 +51,8 @@ constexpr double kImpactFastReleaseSeconds = 0.002;
 constexpr double kImpactSlowAttackSeconds = 0.020;
 constexpr double kImpactSlowReleaseSeconds = 0.200;
 constexpr double kImpactAttackSeconds = 0.001;
-constexpr double kImpactHoldSeconds = 0.015;
+// 当初の15msは、立ち上がり10msの母音の最初の数msを検出したときに母音がピークに達する頃まで減衰が続き、N5bが閾値を外れた（T-011の実測）。
+constexpr double kImpactHoldSeconds = 0.003;
 constexpr double kImpactReleaseSeconds = 0.010;
 constexpr float kImpactThresholdBaseDb = 30.0f;
 constexpr float kImpactThresholdSlopeDb = 18.0f;

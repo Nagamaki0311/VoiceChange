@@ -1404,7 +1404,7 @@ private:
                                                          / energyOf (ungated.data() + s + kNativeD, (int) (0.05 * kFs))));
         }
 
-        // 無音区間（発話の終わりの0.3秒後〜次の発話の冒頭）。ホールド200msと雑音床+6dB未満の条件があり、ピンク雑音は短時間RMSの揺れが大きく、
+        // 無音区間（発話の終わりの0.3秒後〜次の発話の冒頭）。ホールド200msと雑音床+8dB未満の条件があり、ピンク雑音は短時間RMSの揺れが大きく、
         // 閉じるまでに1秒前後かかるため、閉じたサンプルが1割以上あることだけを見る（ゲートが全く閉じない不具合の検出用）。
         int closedInPauses = 0, pauseSamples = 0;
 
@@ -1637,12 +1637,12 @@ private:
     }
 
     // ----- ゲートの開閉条件（原音のRMS） -----
-    // 白色雑音（-60dBFS）を4秒（ゲートが閉じる）→ 白色雑音のバースト0.3秒（-30dBFS、床+30dB。非発話なのでVADは上がらない）→ 白色雑音-52dBFS（床+8dB）を2秒。
+    // 白色雑音（-60dBFS）を4秒（ゲートが閉じる）→ 白色雑音のバースト0.3秒（-30dBFS、床+30dB。非発話なのでVADは上がらない）→ 白色雑音-50dBFS（床+10dB）を2秒。
     // (1) バースト（到着から20ms後〜終わり）でゲートが開いている（VADが上がらなくても、RMSが床より12dB以上大きければ開く）。
-    // (2) その後、雑音が床+8dB（+6dBと+12dBの間）のあいだは開いたまま（閉じる条件は「床+6dB未満」なので、+8dBでは閉じない）。
+    // (2) その後、雑音が床+10dB（閉じる側の+8dBと開く側の+12dBの間）のあいだは開いたまま（閉じる条件は「床+8dB未満」なので、+10dBでは閉じない）。
     void runGateRmsConditions()
     {
-        beginTest ("Gate RMS conditions: opens on a loud non-speech burst (RMS >= floor + 12 dB) and stays open while the noise is floor + 8 dB (> floor + 6 dB)");
+        beginTest ("Gate RMS conditions: opens on a loud non-speech burst (RMS >= floor + 12 dB) and stays open while the noise is floor + 10 dB (> floor + 8 dB)");
 
         const int n = (int) (6.3 * kFs);
         auto in = makeWhiteNoise (n, (float) (std::pow (10.0, -60.0 / 20.0) * std::sqrt (3.0)), 23);
@@ -1650,7 +1650,7 @@ private:
         const int burstLen = (int) (0.3 * kFs);
 
         {
-            const auto loud = makeWhiteNoise (n, (float) (std::pow (10.0, -52.0 / 20.0) * std::sqrt (3.0)), 29);
+            const auto loud = makeWhiteNoise (n, (float) (std::pow (10.0, -50.0 / 20.0) * std::sqrt (3.0)), 29);
             const auto tone = makeWhiteNoise (burstLen, (float) (std::pow (10.0, -30.0 / 20.0) * std::sqrt (3.0)), 31); // 非発話の広帯域雑音のバースト（RNNoiseはVADを上げない）
 
             for (int i = burstStart + burstLen; i < n; ++i)
@@ -1688,10 +1688,10 @@ private:
         const int closedAfterBurst = nr.getGateClosedSampleCount() - closedAt[4]; // バースト終了0.1秒後〜
 
         logMessage ("Gate RMS conditions: closed samples in the 0.5 s before the burst " + juce::String (closedBeforeBurst) + ", in the burst (after 20 ms) "
-                    + juce::String (closedInBurst) + ", after the burst (floor + 8 dB noise, from 0.1 s) " + juce::String (closedAfterBurst));
+                    + juce::String (closedInBurst) + ", after the burst (floor + 10 dB noise, from 0.1 s) " + juce::String (closedAfterBurst));
         expect (closedBeforeBurst > (int) (0.25 * kFs), "control: the gate was not closed in the noise before the burst");
         expectEquals (closedInBurst, 0, "the gate did not open on a loud non-speech burst");
-        expectEquals (closedAfterBurst, 0, "the gate closed while the noise was only floor + 8 dB");
+        expectEquals (closedAfterBurst, 0, "the gate closed while the noise was only floor + 10 dB");
     }
 
     // ----- N2（ゲートの効果）: 発話の後の無音で、背景100%の残留雑音が50%（RNNoiseのみ）より小さい -----
@@ -1898,7 +1898,7 @@ private:
                     {
                         const double db = dbOf (energyOf (on.data() + t + kNativeD, vowelLen) / energyOf (off.data() + t + kNativeD, vowelLen));
                         worst = std::min (worst, db);
-                        line << " " << juce::String (db, 2);
+                        line << " " << juce::String (db, 3);
                     }
 
                     const juce::String label = juce::String (kind == 1 ? "plosive + vowel" : "vowel onset") + ", f0 " + juce::String (f0, 0)
@@ -1973,7 +1973,7 @@ private:
             expectEquals (sameFrom (out, delayed, kNativeD + (int) (0.1 * kFs)), -1, "background 0 %, impact 0 %: not the delayed input");
         }
 
-        // (c) 背景70%（ゲートが働く）。0〜2.5秒だけインパクト100%、その後0%。2.5秒 + 平滑化50ms + ホールド15ms + リリース10ms + 余裕の後は一致する。
+        // (c) 背景70%（ゲートが働く）。0〜2.5秒だけインパクト100%、その後0%。2.5秒 + 平滑化50ms + ホールド3ms + リリース10ms + 余裕の後は一致する。
         {
             vc::NoiseReducer always0, switched;
             always0.prepare (kFs, 4096);
