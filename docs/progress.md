@@ -19,6 +19,25 @@
 
 ---
 
+## 2026-09-29 T-010 レビュー修正（Medium-1・Low-1〜3・Nit）
+
+### 実施内容
+- N8（tests/MicTests.cpp）: NaN/Inf注入の直後に`getNoiseReducerLatencySamples() == 0`（マイク処理がリセットされRestingへ戻ったこと）を全ケースで確認。Active中の有限の巨大値（1e35。×32768でinfになりRNNoiseの内部状態がNaNになる）のケースを、バイパスON/OFFで追加（無音は1〜4ブロック、フラグは1回、以後有限、Active＝遅延Dへ復帰）。
+- Low-1: 出力FIFOの初期充填の余裕を`kPrefillMargin + 2×ceil(fs/48000)`に（192kHzのblock 1/2/7、384kHzで枯渇していた。下げ側の端数の持ち越しがレート比に比例するため）。この結果、48kHz以外のDが変わった（44.1kで1331→1333、96kで2890→2893、192kで5781。48kHzは1440のまま）。192kHzのN6で実測との差が1サンプルを超えた（RNNoise固有遅延を960に丸めた誤差がレート比に比例）ため、48kHz以外ではRNNoise固有遅延の実測959.7を換算して使う。N11のレート一覧に192k・384kと、端数のブロック長（2/7/333/1000）を追加。N6に192kを追加。
+- Low-2: N10b（ON→OFF［Restingまで］→ONの出力が、新しいインスタンスの初回ONとビット一致。48k・44.1k）を追加。
+- Low-3・Nit: D-021の影響欄に往復Lagrangeの減衰の実測（レビュー提供値）と、空気感の帯域はT-014/T-015で確認する旨を追記。plan.md 8.2の公開インターフェース（`bool process`、デストラクタはunique_ptrのデリータ）、Dの式、spec.md「異常値」（入力側の検出）とDの記述を実装に合わせた。
+
+### 結果
+- 変異テスト（いずれも元に戻した）:
+  - `Engine::handleNonFinite`から`resetMic()`を外す → N8の5ケース（Active NaN/Inf、バイパスのNaN/Inf、FadingIn Inf）が「reset されていない（遅延1440）」で、N8の巨大値ケース（chain・bypass）が「フラグ499回・無音499ブロック」で不合格。Engine（E1〜E10）は合格のまま（E5等はマイク処理OFFのため）。
+  - `Resting→Priming`の`clearPipeline()`を外す → N10b（48k・44.1k）が不合格。
+  - 余裕を4に戻す（修正前）→ N11の192k・384kが枯渇（2回・5回）と不一致で不合格（修正前に確認）。
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 9件すべて成功。
+- N6（報告値 / 実測RNNoise経路 / 実測遅延線経路）: 44.1kHz 1333 / 1332.57 / 1333.00、96kHz 2893 / 2893.42 / 2893.00、192kHz 5781 / 5780.84 / 5781.00（48kHzは変わらず1440 / 1439.71 / 1440.00）。
+
+### 次回開始位置
+- T-011（VAD連動ゲートとインパクト抑制）。T-010のレビュー承認後。
+
 ## 2026-09-29 T-010 NoiseReducer本体とEngineへの組み込み（混合まで）
 
 ### 実施内容
