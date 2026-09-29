@@ -48,7 +48,7 @@
 
 ### コミット
 - `22ab227` T-009: RNNoise v0.2の取り込み・N0a〜N0e・Cのmalloc計数
-- 続けてdocs（progress.md・tasks.md）のコミット
+- `3fa93d6` docs: T-009の作業履歴と状態（レビュー中）
 
 ---
 
