@@ -72,6 +72,9 @@ public:
     // ゲートが閉じている状態で処理したサンプルの累計（reset・パイプライン消去で0に戻る）。テスト用（N3b）。
     int getGateClosedSampleCount() const noexcept { return gate.closedSamples; }
 
+    // インパクト抑制が減衰していた（ゲイン < 1）サンプルの累計（同上）。テスト用。
+    int getImpactAttenuatedSampleCount() const noexcept { return impact.attenuatedSamples; }
+
 private:
     enum class State
     {
@@ -199,6 +202,8 @@ private:
         void setTarget (float impact, bool immediate) noexcept;
         // valid: 先読み位置に有効な原音が来て以降。gateOpen: 検出した時点のゲートの状態。戻り値はゲイン（1 = 減衰なし）。
         float process (float tap, bool gateOpen, bool valid) noexcept;
+
+        int attenuatedSamples = 0; // テスト用の累計
 
     private:
         juce::SmoothedValue<float> depthGain; // 減衰量24・s_i[dB]のゲイン（1〜約0.063）。50ms

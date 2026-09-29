@@ -297,6 +297,37 @@ std::vector<float> runNoiseReducer (double fs, const std::vector<float>& in, flo
     return out;
 }
 
+// ----- ゲート・インパクト抑制のテストと共有する小さな測定関数 -----
+
+double energyOf (const float* a, int n)
+{
+    double e = 0.0;
+
+    for (int i = 0; i < n; ++i)
+        e += (double) a[i] * (double) a[i];
+
+    return e;
+}
+
+double dbOf (double powerRatio)
+{
+    return 10.0 * std::log10 (std::max (powerRatio, 1.0e-30));
+}
+
+void addPink (std::vector<float>& signal, float rmsLevel, int seed = 1)
+{
+    const auto pink = vc::test::makePinkNoise ((int) signal.size(), rmsLevel, seed);
+
+    for (size_t i = 0; i < signal.size(); ++i)
+        signal[i] += pink[i];
+}
+
+// inの[from, from + len)と、Dだけ遅れた出力の同じ区間のエネルギーの比[dB]（out/in）。
+double energyChangeDb (const std::vector<float>& in, const std::vector<float>& out, int from, int len, int delay = kNativeD)
+{
+    return dbOf (energyOf (out.data() + from + delay, len) / energyOf (in.data() + from, len));
+}
+
 constexpr double kThirdOctaveCenters[] = { 100, 125, 160, 200, 250, 315, 400, 500, 630, 800, 1000, 1250, 1600, 2000, 2500, 3150, 4000 };
 
 struct SpectrumComparison
@@ -360,6 +391,7 @@ public:
         runN8();
         runN8Huge();
         runN9a();
+        runN9a (1.0f, 1.0f);
         runN10();
         runReOnMatchesFresh();
         runN11();
@@ -700,6 +732,8 @@ private:
         std::function<void (vc::AtomicParams&)> apply;
     };
 
+    float scenarioImpact = 0.0f; // N9aのインパクト（T-011でゲート・インパクトを含めて再実行するため）
+
     std::vector<float> runScenario (bool nrInitiallyOn, float bgInitial, std::vector<Step> steps, int total,
                                     const std::vector<float>& signal, int blockSize = 480)
     {
@@ -707,6 +741,7 @@ private:
         engine.prepare ({ kFs, 1024 });
         engine.params().nrEnabled.store (nrInitiallyOn);
         engine.params().nrBackground.store (bgInitial);
+        engine.params().nrImpact.store (scenarioImpact);
 
         std::sort (steps.begin(), steps.end(), [] (const Step& a, const Step& b) { return a.atSample < b.atSample; });
 
@@ -731,9 +766,12 @@ private:
         return out;
     }
 
-    void runN9a()
+    // nominalBg: 通常のシナリオの背景ノイズ（0.7ならゲートは働く方向、1.0なら最大）。impact: インパクト抑制（T-011）。
+    void runN9a (float nominalBg = 0.7f, float impact = 0.0f)
     {
-        beginTest ("N9a: no clicks when noise reduction is switched (OFF/ON, abort in Priming, reversal in FadingIn/FadingOut, background 0 <-> 100 %)");
+        beginTest ("N9a: no clicks when noise reduction is switched (OFF/ON, abort in Priming, reversal in FadingIn/FadingOut, background 0 <-> 100 %)"
+                   + juce::String (impact > 0.0f ? " [with gate at background " + juce::String ((int) (nominalBg * 100)) + " % and impact " + juce::String ((int) (impact * 100)) + " %]" : ""));
+        scenarioImpact = impact;
 
         const int total = (int) (4.2 * kFs);
 
@@ -754,13 +792,13 @@ private:
         };
 
         const std::vector<Scenario> scenarios = {
-            { "OFF -> ON", false, 0.7f, [&] (int t) { return std::vector<Step> { { t, setOn (true) } }; } },
-            { "ON -> OFF", true, 0.7f, [&] (int t) { return std::vector<Step> { { t, setOn (false) } }; } },
-            { "abort in Priming", false, 0.7f,
+            { "OFF -> ON", false, nominalBg, [&] (int t) { return std::vector<Step> { { t, setOn (true) } }; } },
+            { "ON -> OFF", true, nominalBg, [&] (int t) { return std::vector<Step> { { t, setOn (false) } }; } },
+            { "abort in Priming", false, nominalBg,
               [&] (int t) { return std::vector<Step> { { t, setOn (true) }, { t + 700, setOn (false) } }; } },
-            { "reversal in FadingIn", false, 0.7f,
+            { "reversal in FadingIn", false, nominalBg,
               [&] (int t) { return std::vector<Step> { { t, setOn (true) }, { t + kNativeD + 400, setOn (false) } }; } },
-            { "reversal in FadingOut", true, 0.7f,
+            { "reversal in FadingOut", true, nominalBg,
               [&] (int t) { return std::vector<Step> { { t, setOn (false) }, { t + 400, setOn (true) } }; } },
             { "background 0 -> 100 %", true, 0.0f, [&] (int t) { return std::vector<Step> { { t, setBg (1.0f) } }; } },
             { "background 100 -> 0 %", true, 1.0f, [&] (int t) { return std::vector<Step> { { t, setBg (0.0f) } }; } },
@@ -905,13 +943,25 @@ private:
         beginTest ("N11: mixed block lengths give bit-identical output to one-shot processing; no output FIFO underflow");
 
         // (a) NoiseReducer単体: 混在列（1, 7, 128, 441, 480, 4096）と、480ごとの処理が一致。複数のレートで枯渇0回。
+        // 2通り: 背景30%・インパクト0%（混合のみ）と、背景100%・インパクト70%（ゲート・インパクト抑制。発話・無音・クリックの信号）。
+        for (const bool gateMode : { false, true })
         for (const double fs : { 48000.0, 44100.0, 96000.0, 88200.0, 32000.0, 192000.0, 384000.0 })
         {
-            const int n = (int) (1.5 * fs);
-            auto signal = vc::test::makeSpeechLikeVowel (140.0, fs, n, 0.3f);
-            const auto pink = vc::test::makePinkNoise (n, 0.03f);
+            if (gateMode && fs > 200000.0)
+                continue; // 384kHzは処理が重いので、ゲートの経路はここまで
+
+            const int n = (int) ((gateMode ? 3.0 : 1.5) * fs);
+            auto signal = gateMode ? vc::test::makeSpeechAndPauses (n, fs, 0.4, 0.6, 0.3f) : vc::test::makeSpeechLikeVowel (140.0, fs, n, 0.3f);
+            // ゲートモードは定常な白色雑音（ピンク雑音は短時間RMSが揺れて、ゲートが閉じるまで時間がかかる）と大きめのクリック。
+            const auto noise = gateMode ? makeWhiteNoise (n, 0.005f, 91) : vc::test::makePinkNoise (n, 0.03f);
             for (size_t i = 0; i < signal.size(); ++i)
-                signal[i] += pink[i];
+                signal[i] += noise[i];
+
+            if (gateMode)
+                for (int k = 0; k < 5; ++k)
+                    vc::test::addClick (signal, (int) ((1.0 + 0.4 * k) * fs), fs, 3000.0, 1.0 + k % 2, 0.5f);
+
+            int gateClosed = 0, impactAttenuated = 0;
 
             const auto runSequence = [&] (const std::vector<int>& sizes, int* underflows)
             {
@@ -924,24 +974,35 @@ private:
                 while (pos < n)
                 {
                     const int len = std::min (sizes[k++ % sizes.size()], n - pos);
-                    nr.setTarget (true, 0.3f, 0.0f); // 背景30%（d = 0.16）: 遅延線の混合も通す
+                    nr.setTarget (true, gateMode ? 1.0f : 0.3f, gateMode ? 0.7f : 0.0f); // 背景30%（d = 0.16）: 遅延線の混合も通す
                     nr.process (out.data() + pos, len);
                     pos += len;
                 }
 
                 *underflows = nr.getUnderflowCount();
+                gateClosed = nr.getGateClosedSampleCount();
+                impactAttenuated = nr.getImpactAttenuatedSampleCount();
                 return out;
             };
 
             int underMixed = 0, underRef = 0, underOne = 0;
             const auto mixed = runSequence (std::vector<int> (std::begin (kMixedBlocks), std::end (kMixedBlocks)), &underMixed);
             const auto ref = runSequence ({ 480 }, &underRef);
+            const int refGateClosed = gateClosed, refImpactAttenuated = impactAttenuated;
             const auto oneSample = runSequence ({ 1 }, &underOne);
 
-            const juce::String label = juce::String (fs, 0) + " Hz";
+            const juce::String label = juce::String (fs, 0) + " Hz" + (gateMode ? " (gate/impact)" : "");
             expect (std::memcmp (mixed.data(), ref.data(), sizeof (float) * (size_t) n) == 0, label + ": mixed blocks differ from 480-blocks");
             expect (std::memcmp (oneSample.data(), ref.data(), sizeof (float) * (size_t) n) == 0, label + ": 1-sample blocks differ from 480-blocks");
             expectEquals (underMixed + underRef + underOne, 0, label + ": output FIFO underflow");
+
+            if (gateMode)
+            {
+                expect (refGateClosed > 0, label + ": control: the gate never closed");
+                expect (refImpactAttenuated > 0, label + ": control: the impact stage never attenuated");
+                expectEquals (gateClosed, refGateClosed, label + ": gate-closed sample count depends on the block length");
+                expectEquals (impactAttenuated, refImpactAttenuated, label + ": impact-attenuated sample count depends on the block length");
+            }
 
             // 端数の多いブロック長でも枯れず、結果が変わらない（高いレートでは端数の持ち越しが大きい）。
             for (const int oddBlock : { 2, 7, 333, 1000 })
@@ -955,19 +1016,28 @@ private:
             expect (vc::test::allFinite (ref.data(), n), label + ": non-finite output");
         }
 
-        // (b) Engine全体: n = 3 * maxBlock + 17 の一括処理（内部でmaxBlockごとに分割）と、混在列。44.1kも含む。
+        // (b) Engine全体: n = 3 * maxBlock + 17 の一括処理（内部でmaxBlockごとに分割）と、混在列。44.1kも含む。ゲート・インパクトあり（背景100%・インパクト70%）も。
+        for (const bool gateMode : { false, true })
         for (const double fs : { 48000.0, 44100.0 })
         {
             constexpr int maxBlock = 4096;
             const int n = 3 * maxBlock + 17;
             auto signal = vc::test::makeSpeechLikeVowel (140.0, fs, n, 0.3f);
 
+            if (gateMode)
+            {
+                signal = vc::test::makeSpeechAndPauses (n, fs, 0.06, 0.06, 0.3f);
+                addPink (signal, 0.01f, 5);
+                vc::test::addClick (signal, (int) (0.09 * fs), fs, 3000.0, 1.0, 0.2f);
+            }
+
             const auto runEngine = [&] (bool oneShot)
             {
                 vc::Engine engine;
                 engine.prepare ({ fs, maxBlock });
                 engine.params().nrEnabled.store (true);
-                engine.params().nrBackground.store (0.3f);
+                engine.params().nrBackground.store (gateMode ? 1.0f : 0.3f);
+                engine.params().nrImpact.store (gateMode ? 0.7f : 0.0f);
 
                 auto out = signal;
 
@@ -995,7 +1065,7 @@ private:
             const auto a = runEngine (true);
             const auto b = runEngine (false);
             expect (std::memcmp (a.data(), b.data(), sizeof (float) * (size_t) n) == 0,
-                    "Engine at " + juce::String (fs, 0) + " Hz: one-shot and mixed blocks differ");
+                    "Engine at " + juce::String (fs, 0) + " Hz" + (gateMode ? " (gate/impact)" : "") + ": one-shot and mixed blocks differ");
         }
     }
 
@@ -1122,10 +1192,13 @@ private:
         }
     }
 
-    // ----- N12相当（T-010時点の参考値。失敗判定なし） -----
+    // ----- N12（参考値。失敗判定なし） -----
+    // 48kHz・480ブロック・10秒で、ノイズ除去OFF / ON（背景70%・インパクト0%）/ ON（背景70%・インパクト50%）の処理時間÷音声時間。
+    // EQはOFF（EQを含む測定はT-012のEQ9）。2回測って小さい方を採る。ON・インパクト0%とOFFの差がT-010（混合まで）に当たり、
+    // インパクト50%との差がゲート・インパクト抑制の追加分。増分が3ポイントを超えたら報告する。
     void runCpuReference()
     {
-        beginTest ("N12 (reference, T-010: mixing only): CPU cost of 10 s of audio at 480-sample blocks (never fails)");
+        beginTest ("N12 (reference): CPU cost of 10 s of audio at 480-sample blocks: OFF / noise reduction ON (background 70 %) / ON with impact 50 % (never fails)");
 
         struct Case { double fs; vc::Preset preset; };
 
@@ -1138,37 +1211,45 @@ private:
             for (size_t i = 0; i < signal.size(); ++i)
                 signal[i] += pink[i];
 
-            double percent[2] = { 0.0, 0.0 };
-            double maxBlockMs[2] = { 0.0, 0.0 };
+            constexpr int modes = 3; // 0: OFF, 1: ON、インパクト0%, 2: ON、インパクト50%
+            double percent[modes] = { 1.0e9, 1.0e9, 1.0e9 };
+            double maxBlockMs[modes] = { 0.0, 0.0, 0.0 };
 
-            for (int nr = 0; nr < 2; ++nr)
+            for (int repeat = 0; repeat < 2; ++repeat)
             {
-                vc::Engine engine;
-                engine.prepare ({ c.fs, 480 });
-                engine.params().preset.store ((int) c.preset);
-                engine.params().nrEnabled.store (nr == 1);
-                engine.params().nrBackground.store (0.7f);
-
-                auto data = signal;
-                double totalMs = 0.0;
-
-                for (int pos = 0; pos + 480 <= n; pos += 480)
+                for (int mode = 0; mode < modes; ++mode)
                 {
-                    const auto t0 = std::chrono::steady_clock::now();
-                    engine.process (data.data() + pos, 480);
-                    const auto t1 = std::chrono::steady_clock::now();
-                    const double ms = std::chrono::duration<double, std::milli> (t1 - t0).count();
-                    totalMs += ms;
-                    maxBlockMs[nr] = std::max (maxBlockMs[nr], ms);
-                }
+                    vc::Engine engine;
+                    engine.prepare ({ c.fs, 480 });
+                    engine.params().preset.store ((int) c.preset);
+                    engine.params().nrEnabled.store (mode >= 1);
+                    engine.params().nrBackground.store (0.7f);
+                    engine.params().nrImpact.store (mode == 2 ? 0.5f : 0.0f);
 
-                percent[nr] = 100.0 * totalMs / 10000.0;
+                    auto data = signal;
+                    double totalMs = 0.0;
+                    double maxMs = 0.0;
+
+                    for (int pos = 0; pos + 480 <= n; pos += 480)
+                    {
+                        const auto t0 = std::chrono::steady_clock::now();
+                        engine.process (data.data() + pos, 480);
+                        const auto t1 = std::chrono::steady_clock::now();
+                        const double ms = std::chrono::duration<double, std::milli> (t1 - t0).count();
+                        totalMs += ms;
+                        maxMs = std::max (maxMs, ms);
+                    }
+
+                    percent[mode] = std::min (percent[mode], 100.0 * totalMs / 10000.0);
+                    maxBlockMs[mode] = maxMs;
+                }
             }
 
-            logMessage ("N12(ref) " + juce::String (c.fs, 0) + " Hz " + juce::String (vc::kPresets[(size_t) c.preset].id) + ": OFF "
+            logMessage ("N12 " + juce::String (c.fs, 0) + " Hz " + juce::String (vc::kPresets[(size_t) c.preset].id) + ": OFF "
                         + juce::String (percent[0], 3) + " %, noise reduction ON (background 70 %) " + juce::String (percent[1], 3)
-                        + " % (increase " + juce::String (percent[1] - percent[0], 3) + " points), max block "
-                        + juce::String (maxBlockMs[1], 3) + " ms");
+                        + " % (increase " + juce::String (percent[1] - percent[0], 3) + " points), with impact 50 % " + juce::String (percent[2], 3)
+                        + " % (increase " + juce::String (percent[2] - percent[0], 3) + " points, of which gate/impact stage "
+                        + juce::String (percent[2] - percent[1], 3) + " points), max block " + juce::String (maxBlockMs[2], 3) + " ms");
         }
     }
 };
@@ -1179,35 +1260,6 @@ static NoiseReducerTests noiseReducerTests;
 // N1・N2・N3b・N4b・N5a・N5b（客観指標。閾値は暫定で、外れたら緩めずに実測値を報告する）、N7・N9bのゲート・インパクト版、N12。
 // 時間の基準: 入力の時刻tの音は、出力の時刻t + D（D = kNativeD）に現れる。
 
-double energyOf (const float* a, int n)
-{
-    double e = 0.0;
-
-    for (int i = 0; i < n; ++i)
-        e += (double) a[i] * (double) a[i];
-
-    return e;
-}
-
-double dbOf (double powerRatio)
-{
-    return 10.0 * std::log10 (std::max (powerRatio, 1.0e-30));
-}
-
-void addPink (std::vector<float>& signal, float rmsLevel, int seed = 1)
-{
-    const auto pink = vc::test::makePinkNoise ((int) signal.size(), rmsLevel, seed);
-
-    for (size_t i = 0; i < signal.size(); ++i)
-        signal[i] += pink[i];
-}
-
-// inの[from, from + len)と、Dだけ遅れた出力の同じ区間のエネルギーの比[dB]（out/in）。
-double energyChangeDb (const std::vector<float>& in, const std::vector<float>& out, int from, int len, int delay = kNativeD)
-{
-    return dbOf (energyOf (out.data() + from + delay, len) / energyOf (in.data() + from, len));
-}
-
 class GateImpactTests final : public juce::UnitTest
 {
 public:
@@ -1216,13 +1268,19 @@ public:
     void runTest() override
     {
         runN1();
+        runGatePhase();
         runN2();
+        runN2Gate();
         runN3b();
+        runN3bSyllables();
+        runGateOnset();
+        runGateRmsConditions();
         runN4b();
         runN5a();
         runN5b();
         runN5bBitExact();
         runN7Gate();
+        runN9b();
     }
 
 private:
@@ -1283,6 +1341,86 @@ private:
             if (! speechOnly)
                 expect (snrOut - snrIn >= 6.0, "SNR improvement " + juce::String (snrOut - snrIn, 2) + " dB (< 6 dB)");
         }
+    }
+
+    // ----- VADの位相: ゲートは発話とともに開き、発話の間は閉じない -----
+    // N1と同じ信号（発話1秒・無音1秒、SNR 10dB）で、背景ノイズ100%（ゲートあり）と50%（RNNoiseのみ）を比べる。
+    // (1) 発話区間（出力の時刻。冒頭50msと末尾30msを除く）でゲートが閉じたサンプルが0、(2) 各発話の冒頭50msのエネルギーが50%比で-1dB以内
+    // （VADが出力より遅れると、開くのが遅れて冒頭が削れる）、(3) 無音区間（発話の終わりから0.3秒以降）でゲートが閉じたサンプルが1割以上。
+    void runGatePhase()
+    {
+        beginTest ("Gate phase: the gate opens with the speech (no closed samples inside speech, onset energy within -1 dB) and closes in the pauses");
+
+        const int n = (int) (8.0 * kFs);
+        std::vector<char> isSpeech;
+        const auto clean = vc::test::makeSpeechAndPauses (n, kFs, 1.0, 1.0, 0.3f, &isSpeech);
+        double speechEnergy = 0.0;
+        int speechCount = 0;
+
+        for (int i = 0; i < n; ++i)
+            if (isSpeech[(size_t) i] != 0)
+            {
+                speechEnergy += (double) clean[(size_t) i] * clean[(size_t) i];
+                ++speechCount;
+            }
+
+        const auto noise = vc::test::makePinkNoise (n, (float) (std::sqrt (speechEnergy / speechCount) * std::pow (10.0, -10.0 / 20.0)), 11);
+        auto in = clean;
+
+        for (int i = 0; i < n; ++i)
+            in[(size_t) i] += noise[(size_t) i];
+
+        vc::NoiseReducer nr;
+        nr.prepare (kFs, 4096);
+        auto gated = in;
+        std::vector<int> closedAfterBlock;
+
+        for (int pos = 0; pos < n; pos += kFrame)
+        {
+            nr.setTarget (true, 1.0f, 0.0f);
+            nr.process (gated.data() + pos, kFrame);
+            closedAfterBlock.push_back (nr.getGateClosedSampleCount());
+        }
+
+        const auto ungated = runNoiseReducer (kFs, in, 0.5f);
+        const auto closedBetween = [&] (int from, int to) // 出力の時刻[from, to)。ブロック境界（480の倍数）で数える
+        {
+            const auto at = [&] (int t) { return t <= 0 ? 0 : closedAfterBlock[(size_t) std::min ((int) closedAfterBlock.size(), t / kFrame) - 1]; };
+            return at (to) - at (from);
+        };
+
+        int closedInSpeech = 0;
+        double worstOnsetDb = 1.0e9;
+
+        for (int seg = 0; seg < 4; ++seg)
+        {
+            const int s = seg * 2 * (int) kFs;
+            const int e = s + (int) kFs;
+            const int outFrom = ((s + kNativeD + (int) (0.05 * kFs) + kFrame - 1) / kFrame) * kFrame;
+            const int outTo = ((e + kNativeD - (int) (0.03 * kFs)) / kFrame) * kFrame;
+
+            closedInSpeech += closedBetween (outFrom, outTo);
+            worstOnsetDb = std::min (worstOnsetDb, dbOf (energyOf (gated.data() + s + kNativeD, (int) (0.05 * kFs))
+                                                         / energyOf (ungated.data() + s + kNativeD, (int) (0.05 * kFs))));
+        }
+
+        // 無音区間（発話の終わりの0.3秒後〜次の発話の冒頭）。ホールド200msと雑音床+6dB未満の条件があり、ピンク雑音は短時間RMSの揺れが大きく、
+        // 閉じるまでに1秒前後かかるため、閉じたサンプルが1割以上あることだけを見る（ゲートが全く閉じない不具合の検出用）。
+        int closedInPauses = 0, pauseSamples = 0;
+
+        for (int seg = 0; seg < 3; ++seg)
+        {
+            const int from = ((seg * 2 + 1) * (int) kFs + (int) (0.3 * kFs) + kNativeD) / kFrame * kFrame;
+            const int to = ((seg * 2 + 2) * (int) kFs + kNativeD) / kFrame * kFrame;
+            closedInPauses += closedBetween (from, to);
+            pauseSamples += to - from;
+        }
+
+        logMessage ("Gate phase: closed samples inside speech " + juce::String (closedInSpeech) + ", worst onset (first 50 ms) energy vs background 50 % "
+                    + juce::String (worstOnsetDb, 2) + " dB, closed in the pauses (after 0.3 s) " + juce::String (closedInPauses) + " of " + juce::String (pauseSamples));
+        expectEquals (closedInSpeech, 0, "gate closed inside speech");
+        expect (worstOnsetDb >= -1.0, "speech onset attenuated by the gate: " + juce::String (worstOnsetDb, 2) + " dB");
+        expect (closedInPauses * 10 >= pauseSamples, "the gate did not close in the pauses: " + juce::String (closedInPauses) + " of " + juce::String (pauseSamples));
     }
 
     // ----- N2: 無声区間の残留雑音 -----
@@ -1368,6 +1506,240 @@ private:
         }
     }
 
+    // ----- N3b（音節の連続）: 短い無声の隙間でゲートが閉じない -----
+    // 音節（0.3〜0.7秒）を50msの隙間で並べた連続の発話（makeSyllables。隙間ではVADが下がりうる）に、-60dBFSの白色雑音。
+    // ホールド（200ms）が隙間をまたぐこと: 開始1秒以降にゲートが閉じたサンプルが0、背景50%（ゲートなし）比のレベル変化が1dB以内。
+    void runN3bSyllables()
+    {
+        beginTest ("N3b (syllable train): the gate does not close across 50 ms gaps inside an utterance (hold 200 ms)");
+
+        const int n = (int) (8.0 * kFs);
+        auto in = vc::test::makeSyllables (n);
+        const double peak = vc::test::peakAbs (in.data(), n);
+
+        for (auto& x : in)
+            x = (float) ((double) x * 0.3 / peak);
+
+        const auto noise = makeWhiteNoise (n, 0.0017f, 5);
+
+        for (int i = 0; i < n; ++i)
+            in[(size_t) i] += noise[(size_t) i];
+
+        vc::NoiseReducer nr;
+        nr.prepare (kFs, 4096);
+        auto out = in;
+        const int countFrom = (int) kFs + kNativeD; // 出力の時刻
+        int closedAtStart = 0;
+
+        for (int pos = 0; pos < n;)
+        {
+            int len = std::min (kFrame, n - pos);
+
+            if (pos < countFrom && pos + len > countFrom)
+                len = countFrom - pos;
+
+            nr.setTarget (true, 1.0f, 0.0f);
+            nr.process (out.data() + pos, len);
+            pos += len;
+
+            if (pos == countFrom)
+                closedAtStart = nr.getGateClosedSampleCount();
+        }
+
+        const int closed = nr.getGateClosedSampleCount() - closedAtStart;
+        const auto ungated = runNoiseReducer (kFs, in, 0.5f);
+        const double diffDb = dbOf (energyOf (out.data() + (int) kFs + kNativeD, (int) (6.0 * kFs)) / energyOf (ungated.data() + (int) kFs + kNativeD, (int) (6.0 * kFs)));
+
+        logMessage ("N3b syllable train: gate-closed samples after 1 s " + juce::String (closed) + ", level change vs background 50 % " + juce::String (diffDb, 2) + " dB");
+        expectEquals (closed, 0, "gate closed inside the utterance");
+        expect (diffDb >= -1.0, "the gate removed " + juce::String (-diffDb, 2) + " dB of the utterance");
+    }
+
+    // ----- ゲートは発話の音が出力に届いた時点で開いている（VADの位相） -----
+    // 発話0.5秒・無音1.5秒（デジタル無音でなく-70dBFSの白色雑音）を繰り返し、背景100%。RNNoiseのVADは出力より約1フレーム早く上がるため、
+    // 発話が出力へ届く時刻（入力の発話開始 + D）から50msの間にゲートが閉じたサンプルが0であること（VADが遅れると、原音のRMSで開くまでの間［数ms］閉じたままになる）。
+    void runGateOnset()
+    {
+        beginTest ("Gate onset: the gate is already open when the speech reaches the output (VAD phase), and it closed in the pause before");
+
+        const int n = (int) (10.0 * kFs);
+        std::vector<float> in ((size_t) n, 0.0f);
+
+        for (int k = 0; k < 4; ++k)
+            vc::test::addEnvelopedVowel (in, (int) ((1.0 + 2.0 * k) * kFs), k % 2 == 0 ? 120.0 : 170.0, kFs, 0.3f, 10.0, 470.0, 3.0, 20.0);
+
+        {
+            const auto noise = makeWhiteNoise (n, (float) (std::pow (10.0, -70.0 / 20.0) * std::sqrt (3.0)), 13); // RMS -70dBFS。定常（ピンクはゲートが閉じるまで時間がかかる）
+            for (int i = 0; i < n; ++i)
+                in[(size_t) i] += noise[(size_t) i];
+        }
+
+        vc::NoiseReducer nr;
+        nr.prepare (kFs, 4096);
+        auto out = in;
+        std::vector<int> cut; // 数える区間の境界（出力の時刻）: 各発話について onset+D、onset+D+50ms、その直前（onset+D-100ms）
+
+        for (int k = 0; k < 4; ++k)
+        {
+            const int t = (int) ((1.0 + 2.0 * k) * kFs) + kNativeD;
+            cut.push_back (t - (int) (0.1 * kFs));
+            cut.push_back (t);
+            cut.push_back (t + (int) (0.05 * kFs));
+        }
+
+        std::vector<int> closedAt;
+        size_t next = 0;
+
+        for (int pos = 0; pos < n;)
+        {
+            int len = std::min (kFrame, n - pos);
+
+            if (next < cut.size() && pos + len > cut[next])
+                len = cut[next] - pos;
+
+            nr.setTarget (true, 1.0f, 0.0f);
+            nr.process (out.data() + pos, len);
+            pos += len;
+
+            if (next < cut.size() && pos == cut[next])
+            {
+                closedAt.push_back (nr.getGateClosedSampleCount());
+                ++next;
+            }
+        }
+
+        juce::String line;
+        int worstOnset = 0;
+        int minBefore = 1 << 30;
+        int maxBefore = 0;
+
+        for (int k = 0; k < 4; ++k)
+        {
+            const int inPauseBefore = closedAt[(size_t) (3 * k + 1)] - closedAt[(size_t) (3 * k)]; // onset手前の100ms
+            const int atOnset = closedAt[(size_t) (3 * k + 2)] - closedAt[(size_t) (3 * k + 1)];   // onset+D から50ms
+            worstOnset = std::max (worstOnset, atOnset);
+
+            if (k > 0) // 最初の発話の前はゲートの学習中
+                minBefore = std::min (minBefore, inPauseBefore);
+
+            maxBefore = std::max (maxBefore, inPauseBefore);
+
+            line << " " << juce::String (inPauseBefore) << "/" << juce::String (atOnset);
+        }
+
+        logMessage ("Gate onset: gate-closed samples [100 ms before the speech reaches the output / first 50 ms after], per utterance:" + line);
+        expectEquals (worstOnset, 0, "the gate was closed while the speech was arriving");
+        expect (minBefore > 0, "control: the gate was not closed in the pause before the speech (nothing to open)");
+        // VADは出力より約1フレーム（480サンプル）早く上がる。出力と同じ呼び出しのVADを同じ位置へ対応づけていれば、発話が届く5ms（240サンプル）以上前に
+        // 開いている。1フレーム遅れて対応づけると、原音のRMSで開く発話の到着時点まで閉じたまま（手前の100msがすべて閉じたサンプルになる）。
+        expect (maxBefore <= (int) (0.1 * kFs) - (int) (0.005 * kFs), "the gate opened only when the speech arrived (VAD is not in phase with the output): closed samples in the 100 ms before "
+                                                                        + juce::String (maxBefore));
+    }
+
+    // ----- ゲートの開閉条件（原音のRMS） -----
+    // 白色雑音（-60dBFS）を4秒（ゲートが閉じる）→ 白色雑音のバースト0.3秒（-30dBFS、床+30dB。非発話なのでVADは上がらない）→ 白色雑音-52dBFS（床+8dB）を2秒。
+    // (1) バースト（到着から20ms後〜終わり）でゲートが開いている（VADが上がらなくても、RMSが床より12dB以上大きければ開く）。
+    // (2) その後、雑音が床+8dB（+6dBと+12dBの間）のあいだは開いたまま（閉じる条件は「床+6dB未満」なので、+8dBでは閉じない）。
+    void runGateRmsConditions()
+    {
+        beginTest ("Gate RMS conditions: opens on a loud non-speech burst (RMS >= floor + 12 dB) and stays open while the noise is floor + 8 dB (> floor + 6 dB)");
+
+        const int n = (int) (6.3 * kFs);
+        auto in = makeWhiteNoise (n, (float) (std::pow (10.0, -60.0 / 20.0) * std::sqrt (3.0)), 23);
+        const int burstStart = (int) (4.0 * kFs);
+        const int burstLen = (int) (0.3 * kFs);
+
+        {
+            const auto loud = makeWhiteNoise (n, (float) (std::pow (10.0, -52.0 / 20.0) * std::sqrt (3.0)), 29);
+            const auto tone = makeWhiteNoise (burstLen, (float) (std::pow (10.0, -30.0 / 20.0) * std::sqrt (3.0)), 31); // 非発話の広帯域雑音のバースト（RNNoiseはVADを上げない）
+
+            for (int i = burstStart + burstLen; i < n; ++i)
+                in[(size_t) i] = loud[(size_t) i]; // 床+8dB
+
+            for (int i = 0; i < burstLen; ++i)
+                in[(size_t) (burstStart + i)] = tone[(size_t) i];
+        }
+
+        vc::NoiseReducer nr;
+        nr.prepare (kFs, 4096);
+        auto out = in;
+        const int cuts[] = { burstStart + kNativeD - (int) (0.5 * kFs), burstStart + kNativeD, burstStart + kNativeD + (int) (0.02 * kFs),
+                             burstStart + burstLen + kNativeD, burstStart + burstLen + kNativeD + (int) (0.1 * kFs), n };
+        int closedAt[6] = {};
+        size_t next = 0;
+
+        for (int pos = 0; pos < n;)
+        {
+            int len = std::min (kFrame, n - pos);
+
+            if (next < 6 && pos + len > cuts[next])
+                len = cuts[next] - pos;
+
+            nr.setTarget (true, 1.0f, 0.0f);
+            nr.process (out.data() + pos, len);
+            pos += len;
+
+            if (next < 6 && pos == cuts[next])
+                closedAt[next++] = nr.getGateClosedSampleCount();
+        }
+
+        const int closedBeforeBurst = closedAt[1] - closedAt[0];    // バースト手前の0.5秒（閉じているはず）
+        const int closedInBurst = closedAt[3] - closedAt[2];         // 到着から20ms後〜バーストの終わり
+        const int closedAfterBurst = nr.getGateClosedSampleCount() - closedAt[4]; // バースト終了0.1秒後〜
+
+        logMessage ("Gate RMS conditions: closed samples in the 0.5 s before the burst " + juce::String (closedBeforeBurst) + ", in the burst (after 20 ms) "
+                    + juce::String (closedInBurst) + ", after the burst (floor + 8 dB noise, from 0.1 s) " + juce::String (closedAfterBurst));
+        expect (closedBeforeBurst > (int) (0.25 * kFs), "control: the gate was not closed in the noise before the burst");
+        expectEquals (closedInBurst, 0, "the gate did not open on a loud non-speech burst");
+        expectEquals (closedAfterBurst, 0, "the gate closed while the noise was only floor + 8 dB");
+    }
+
+    // ----- N2（ゲートの効果）: 発話の後の無音で、背景100%の残留雑音が50%（RNNoiseのみ）より小さい -----
+    // 発話1秒・無音2秒（SNR 10dBの定常な白色雑音）。無音の0.7秒後から次の発話の0.1秒前まで、背景100%の出力エネルギーが50%比で-12dB以下
+    // （ゲートが閉じたときの減衰量は18dB。ゲートは閉じるのに150msかかる）。
+    void runN2Gate()
+    {
+        beginTest ("N2 (gate effect): in the pauses after speech the residual at background 100 % is >= 12 dB below background 50 %");
+
+        const int n = (int) (10.0 * kFs);
+        std::vector<char> isSpeech;
+        const auto clean = vc::test::makeSpeechAndPauses (n, kFs, 1.0, 2.0, 0.3f, &isSpeech);
+        double speechEnergy = 0.0;
+        int speechCount = 0;
+
+        for (int i = 0; i < n; ++i)
+            if (isSpeech[(size_t) i] != 0)
+            {
+                speechEnergy += (double) clean[(size_t) i] * clean[(size_t) i];
+                ++speechCount;
+            }
+
+        // 白色雑音（一様乱数）のRMS = amp / sqrt(3)
+        const double noiseRms = std::sqrt (speechEnergy / speechCount) * std::pow (10.0, -10.0 / 20.0);
+        const auto noise = makeWhiteNoise (n, (float) (noiseRms * std::sqrt (3.0)), 17);
+        auto in = clean;
+
+        for (int i = 0; i < n; ++i)
+            in[(size_t) i] += noise[(size_t) i];
+
+        const auto gated = runNoiseReducer (kFs, in, 1.0f);
+        const auto ungated = runNoiseReducer (kFs, in, 0.5f);
+        double worst = -1.0e9;
+        juce::String line;
+
+        for (int seg = 0; seg < 3; ++seg)
+        {
+            const int from = (seg * 3 + 1) * (int) kFs + (int) (0.7 * kFs) + kNativeD;
+            const int len = (int) (1.2 * kFs);
+            const double db = dbOf (energyOf (gated.data() + from, len) / energyOf (ungated.data() + from, len));
+            worst = std::max (worst, db);
+            line << " " << juce::String (db, 1);
+        }
+
+        logMessage ("N2 gate effect (background 100 % vs 50 % in the pauses) [dB]:" + line + " (limit -12)");
+        expect (worst <= -12.0, "gate effect in the pauses only " + juce::String (worst, 2) + " dB (> -12 dB)");
+    }
+
     // ----- N4b: 低い声・語尾 -----
     // f0 = 85/100/120Hzの母音（立ち上がり10ms・600ms持続）に、時定数150msの指数減衰の語尾（600ms）。語尾の後は無音（-65dBFSのピンク雑音のみ）。
     // 減衰開始から100msのエネルギーが背景ノイズ0%（= 原音をDサンプル遅らせたもの）比で-3dB以内。
@@ -1395,38 +1767,54 @@ private:
 
             addPink (in, (float) std::pow (10.0, -65.0 / 20.0), 31);
 
+            const auto ungated = runNoiseReducer (kFs, in, 0.5f, kFrame, 0.0f); // RNNoiseのみ（ゲートなし）。ゲートだけの影響を切り分ける
+
             for (const Config c : { Config { 1.0f, 0.0f }, Config { 1.0f, 1.0f }, Config { 0.5f, 0.0f } })
             {
                 const auto out = runNoiseReducer (kFs, in, c.bg, kFrame, c.impact);
                 double worst = 1.0e9;
                 double sumIn = 0.0, sumOut = 0.0;
+                double worstLong = 1.0e9;     // 語尾の最初の400ms（仕様の100msより長い窓）の、背景0%比
+                double worstGateOnly = 1.0e9; // 同じ窓の、ゲートなし（背景50%）比。ゲートが語尾を削らないこと
 
                 for (int k = warmupCycles; k < cycles; ++k)
                 {
                     const int from = k * cycle + (int) (0.3 * kFs) + tailStartOffset;
                     const int len = (int) (0.1 * kFs);
                     worst = std::min (worst, energyChangeDb (in, out, from, len));
+                    const int longLen = (int) (0.4 * kFs);
+                    worstLong = std::min (worstLong, energyChangeDb (in, out, from, longLen));
+                    worstGateOnly = std::min (worstGateOnly, dbOf (energyOf (out.data() + from + kNativeD, longLen) / energyOf (ungated.data() + from + kNativeD, longLen)));
                     sumIn += energyOf (in.data() + from, len);
                     sumOut += energyOf (out.data() + from + kNativeD, len);
                 }
 
                 const juce::String label = "f0 " + juce::String (f0, 0) + ", background " + juce::String ((int) (c.bg * 100)) + " %, impact "
                                            + juce::String ((int) (c.impact * 100)) + " %";
-                logMessage ("N4b " + label + ": worst of 5 utterances " + juce::String (worst, 2) + " dB, total " + juce::String (dbOf (sumOut / sumIn), 2) + " dB");
+                logMessage ("N4b " + label + ": worst of 5 utterances " + juce::String (worst, 2) + " dB, total " + juce::String (dbOf (sumOut / sumIn), 2)
+                            + " dB; first 400 ms of the tail: vs background 0 % " + juce::String (worstLong, 2) + " dB, vs background 50 % (gate effect only) "
+                            + juce::String (worstGateOnly, 2) + " dB");
 
                 if (c.bg > 0.9f)
+                {
                     expect (worst >= -3.0, label + ": tail energy changed by " + juce::String (worst, 2) + " dB");
+                    expect (worstLong >= -3.0, label + ": first 400 ms of the tail changed by " + juce::String (worstLong, 2) + " dB");
+
+                    if (c.impact < 0.5f)
+                        expect (worstGateOnly >= -1.0, label + ": the gate removed " + juce::String (-worstGateOnly, 2) + " dB of the tail");
+                }
             }
         }
     }
 
     // ----- N5a: クリック除去量 -----
     // -50dBFSのピンク雑音の上に、3kHzの1ms・5ms減衰のクリック（ピーク-20dBFS）を3回ずつ。インパクト100%で、クリック区間（出力の時刻で
-    // クリックの開始から30ms）のピークがインパクト0%比で-12dB以下（最悪のクリックで判定）。
+    // クリックの開始から30ms）のピークがインパクト0%比で-12dB以下（最悪のクリックで判定）。背景ノイズは仕様に指定がなく、既定の70%で判定する。
+    // 0%・100%は参考値（記録のみ）: 100%ではゲートが閉じていて0%側のクリックが既に約18dB下がっているため比が縮み、
+    // 0%（ゲートなし）はゲートの状態（発話中とみなされると減衰量が半分になる）の影響だけが残る。
+    // -12.0dBはゲートが開いたときの減衰量（24dBの半分）にちょうど当たるため、ゲートが開いているクリックがあると判定はぎりぎりになる。
     void runN5a()
     {
-        beginTest ("N5a: click removal: peak of the click region at impact 100 % is <= -12 dB relative to impact 0 % (1 ms and 5 ms clicks)");
-
         const int n = (int) (8.0 * kFs);
         std::vector<float> in = vc::test::makePinkNoise (n, (float) std::pow (10.0, -50.0 / 20.0), 41);
         const int clickTimes[] = { 1500, 2500, 3500, 4500, 5500, 6500 }; // ms
@@ -1437,10 +1825,13 @@ private:
 
         for (const float bg : { 0.7f, 0.0f, 1.0f })
         {
+            const bool judged = bg > 0.6f && bg < 0.8f;
+            beginTest ("N5a: click removal at background " + juce::String ((int) (bg * 100)) + " %" + (judged ? "" : " (reference, not judged)")
+                       + ": peak of the click region at impact 100 % is <= -12 dB relative to impact 0 % (1 ms and 5 ms clicks)");
             const auto off = runNoiseReducer (kFs, in, bg, kFrame, 0.0f);
             const auto on = runNoiseReducer (kFs, in, bg, kFrame, 1.0f);
             double worst = -1.0e9;
-            juce::String line;
+            juce::String line, baseline;
 
             for (int k = 0; k < 6; ++k)
             {
@@ -1448,10 +1839,14 @@ private:
                 const double db = 20.0 * std::log10 (vc::test::peakAbs (on.data() + from, region) / vc::test::peakAbs (off.data() + from, region));
                 worst = std::max (worst, db);
                 line << " " << juce::String (db, 1);
+                baseline << " " << juce::String (20.0 * std::log10 (vc::test::peakAbs (off.data() + from, region)), 1);
             }
 
-            logMessage ("N5a background " + juce::String ((int) (bg * 100)) + " %: peak change per click [dB]" + line + " (limit -12)");
-            expect (worst <= -12.0, "background " + juce::String ((int) (bg * 100)) + " %: worst click peak change " + juce::String (worst, 2) + " dB");
+            logMessage ("N5a background " + juce::String ((int) (bg * 100)) + " %: peak change per click [dB]" + line + " (limit -12); impact 0 % peak [dBFS]" + baseline
+                        + (judged ? "" : ", reference only"));
+
+            if (judged)
+                expect (worst <= -12.0, "background " + juce::String ((int) (bg * 100)) + " %: worst click peak change " + juce::String (worst, 2) + " dB");
         }
     }
 
@@ -1460,14 +1855,15 @@ private:
     // インパクト100%でも、母音の立ち上がりから80msの区間のエネルギーの減衰がインパクト0%比で1dB以下。f0 = 100/140Hz、背景70%・100%。
     void runN5b()
     {
-        beginTest ("N5b: vowel onsets and plosive + vowel at impact 100 %: attenuation of the vowel <= 1 dB relative to impact 0 %");
-
         const int n = (int) (6.0 * kFs);
         const int vowelLen = (int) (0.08 * kFs);
 
-        for (const double f0 : { 100.0, 140.0 })
+        for (const int kind : { 0, 1 })
         {
-            for (const int kind : { 0, 1 })
+            beginTest (juce::String ("N5b: ") + (kind == 1 ? "plosive (5 ms noise burst) + vowel 30 ms later" : "vowel with a 10 ms onset")
+                       + " at impact 100 %: attenuation of the vowel (first 80 ms) <= 1 dB relative to impact 0 %");
+
+            for (const double f0 : { 100.0, 140.0 })
             {
                 std::vector<float> in ((size_t) n, 0.0f);
                 std::vector<int> onsets;
@@ -1598,6 +1994,137 @@ private:
             const int diffAt = sameFrom (a, b, switchAt + (int) (0.3 * kFs));
             expectEquals (diffAt, -1, "impact 100 % -> 0 %: output differs from the always-0 run at sample " + juce::String (diffAt));
             expect (sameFrom (a, b, 0) >= 0, "control: the impact stage changed nothing while it was on");
+        }
+    }
+
+    // ----- N9b: ノイズ除去ON中のプリセット切替（ゲートが働く背景ノイズ100%を含む） -----
+    // Engine E9（tests/EngineTests.cpp）と同じ判定器（checkNoClick）・同じ窓（切替の前後の定常区間1秒、切替の直前から20ms + 300ms + 20ms）・
+    // 同じ信号（150Hzの合成母音、-80dBFSの雑音床。mode 1は切替の瞬間にデジタル無音から10msの二乗余弦のアタックで発声）で、8x7=56通りの
+    // 順序付き切替を判定する。RNNoiseは同じ合成母音を最初の数秒は雑音として強く抑える（慣らし）ため、先頭に2秒の助走（同じ母音）を足す。
+    // ゲートで無音に近づいた信号がSignalsmith Stretchの無音モード（エネルギー<1e-15が2ブロック続く）に入らないかの確認も兼ねる。
+    struct SwitchResult
+    {
+        int failures = 0;
+        int runs = 0;
+        double worstRatio = 0.0;
+        juce::String worstName;
+    };
+
+    SwitchResult runPresetSwitchWithNr (int mode, int offset, const std::vector<float>& voice, float bg, float impact)
+    {
+        constexpr int warmup = (int) (kFs * 2.0);
+        constexpr int settle = (int) (kFs * 0.8);
+        constexpr int steady = (int) kFs;
+        constexpr int transition = (int) (kFs * 0.34);
+        constexpr int total = settle + steady + 16 + transition + settle + steady;
+
+        SwitchResult result;
+
+        for (int a = 0; a < (int) vc::kPresets.size(); ++a)
+        {
+            for (int b = 0; b < (int) vc::kPresets.size(); ++b)
+            {
+                if (a == b)
+                    continue;
+
+                const int switchPos = warmup + settle + steady + offset;
+                std::vector<float> in (voice);
+
+                if (mode != 0)
+                {
+                    // 発声がノイズ除去の遅延（D）を経て届く時刻に、E9と同じく切替が重なるよう、入力の発声はDだけ早く始める。
+                    const int onsetPos = switchPos - kNativeD;
+                    std::fill (in.begin() + warmup, in.begin() + onsetPos, 0.0f);
+
+                    if (mode == 2) // 無音ではなく-80dBFSの雑音床だけの休止。ゲートが閉じた（無音に近い）信号がシフターへ渡る
+                    {
+                        std::vector<float> pause ((size_t) (onsetPos - warmup), 0.0f);
+                        vc::test::addNoiseFloor (pause, -80.0f, 777);
+                        std::copy (pause.begin(), pause.end(), in.begin() + warmup);
+                    }
+
+                    const int attack = (int) std::lround (0.010 * kFs);
+
+                    for (int i = 0; i < attack; ++i)
+                        in[(size_t) (onsetPos + i)] *= (float) (0.5 - 0.5 * std::cos (juce::MathConstants<double>::pi * (double) i / (double) attack));
+                }
+
+                vc::Engine engine;
+                engine.prepare ({ kFs, 1024 });
+                engine.params().preset.store (a);
+                engine.params().nrEnabled.store (true);
+                engine.params().nrBackground.store (bg);
+                engine.params().nrImpact.store (impact);
+                std::vector<float> out (in);
+
+                engine.process (out.data(), switchPos);
+                engine.params().preset.store (b);
+                engine.process (out.data() + switchPos, warmup + total - switchPos);
+
+                // 無音からの発声開始では切替前の出力が基準にならないため、基準は加工前の声の定常区間とする（E9と同じ）。
+                const float* before = mode != 0 ? voice.data() + warmup + settle : out.data() + warmup + settle;
+                const double beforeDiff = vc::test::maxAdjacentDiff (before, steady);
+                const double afterDiff = vc::test::maxAdjacentDiff (out.data() + warmup + total - steady, steady);
+                const double transDiff = vc::test::maxAdjacentDiff (out.data() + switchPos - 1, transition + 1);
+                const double ratio = transDiff / std::max (beforeDiff, afterDiff);
+                ++result.runs;
+
+                if (ratio > result.worstRatio)
+                {
+                    result.worstRatio = ratio;
+                    result.worstName = juce::String (vc::kPresets[(size_t) a].id) + "->" + vc::kPresets[(size_t) b].id;
+                }
+
+                if (! vc::test::checkNoClick (before, steady, out.data() + switchPos - 1, transition + 1, out.data() + warmup + total - steady))
+                {
+                    ++result.failures;
+                    expect (false, juce::String (mode == 0 ? "steady" : mode == 1 ? "onset" : "onset after pause") + " " + vc::kPresets[(size_t) a].id + "->" + vc::kPresets[(size_t) b].id
+                                       + " (background " + juce::String ((int) (bg * 100)) + " %, impact " + juce::String ((int) (impact * 100)) + " %): ratio "
+                                       + juce::String (ratio, 2));
+                }
+
+                expect (vc::test::allFinite (out.data(), (int) out.size()), "non-finite output");
+            }
+        }
+
+        return result;
+    }
+
+    void runN9b()
+    {
+        beginTest ("N9b: 56 preset switches with noise reduction ON (background 100 % / impact 50 %: gate active) pass the E9 click judge");
+
+        constexpr int warmup = (int) (kFs * 2.0);
+        constexpr int total = warmup + (int) (kFs * 0.8) + (int) kFs + 16 + (int) (kFs * 0.34) + (int) (kFs * 0.8) + (int) kFs;
+        auto voice = vc::test::makeSyntheticVowel (150.0, kFs, total, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.3f);
+        vc::test::addNoiseFloor (voice, -80.0f, 333);
+
+        // 対照: 休止（-80dBFSの雑音床だけ）でノイズ除去の出力がどこまで小さくなるか（Stretchの無音モードは入力ブロックのエネルギー < 1e-15。値の記録のみ）。
+        for (const float bg : { 0.7f, 1.0f })
+        {
+            std::vector<float> pause ((size_t) (2.0 * kFs), 0.0f);
+            vc::test::addNoiseFloor (pause, -80.0f, 777);
+            auto speech = vc::test::makeSpeechLikeVowel (150.0, kFs, (int) (2.0 * kFs), 0.3f);
+            speech.insert (speech.end(), pause.begin(), pause.end());
+            const auto out = runNoiseReducer (kFs, speech, bg);
+            double minBlock = 1.0e30;
+
+            for (int pos = (int) (3.0 * kFs); pos + 480 <= (int) out.size(); pos += 480)
+                minBlock = std::min (minBlock, energyOf (out.data() + pos, 480));
+
+            logMessage ("N9b control: noise reduction output in a -80 dBFS pause at background " + juce::String ((int) (bg * 100)) + " %: minimum block (480 samples) energy "
+                        + juce::String (dbOf (minBlock), 1) + " dB (Stretch silence mode below -150 dB = 1e-15), RMS "
+                        + juce::String (20.0 * std::log10 (vc::test::rms (out.data() + (int) (3.0 * kFs), (int) kFs) + 1.0e-30), 1) + " dBFS");
+        }
+
+        struct Config { int mode; float bg; float impact; };
+
+        for (const Config c : { Config { 0, 1.0f, 0.5f }, Config { 1, 1.0f, 0.5f }, Config { 2, 1.0f, 0.5f } })
+        {
+            const auto r = runPresetSwitchWithNr (c.mode, 7, voice, c.bg, c.impact);
+            logMessage ("N9b " + juce::String (c.mode == 0 ? "steady" : c.mode == 1 ? "onset(10ms attack) from digital silence" : "onset(10ms attack) after a pause with a -80 dBFS noise floor") + ", background " + juce::String ((int) (c.bg * 100)) + " %, impact "
+                        + juce::String ((int) (c.impact * 100)) + " %: " + juce::String (r.runs - r.failures) + "/" + juce::String (r.runs)
+                        + " switches passed, worst ratio (limit 1.5) " + juce::String (r.worstRatio, 3) + " at " + r.worstName);
         }
     }
 

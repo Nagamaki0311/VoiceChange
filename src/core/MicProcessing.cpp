@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace vc
 {
@@ -84,7 +85,7 @@ void NoiseReducer::RnnoiseDeleter::operator() (DenoiseState* st) const noexcept
     rnnoise_destroy (st);
 }
 
-// ----- VadGate -----
+// ===== SECTION: VadGate =====
 
 void NoiseReducer::VadGate::prepare (double fs)
 {
@@ -188,15 +189,15 @@ float NoiseReducer::VadGate::process (float dry, float vad, float closedGain, bo
         }
     }
 
-    if (! open)
-        ++closedSamples;
+    if (! open && closedSamples < std::numeric_limits<int>::max())
+        ++closedSamples; // テスト用の計数。長時間でも符号付き整数がオーバーフローしないよう頭打ちにする
 
     const float target = open ? 1.0f : closedGain;
     gateGain = target > gateGain ? std::min (target, gateGain + openStep) : std::max (target, gateGain - closeStep);
     return gateGain;
 }
 
-// ----- ImpactSuppressor -----
+// ===== SECTION: ImpactSuppressor =====
 
 void NoiseReducer::ImpactSuppressor::prepare (double fs)
 {
@@ -220,6 +221,7 @@ void NoiseReducer::ImpactSuppressor::reset() noexcept
     envelope = 1.0f;
     holdCount = 0;
     primed = false;
+    attenuatedSamples = 0;
 }
 
 void NoiseReducer::ImpactSuppressor::setTarget (float impact, bool immediate) noexcept
@@ -280,8 +282,14 @@ float NoiseReducer::ImpactSuppressor::process (float tap, bool gateOpen, bool va
     }
 
     envelope = target < envelope ? std::max (target, envelope - attackStep) : std::min (target, envelope + releaseStep);
+
+    if (envelope < 1.0f && attenuatedSamples < std::numeric_limits<int>::max())
+        ++attenuatedSamples;
+
     return envelope;
 }
+
+// ===== SECTION: NoiseReducer =====
 
 void NoiseReducer::prepare (double newSampleRate, int newMaxBlockSamples)
 {
