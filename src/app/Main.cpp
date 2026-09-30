@@ -3,6 +3,7 @@
 
 #include "AudioIO.h"
 #include "MainComponent.h"
+#include "MicPanel.h"
 #include "core/Params.h"
 #include "core/StatsLog.h"
 
@@ -171,6 +172,7 @@ public:
         setResizable (false, false);
 
         auto* content = new vc::MainComponent (audioIOIn, settingsIn);
+        mainComponent = content;
         setContentOwned (content, true);
 
         // design.md 7章「ウィンドウアイコンはトレイアイコンのON版（32px）と同じ図案」。
@@ -180,6 +182,11 @@ public:
         setVisible (true);
     }
 
+    vc::MainComponent& getMainComponent() noexcept { return *mainComponent; }
+
+    // トレイへ格納するたびに呼ばれる(マイク処理ウィンドウも一緒に非表示にする。design.md 10.1節)。
+    std::function<void()> onHidden;
+
     // 初回のトレイ格納時にだけ呼ばれる(Main.cppのVoiceChangeApplicationが設定する。design.md 7.3節)。
     std::function<void()> onHiddenToTray;
 
@@ -187,6 +194,9 @@ public:
     {
         // design.md「システムトレイ」: 閉じるボタン・Escキー(MainComponent::keyPressed経由)でトレイに格納する。
         setVisible (false);
+
+        if (onHidden != nullptr)
+            onHidden();
 
         if (onHiddenToTray != nullptr)
             onHiddenToTray();
@@ -199,6 +209,8 @@ public:
     }
 
 private:
+    vc::MainComponent* mainComponent = nullptr; // setContentOwnedが所有する
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoiceChangeMainWindow)
 };
 
@@ -414,6 +426,13 @@ public:
 
         mainWindow = std::make_unique<VoiceChangeMainWindow> (audioIO, *settings);
 
+        // マイク処理ウィンドウ(design.md 10章)。非モーダルの別ウィンドウで、最初は非表示。メインのマイク処理ボタンで開き、
+        // メインをトレイへ格納したときは一緒に非表示にする。
+        micWindow = std::make_unique<vc::MicWindow> (audioIO, *settings);
+        micWindow->setIcon (makeTrayImage (true, false)); // メインと同じアイコン
+        mainWindow->getMainComponent().onOpenMicPanel = [this] { micWindow->showBeside (mainWindow->getScreenBounds()); };
+        mainWindow->onHidden = [this] { micWindow->setVisible (false); };
+
         // design.md 7章「システムトレイ」。閉じるボタン・Escで格納したとき、初回だけ通知を出す。
         trayIcon = std::make_unique<TrayIcon> (audioIO, *mainWindow, *settings);
         mainWindow->onHiddenToTray = [this] { trayIcon->showFirstMinimizeNoticeIfNeeded(); };
@@ -436,6 +455,7 @@ public:
     {
         stopTimer();
         trayIcon = nullptr;
+        micWindow = nullptr;
         mainWindow = nullptr;
 
         // 設定の保存はデバイスのclose()（ドライバ次第で時間がかかる・固まる）より前に済ませる。
@@ -452,40 +472,51 @@ public:
     }
 
 private:
-    // `--screenshot <path>`: 起動後にMainComponentのスナップショットをPNG保存して終了する
-    // （Xvfb上でのUI確認用。docs/plan.md 2.5節「Main.cpp」参照）。
+    // `--screenshot <path>`: 起動後にMainComponentのスナップショットをPNG保存して終了する。
+    // `--screenshot-mic <path>`: 同じ仕組みで、マイク処理ウィンドウの内容をPNGに保存して終了する
+    // （どちらもXvfb上でのUI確認用。docs/plan.md 2.5節「Main.cpp」・8.3節T-013参照）。
     void handleScreenshotArgumentIfPresent()
     {
         const auto args = getCommandLineParameterArray();
 
         for (int i = 0; i < args.size(); ++i)
         {
-            if (args[i] == "--screenshot" && i + 1 < args.size())
+            const bool isMain = args[i] == "--screenshot";
+            const bool isMic = args[i] == "--screenshot-mic";
+
+            if ((isMain || isMic) && i + 1 < args.size())
             {
                 const juce::String path = args[i + 1];
 
-                juce::Timer::callAfterDelay (400, [this, path] { takeScreenshotAndQuit (path); });
+                if (isMic)
+                    micWindow->showBeside (mainWindow->getScreenBounds());
+
+                juce::Timer::callAfterDelay (400, [this, path, isMic] { takeScreenshotAndQuit (path, isMic); });
                 return;
             }
         }
     }
 
-    void takeScreenshotAndQuit (const juce::String& path)
+    void takeScreenshotAndQuit (const juce::String& path, bool micPanel)
     {
-        if (mainWindow != nullptr)
+        juce::Component* content = nullptr;
+
+        if (micPanel && micWindow != nullptr)
+            content = micWindow->getContentComponent();
+        else if (mainWindow != nullptr)
+            content = mainWindow->getContentComponent();
+
+        if (content != nullptr)
         {
-            if (auto* content = mainWindow->getContentComponent())
+            const auto image = content->createComponentSnapshot (content->getLocalBounds());
+
+            juce::File file (path);
+            file.deleteFile();
+
+            if (auto stream = std::unique_ptr<juce::FileOutputStream> (file.createOutputStream()))
             {
-                const auto image = content->createComponentSnapshot (content->getLocalBounds());
-
-                juce::File file (path);
-                file.deleteFile();
-
-                if (auto stream = std::unique_ptr<juce::FileOutputStream> (file.createOutputStream()))
-                {
-                    juce::PNGImageFormat png;
-                    png.writeImageToStream (image, *stream);
-                }
+                juce::PNGImageFormat png;
+                png.writeImageToStream (image, *stream);
             }
         }
 
@@ -512,6 +543,7 @@ private:
     }
 
     std::unique_ptr<VoiceChangeMainWindow> mainWindow;
+    std::unique_ptr<vc::MicWindow> micWindow;
     std::unique_ptr<TrayIcon> trayIcon;
     std::unique_ptr<juce::PropertiesFile> settings;
     vc::AudioIO audioIO;
