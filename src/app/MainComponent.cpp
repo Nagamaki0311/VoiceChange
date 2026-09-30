@@ -237,8 +237,12 @@ void AppLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int widt
                                         juce::Slider::SliderStyle, juce::Slider& slider)
 {
     const bool zeroBased = (bool) slider.getProperties().getWithDefault ("zeroBasedFill", false);
-    const bool bypassed = ! isChainEnabled();
-    const juce::Colour fillColour (bypassed ? idleFill : live);
+
+    // 塗りの色: 既定は全体バイパス（isChainEnabled）で決める。マイク処理ウィンドウのスライダーは全体バイパスと
+    // 関係なくノイズ除去のON/OFFで決めるため、スライダーごとのプロパティ"liveState"があればそれを優先する（design.md 10.7節）。
+    const bool isLive = slider.getProperties().contains ("liveState") ? (bool) slider.getProperties()["liveState"]
+                                                                     : isChainEnabled();
+    const juce::Colour fillColour (isLive ? live : idleFill);
 
     const float trackY = (float) y + (float) height * 0.5f - 2.0f;
     g.setColour (juce::Colour (track));
@@ -271,6 +275,13 @@ void AppLookAndFeel::drawLinearSlider (juce::Graphics& g, int x, int y, int widt
     g.drawRoundedRectangle (thumb, 2.0f, 1.0f);
     g.setColour (juce::Colour (0xFF7A7F87));
     g.fillRect (juce::Rectangle<float> (thumb.getCentreX() - 0.5f, thumb.getY() + 5.0f, 1.0f, 10.0f));
+
+    // キーボードフォーカス: つまみの外側3pxに2pxのfocus（16×26、角丸4。design.md 3.5節）。塗りと値の色は変えない。
+    if (slider.hasKeyboardFocus (false))
+    {
+        g.setColour (juce::Colour (focus));
+        g.drawRoundedRectangle (thumb.expanded (3.0f), 4.0f, 2.0f);
+    }
 }
 
 // ===== SECTION: LevelMeter =====
@@ -352,6 +363,23 @@ ToggleSwitch::ToggleSwitch() : juce::Button ("effectToggle")
     setWantsKeyboardFocus (true);
 }
 
+void ToggleSwitch::setTexts (const juce::String& wordIn, const juce::String& onSubText, const juce::String& offSubText)
+{
+    word = wordIn;
+    onSub = onSubText;
+    offSub = offSubText;
+    repaint();
+}
+
+void ToggleSwitch::setOffSubText (const juce::String& subText)
+{
+    if (offSub != subText)
+    {
+        offSub = subText;
+        repaint();
+    }
+}
+
 void ToggleSwitch::paintButton (juce::Graphics& g, bool isHighlighted, bool isDown)
 {
     const bool on = getToggleState();
@@ -380,8 +408,9 @@ void ToggleSwitch::paintButton (juce::Graphics& g, bool isHighlighted, bool isDo
     g.setColour (border);
     g.drawRoundedRectangle (bounds.reduced (borderWidth * 0.5f), 4.0f, borderWidth);
 
-    // ランプ: design.md絶対座標(44,412)。本コンポーネントは(20,388)起点なのでローカル(24,24)。
-    constexpr float lampCx = 24.0f, lampCy = 24.0f, lampR = 6.0f;
+    // ランプ: 直径12、中心は部品内(24, 高さ/2)。メインのトグル（20,388・高さ48）ではdesign.md絶対座標(44,412)。
+    constexpr float lampCx = 24.0f, lampR = 6.0f;
+    const float lampCy = bounds.getHeight() * 0.5f;
 
     if (on)
     {
@@ -397,38 +426,77 @@ void ToggleSwitch::paintButton (juce::Graphics& g, bool isHighlighted, bool isDo
     const auto mainFont = AppLookAndFeel::uiFont (16.0f, true);
     const auto subFont = AppLookAndFeel::uiFont (13.0f, false);
 
-    // 主文はx40(絶対x60)から左寄せ、副文はx404(絶対x424)まで右寄せ(design.md 3.5節)。
-    // 副文の文言が長い(例: OFF時の「原音をそのまま出力中（バイパス）」)ため、主文の実測幅より
-    // 広めの開始位置から確保し、途中で切れないようにする。
-    const juce::Rectangle<float> mainArea (40.0f, 0.0f, 140.0f, bounds.getHeight());
-    const juce::Rectangle<float> subArea (140.0f, 0.0f, 404.0f - 140.0f, bounds.getHeight());
+    // 主文は部品内x40・幅132に左寄せ、副文は部品内x176・幅228（右端x404）に右寄せ。2つの領域は重ねない（design.md 3.5節）。
+    // ともに1行、drawFittedTextの最小横倍率0.9。文言は、主文が最長でも約113px、副文は16字（13ptで最大208px）に収める。
+    const juce::Rectangle<int> mainArea (40, 0, 132, getHeight());
+    const juce::Rectangle<int> subArea (176, 0, 228, getHeight());
 
     if (on)
     {
         juce::AttributedString as;
         as.setJustification (juce::Justification::centredLeft);
-        as.append (juce::String::fromUTF8 ("エフェクト "), mainFont, juce::Colour (AppLookAndFeel::textPrimary));
-        as.append (juce::String::fromUTF8 ("ON"), mainFont, juce::Colour (AppLookAndFeel::live));
-        as.draw (g, mainArea);
+        as.append (word + " ", mainFont, juce::Colour (AppLookAndFeel::textPrimary));
+        as.append ("ON", mainFont, juce::Colour (AppLookAndFeel::live));
+        as.draw (g, mainArea.toFloat());
     }
     else
     {
         g.setColour (juce::Colour (AppLookAndFeel::textPrimary));
         g.setFont (mainFont);
-        g.drawText (juce::String::fromUTF8 ("エフェクト OFF"), mainArea, juce::Justification::centredLeft, true);
+        g.drawFittedText (word + " OFF", mainArea, juce::Justification::centredLeft, 1, 0.9f);
     }
 
     g.setColour (juce::Colour (AppLookAndFeel::textSecondary));
     g.setFont (subFont);
-    g.drawText (on ? juce::String::fromUTF8 ("加工した声を出力中")
-                   : juce::String::fromUTF8 ("原音をそのまま出力中（バイパス）"),
-                subArea, juce::Justification::centredRight, true);
+    g.drawFittedText (getDisplayedSubText(), subArea, juce::Justification::centredRight, 1, 0.9f);
 
     if (hasKeyboardFocus (true))
     {
         g.setColour (juce::Colour (AppLookAndFeel::focus));
         g.drawRoundedRectangle (bounds.reduced (3.0f), 3.0f, 2.0f);
     }
+}
+
+// ===== SECTION: MicButton =====
+
+MicButton::MicButton() : juce::Button ("micButton")
+{
+    setButtonText (juce::String::fromUTF8 ("マイク処理"));
+    setWantsKeyboardFocus (true);
+}
+
+void MicButton::setLampOn (bool on)
+{
+    if (lampOn != on)
+    {
+        lampOn = on;
+        repaint();
+    }
+}
+
+void MicButton::paintButton (juce::Graphics& g, bool isHighlighted, bool isDown)
+{
+    // 背景・枠・フォーカス輪郭は非選択のプリセットボタンと同じ（AppLookAndFeel::drawButtonBackground）。
+    getLookAndFeel().drawButtonBackground (g, *this, {}, isHighlighted, isDown);
+
+    // ランプ: 直径8、中心は部品内(16, 16)。ONはliveで塗り、両方OFFなら中抜き（線幅1.5、idle.fill）。
+    constexpr float lampR = 4.0f;
+
+    if (lampOn)
+    {
+        g.setColour (juce::Colour (AppLookAndFeel::live));
+        g.fillEllipse (16.0f - lampR, 16.0f - lampR, lampR * 2.0f, lampR * 2.0f);
+    }
+    else
+    {
+        g.setColour (juce::Colour (AppLookAndFeel::idleFill));
+        g.drawEllipse (16.0f - lampR + 0.75f, 16.0f - lampR + 0.75f, lampR * 2.0f - 1.5f, lampR * 2.0f - 1.5f, 1.5f);
+    }
+
+    // 文字: 部品内x26・幅68に左寄せ・上下中央（13pt Regular、text.primary、最小横倍率0.9）。
+    g.setColour (juce::Colour (AppLookAndFeel::textPrimary));
+    g.setFont (AppLookAndFeel::uiFont (13.0f));
+    g.drawFittedText (getButtonText(), 26, 0, 68, getHeight(), juce::Justification::centredLeft, 1, 0.9f);
 }
 
 // ===== SECTION: StatusPanel =====
@@ -509,6 +577,13 @@ void StatusPanel::paint (juce::Graphics& g)
         as.append (juce::String (data.deviceMs, 1), numFont, primary);
         as.append (juce::String::fromUTF8 (" ＋ バッファ "), wordFont, secondary);
         as.append (juce::String (data.bufferMs, 1), numFont, primary);
+        as.append (juce::String::fromUTF8 (" ＋ 除去 "), wordFont, secondary);
+
+        if (data.noiseResting)
+            as.append ("OFF", wordFont, secondary);
+        else
+            as.append (juce::String (data.noiseMs, 1), numFont, primary);
+
         as.append (juce::String::fromUTF8 (" ＋ ピッチ "), wordFont, secondary);
 
         if (data.shifterResting)
@@ -599,10 +674,20 @@ MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settings
     inputCombo.onChange = [this] { deviceComboChanged (true); };
     outputCombo.onChange = [this] { deviceComboChanged (false); };
 
+    // Tab順（design.md 5章）: 入力(1) → マイク処理(2) → 出力(3) → ゲイン(4) → ピッチ(5) → リバーブ(6) → プリセット(7〜14) → トグル(15)。
     inputCombo.setExplicitFocusOrder (1);
-    outputCombo.setExplicitFocusOrder (2);
+    micButton.setExplicitFocusOrder (2);
+    outputCombo.setExplicitFocusOrder (3);
+
+    micButton.setTitle (juce::String::fromUTF8 ("マイク処理（ノイズ除去・EQ）の設定"));
+    micButton.onClick = [this]
+    {
+        if (onOpenMicPanel != nullptr)
+            onOpenMicPanel();
+    };
 
     addAndMakeVisible (inputCombo);
+    addAndMakeVisible (micButton);
     addAndMakeVisible (outputCombo);
 
     levelMeter.setTitle (juce::String::fromUTF8 ("入力レベル"));
@@ -626,6 +711,7 @@ MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settings
         s.textFromValueFunction = std::move (fmt);
         s.setTitle (title);
         s.setTooltip (tip);
+        s.setWantsKeyboardFocus (true); // Tab順・矢印キー・フォーカス輪郭（design.md 3.5節・5章）。JUCEのSliderは既定ではフォーカスを受けない
         addAndMakeVisible (s);
     };
 
@@ -641,9 +727,9 @@ MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settings
         [] (double v) { return juce::String ((int) v) + " %"; },
         juce::String::fromUTF8 ("ダブルクリックで初期値（0 %）に戻します"));
 
-    gainSlider.setExplicitFocusOrder (3);
-    pitchSlider.setExplicitFocusOrder (4);
-    reverbSlider.setExplicitFocusOrder (5);
+    gainSlider.setExplicitFocusOrder (4);
+    pitchSlider.setExplicitFocusOrder (5);
+    reverbSlider.setExplicitFocusOrder (6);
 
     auto& ap = audioIO.engineParams();
     gainSlider.setValue (ap.gainDb.load(), juce::dontSendNotification);
@@ -667,9 +753,11 @@ MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settings
 
     createPresetButtons();
 
+    toggleButton.setTexts (juce::String::fromUTF8 ("エフェクト"), juce::String::fromUTF8 ("加工した声を出力中"),
+                           juce::String::fromUTF8 ("原音をそのまま出力中（バイパス）"));
     toggleButton.setToggleState (ap.enabled.load(), juce::dontSendNotification);
     toggleButton.setTitle (juce::String::fromUTF8 ("エフェクト全体のON/OFF"));
-    toggleButton.setExplicitFocusOrder (14);
+    toggleButton.setExplicitFocusOrder (15);
     toggleButton.onClick = [this] { applyToggle(); };
     addAndMakeVisible (toggleButton);
 
@@ -719,7 +807,7 @@ void MainComponent::createPresetButtons()
         button->setTitle (label);
         button->setDescription (juce::String::fromUTF8 (info.tooltip));
         button->setTooltip (juce::String::fromUTF8 (info.tooltip));
-        button->setExplicitFocusOrder (6 + i);
+        button->setExplicitFocusOrder (7 + i);
         button->setBounds (colX[i % 4], rowY[i / 4], 99, 44);
 
         const Preset presetValue = info.preset;
@@ -807,6 +895,32 @@ void MainComponent::refreshEnabledAppearance()
     for (auto& b : presetButtons)
         if (b != nullptr)
             b->repaint();
+
+    toggleButton.setDescription (toggleButton.getDisplayedSubText()); // 表示中の副文（design.md 5章）
+}
+
+void MainComponent::refreshMicAppearance (bool nrOn, bool eqOn)
+{
+    if (micStateKnown && nrOn == shownNrOn && eqOn == shownEqOn)
+        return;
+
+    micStateKnown = true;
+    shownNrOn = nrOn;
+    shownEqOn = eqOn;
+
+    const juce::String state = juce::String::fromUTF8 (nrOn ? "ノイズ除去 ON" : "ノイズ除去 OFF")
+                               + juce::String::fromUTF8 (eqOn ? "、EQ ON" : "、EQ OFF");
+
+    micButton.setLampOn (nrOn || eqOn);
+    micButton.setDescription (state);
+    micButton.setTooltip (juce::String::fromUTF8 ("ノイズ除去とEQの設定を開きます（")
+                          + juce::String::fromUTF8 (nrOn ? "ノイズ除去 ON" : "ノイズ除去 OFF")
+                          + juce::String::fromUTF8 (eqOn ? "・EQ ON）" : "・EQ OFF）"));
+
+    // 全体トグルの副文（OFF時）: マイク処理がすべてOFFなら原音、どちらかがONなら「マイク処理のみ適用中」（D-020）。
+    toggleButton.setOffSubText (nrOn || eqOn ? juce::String::fromUTF8 ("マイク処理のみ適用中（バイパス）")
+                                             : juce::String::fromUTF8 ("原音をそのまま出力中（バイパス）"));
+    toggleButton.setDescription (toggleButton.getDisplayedSubText());
 }
 
 void MainComponent::refreshDeviceCombo (juce::ComboBox& combo, const juce::StringArray& names,
@@ -901,7 +1015,8 @@ void MainComponent::paint (juce::Graphics& g)
 void MainComponent::resized()
 {
     inputLabel.setBounds (20, 12, 60, 32);
-    inputCombo.setBounds (88, 12, 352, 32);
+    inputCombo.setBounds (88, 12, 240, 32);
+    micButton.setBounds (336, 12, 104, 32);
     outputLabel.setBounds (20, 50, 60, 32);
     outputCombo.setBounds (88, 50, 352, 32);
 
@@ -1119,6 +1234,8 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
     data.bufferMs = latency.ringBufferMs;
     data.shifterMs = latency.shifterMs;
     data.shifterResting = shifterResting;
+    data.noiseMs = latency.noiseMs;
+    data.noiseResting = latency.noiseMs <= 0.0;
     data.delayWarn = w2Active;
     data.delayMs = latency.totalMs;
 
@@ -1131,6 +1248,11 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
 
     const bool engineEnabled = audioIO.engineParams().enabled.load (std::memory_order_relaxed);
     const bool bypassed = ! engineEnabled;
+
+    // マイク処理（ノイズ除去・EQ）は全体バイパスの対象外（D-020）。ボタンのランプ・全体トグルの副文・バイパス中の文言に反映する。
+    const bool nrOn = audioIO.engineParams().nrEnabled.load (std::memory_order_relaxed);
+    const bool eqOn = audioIO.engineParams().eqEnabled.load (std::memory_order_relaxed);
+    refreshMicAppearance (nrOn, eqOn);
 
     // トレイのメニューからON/OFFを切り替えた場合、このウィンドウ側の表示にも反映する(T-007)。
     // クリック起点の変更はapplyToggle()がその場で反映するため、ここでは食い違いのときだけ追従する。
@@ -1220,7 +1342,11 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
     }
     else if (bypassed)
     {
-        message = juce::String::fromUTF8 ("バイパス中：原音をそのまま出力しています");
+        // design.md 6.1節: どのマイク処理がかかっているかで4通りに出し分ける。
+        if (nrOn && eqOn)  message = juce::String::fromUTF8 ("バイパス中：ノイズ除去とEQだけをかけて出力しています");
+        else if (nrOn)     message = juce::String::fromUTF8 ("バイパス中：ノイズ除去だけをかけて出力しています");
+        else if (eqOn)     message = juce::String::fromUTF8 ("バイパス中：EQだけをかけて出力しています");
+        else               message = juce::String::fromUTF8 ("バイパス中：原音をそのまま出力しています");
     }
     else
     {
