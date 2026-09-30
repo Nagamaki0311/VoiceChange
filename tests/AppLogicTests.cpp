@@ -193,6 +193,51 @@ private:
             expect (s.eqBands[2].q >= vc::kEqMinQ && s.eqBands[2].q <= vc::kEqMaxQ);
         }
 
+        beginTest ("MicSettings: 設定ファイルの有限な巨大値（floatの範囲外を含む）は、初期値ではなく範囲の端へ丸められる");
+        {
+            juce::PropertySet props;
+            props.setValue ("nrBackground", "9e99");
+            props.setValue ("nrImpact", "-1e300");
+            props.setValue ("gainDb", "3.5e38");
+            props.setValue ("reverb", "1e300");
+            props.setValue (vc::eqBandKey (0, "Hz"), "1e300");
+            props.setValue (vc::eqBandKey (0, "GainDb"), "-9e99");
+            props.setValue (vc::eqBandKey (0, "Q"), "3.5e38");
+            props.setValue (vc::eqBandKey (1, "Hz"), "-1e300");
+            props.setValue (vc::eqBandKey (1, "Q"), "-9e99");
+            props.setValue (vc::eqBandKey (2, "Hz"), "1e400");
+
+            const auto s = vc::loadSettings (props);
+            expectEquals (s.nrBackground, 1.0f);
+            expectEquals (s.nrImpact, 0.0f);
+            expectEquals (s.gainDb, 20.0f);
+            expectEquals (s.reverb, 1.0f);
+            expectEquals (s.eqBands[0].hz, 20000.0f);
+            expectEquals (s.eqBands[0].gainDb, -18.0f);
+            expectEquals (s.eqBands[0].q, 10.0f);
+            expectEquals (s.eqBands[1].hz, 20.0f);
+            expectEquals (s.eqBands[1].q, 0.1f);
+            expectEquals (s.eqBands[2].hz, 20000.0f); // 1e400（doubleでもinfになる値）も端へ
+
+            // 非有限（inf・nan）は従来どおり初期値。
+            props.setValue ("nrBackground", "inf");
+            props.setValue (vc::eqBandKey (0, "Hz"), "-inf");
+            const auto t = vc::loadSettings (props);
+            expectEquals (t.nrBackground, vc::kNrBackgroundDefault);
+            expectEquals (t.eqBands[0].hz, vc::kEqDefaults[0].hz);
+        }
+
+        beginTest ("MicSettings: 無効なEqTypeの整数値はsanitizeで初期値のタイプになる");
+        {
+            vc::SavedSettings s;
+            s.eqBands[1].type = static_cast<vc::EqType> (99);
+            s.eqBands[3].type = static_cast<vc::EqType> (-1);
+            const auto out = vc::sanitize (s);
+            expect (out.eqBands[1].type == vc::kEqDefaults[1].type);
+            expect (out.eqBands[3].type == vc::kEqDefaults[3].type);
+            expect (out.eqBands[0].type == vc::kEqDefaults[0].type, "有効なタイプは変えない");
+        }
+
         beginTest ("MicSettings: タイプ名（eqTypeId / eqTypeFromId）");
         {
             const char* ids[] = { "peak", "lowshelf", "highshelf", "lowcut", "highcut" };
@@ -284,8 +329,11 @@ private:
             expectEquals (out.nrBackground, vc::kNrBackgroundDefault);
 
             for (size_t i = 0; i < vc::kEqDefaults.size(); ++i)
-                expect (out.eqBands[i].hz == vc::kEqDefaults[i].hz && out.eqBands[i].q == vc::kEqDefaults[i].q
-                        && out.eqBands[i].type == vc::kEqDefaults[i].type && out.eqBands[i].on == vc::kEqDefaults[i].on);
+            {
+                expectEquals (out.eqBands[i].hz, vc::kEqDefaults[i].hz);
+                expectEquals (out.eqBands[i].q, vc::kEqDefaults[i].q);
+                expect (out.eqBands[i].type == vc::kEqDefaults[i].type && out.eqBands[i].on == vc::kEqDefaults[i].on);
+            }
         }
     }
 
@@ -344,6 +392,11 @@ private:
                 expect (! parse (EqField::GainDb, bad).has_value(), juce::String ("GainDb: ") + bad);
                 expect (! parse (EqField::Q, bad).has_value(), juce::String ("Q: ") + bad);
             }
+
+            // 長い入力は不正（33文字以上）。32文字までは解釈する。
+            expect (! parse (EqField::Hz, juce::String::repeatedString ("1", 33).toRawUTF8()).has_value(), "33文字は不正");
+            expect (! parse (EqField::Q, juce::String::repeatedString ("1", 100000).toRawUTF8()).has_value(), "10万文字は不正（時間もかからない）");
+            expect (parse (EqField::Hz, juce::String::repeatedString ("0", 31).toRawUTF8()).has_value(), "31文字は解釈する");
 
             expect (! parse (EqField::GainDb, "1k").has_value(), "kは周波数だけ");
             expect (! parse (EqField::Q, "1k").has_value(), "kは周波数だけ");

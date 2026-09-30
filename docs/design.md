@@ -687,6 +687,8 @@ Sonarから乗り換える人の観点での再検証（Designer）:
 - メインのトグルの副文と状態パネルのバイパス文言は、ノイズ除去とEQのON/OFF（atomic）を読んで出し分ける。
 - タイプのコンボボックスには既存の`DeviceComboBox`を使う。
 - 数値欄は、単一クリックで編集する`juce::Label`を土台にする（`NumberField`）。「ドラッグせずに離したら編集」は`Label::mouseUp`、「Tabでフォーカスしたら編集」は`Label::focusGained`（Tabで移ったときだけ）で、JUCEの既定動作として得られる（T-013で確認済み）。編集中の↑↓とTabは`TextEditor`が先に処理する（Labelはキーボードフォーカスコンテナのため、Tabを奪わないと欄の中で循環する）ので、`createEditorComponent`で`TextEditor`を派生させて`keyPressed`で受け取る。編集用の`TextEditor`はそのキー処理の中では削除できないため、確定と次の欄への移動は非同期に行う。
+- `Label`は編集中に`enterModalState(false)`（欄の外のクリックで編集を確定させる非ブロッキングのモーダル状態）を使う。既定のままだと、編集中はメイン・トレイ・マイク処理ウィンドウの他の部品がすべてブロックされ、最初のクリックが吸収されて、トレイの緊急OFF（2章・10.1節）が妨げられる。そのため`NumberField`は`canModalEventBeSentToComponent`をtrueにして、どの部品もブロックしない。欄の外をクリックしたときの確定は、フォーカス喪失（`textEditorFocusLost`）が行う（T-013レビューで修正）。
+- 数値欄が解釈する入力は32文字まで（編集用`TextEditor`の入力制限は16文字）。長い入力の解釈は時間がかかるため、不正として元の値に戻す。
 - メインの`setExplicitFocusOrder`は振り直す（5章）。
 
 ### 10.8 文字幅の見積もり（根拠）

@@ -53,6 +53,11 @@ public:
     void applyText (const juce::String& text);
 
 protected:
+    // Labelは編集中にenterModalState(false)を呼ぶ（欄の外のクリックで編集を確定させるため）。既定のままだと、編集中は他のすべての
+    // 部品（メイン・トレイ・マイク処理ウィンドウ）がモーダルにブロックされ、最初のクリックが吸収される。トレイの緊急OFF（design.md 2章・10.1節）
+    // を妨げないよう、すべての部品へイベントを通す。欄の外のクリックによる確定は、フォーカス喪失（textEditorFocusLost）が行う。
+    bool canModalEventBeSentToComponent (const juce::Component*) override { return true; }
+
     juce::TextEditor* createEditorComponent() override;
     std::unique_ptr<juce::AccessibilityHandler> createAccessibilityHandler() override;
 

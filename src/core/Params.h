@@ -310,23 +310,36 @@ inline juce::String eqBandKey (int band, const char* item)
     return "eqBand" + juce::String (band + 1) + item;
 }
 
+// 設定値のfloat読み込み。キーがなければfallback、非有限（nan・inf）もfallback。有限な値は、doubleのまま範囲へ丸めてからfloatにする
+// （`1e300`のようなfloatを超える値をfloatへ先にキャストするとinfになり、端ではなく初期値になってしまうため）。
+inline float readClampedFloat (const juce::PropertySet& props, const juce::String& key, float fallback, float lo, float hi)
+{
+    const double v = props.getDoubleValue (key, (double) fallback);
+
+    // `1e400`のように数字を含む文字列がdoubleでもinfになった場合は、オーバーフローなので符号の側の端へ。数字を含まない`inf`・`nan`はfallback。
+    if (std::isinf (v) && props.getValue (key).containsAnyOf ("0123456789"))
+        return v > 0.0 ? hi : lo;
+
+    return std::isfinite (v) ? (float) juce::jlimit ((double) lo, (double) hi, v) : fallback;
+}
+
 // キーがなければ初期値。範囲外などの丸めはsanitize()が行う。
 inline SavedSettings loadSettings (const juce::PropertySet& props)
 {
     SavedSettings s;
     s.inputDevice = props.getValue ("inputDevice");
     s.outputDevice = props.getValue ("outputDevice");
-    s.gainDb = (float) props.getDoubleValue ("gainDb", 0.0);
+    s.gainDb = readClampedFloat (props, "gainDb", 0.0f, -20.0f, 20.0f);
     // pitchは設定ファイルの手編集等で小数になっている可能性があるため、丸めてから整数として読む。
     s.pitch = (int) std::lround (props.getDoubleValue ("pitch", 0.0));
-    s.reverb = (float) props.getDoubleValue ("reverb", 0.0);
+    s.reverb = readClampedFloat (props, "reverb", 0.0f, 0.0f, 1.0f);
     s.preset = presetFromId (props.getValue ("preset", "normal")); // 不明な名前・キー無し→Normal
     s.enabled = props.getBoolValue ("enabled", true);
     s.trayNoticeShown = props.getBoolValue ("trayNoticeShown", false);
 
     s.nrEnabled = props.getBoolValue ("nrEnabled", s.nrEnabled);
-    s.nrBackground = (float) props.getDoubleValue ("nrBackground", (double) s.nrBackground);
-    s.nrImpact = (float) props.getDoubleValue ("nrImpact", (double) s.nrImpact);
+    s.nrBackground = readClampedFloat (props, "nrBackground", s.nrBackground, 0.0f, 1.0f);
+    s.nrImpact = readClampedFloat (props, "nrImpact", s.nrImpact, 0.0f, 1.0f);
     s.eqEnabled = props.getBoolValue ("eqEnabled", s.eqEnabled);
 
     for (int i = 0; i < kEqBands; ++i)
@@ -334,9 +347,9 @@ inline SavedSettings loadSettings (const juce::PropertySet& props)
         auto& b = s.eqBands[(size_t) i]; // 初期値はkEqDefaults
         b.on = props.getBoolValue (eqBandKey (i, "On"), b.on);
         b.type = props.containsKey (eqBandKey (i, "Type")) ? eqTypeFromId (props.getValue (eqBandKey (i, "Type"))) : b.type;
-        b.hz = (float) props.getDoubleValue (eqBandKey (i, "Hz"), (double) b.hz);
-        b.gainDb = (float) props.getDoubleValue (eqBandKey (i, "GainDb"), (double) b.gainDb);
-        b.q = (float) props.getDoubleValue (eqBandKey (i, "Q"), (double) b.q);
+        b.hz = readClampedFloat (props, eqBandKey (i, "Hz"), b.hz, kEqMinHz, kEqMaxHz);
+        b.gainDb = readClampedFloat (props, eqBandKey (i, "GainDb"), b.gainDb, -kEqMaxGainDb, kEqMaxGainDb);
+        b.q = readClampedFloat (props, eqBandKey (i, "Q"), b.q, kEqMinQ, kEqMaxQ);
     }
 
     return sanitize (s); // 範囲外の値を範囲の端へ丸める
@@ -405,10 +418,16 @@ inline float roundEqValue (EqField field, double value) noexcept
     return (float) value;
 }
 
+constexpr int kEqInputMaxLength = 32; // 数値欄が解釈する文字列の最大長（編集用TextEditorの入力制限は16文字）
+
 // 入力文字列の解釈。全角の数字・記号・英字は半角に直し、空白と単位（Hz・dB）は無視する。周波数は「k」付きなら1000倍
 // （`1.2k` → 1200）。丸めと範囲外の端への丸めはroundEqValue。数値として読めなければnullopt（呼び出し側は元の値へ戻す）。
 inline std::optional<float> parseEqInput (EqField field, const juce::String& text)
 {
+    // 数値として意味のある長さは高々十数文字。長い入力は不正とする（下の文字列処理が入力長の二乗の時間になるため）。
+    if (text.length() > kEqInputMaxLength)
+        return std::nullopt;
+
     juce::String t;
 
     for (auto c : text)

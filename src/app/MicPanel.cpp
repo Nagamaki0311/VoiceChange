@@ -207,6 +207,7 @@ juce::TextEditor* NumberField::createEditorComponent()
     ed->setJustification (juce::Justification::centredRight);
     ed->setBorder (juce::BorderSize<int>());
     ed->setIndents (0, 0);
+    ed->setInputRestrictions (16); // 数値として意味のある長さは高々十数文字
 
     // 編集中: 文字と縁はtext.primary、選択範囲の背景はline.borderHover。背景と枠は欄（paint）が描く。
     ed->setColour (juce::TextEditor::textColourId, juce::Colour (L::textPrimary));

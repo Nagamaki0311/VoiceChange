@@ -19,6 +19,27 @@
 
 ---
 
+## 2026-09-30 T-013 レビュー修正（Medium 1件・Low 2件・Nit）
+
+### 実施内容
+- Medium: `NumberField`に`canModalEventBeSentToComponent`（常にtrue）を追加。`Label::showEditor()`が`enterModalState(false)`を呼ぶため、編集中は他のすべての部品がモーダルにブロックされ、最初のクリックが吸収されてトレイの緊急OFFが妨げられていた。design.md 10.7に理由と方針を追記。
+- Low(1): `parseEqInput`は33文字以上を不正（nullopt）にした（1万文字0.22秒・10万文字22秒の二乗時間を避ける）。`createEditorComponent`で`setInputRestrictions(16)`。
+- Low(2): `loadSettings`のfloat読み込みを`readClampedFloat`にまとめた（doubleのまま範囲へ丸めてからfloatにする。`1e300`・`3.5e38`・`9e99`は端へ。数字を含んでdoubleでもinfになる`1e400`はオーバーフローとして符号の側の端へ。数字を含まない`inf`・`nan`は従来どおり初期値）。
+- Nit: AppLogicTestsの`==`（-Wfloat-equal）を`expectEquals`に。無効なEqTypeの整数値（99・-1）を渡すsanitizeテストを追加（`eqTypeFromInt`のフォールバックを外すと落ちる）。
+- テスト追加（AppLogic）: 巨大値が端へ丸まる（nrBackground/nrImpact/gainDb/reverb/EQの周波数・ゲイン・Q、`1e400`、`inf`は初期値）、無効EqType、33文字・10万文字は不正で31文字は解釈する。
+
+### 結果
+- モーダル状態の確認（コミットしない一時の自己テスト、Xvfb）: 編集中（`showEditor()`後）は`getNumCurrentlyModalComponents()`が1のまま、`isCurrentlyBlockedByAnotherModalComponent()`がtrueの部品は、マイク処理パネル 0/49・マイク処理ウィンドウ 0/50・メインウィンドウ 0/32。修正前（`canModalEventBeSentToComponent`をfalseにして再現）は 41/49・42/50・32/32でブロックされた。編集中にメインの全体トグルを操作すると1回目で効く（修正前はブロック）。
+- フォーカス喪失による確定: 編集中に入力を`1500`にして背景ノイズ側のスライダーへフォーカスを移すと、周波数が1500に確定し編集が終わる（modal数0）。メインウィンドウのトグルへ移した場合も同様（`777`が確定）。
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 9件すべて成功（mic 165.9秒、long_run 110.6秒、全体345.9秒）。`grep -rnE "malloc|mutex|CriticalSection|DBG\(|Logger::" src/core`は一致なし。
+
+### 次回開始位置
+- T-013の再レビュー。承認後はT-014。
+
+### コミット
+
+---
+
 ## 2026-09-30 T-013 設定の保存・マイク処理ボタンとウィンドウ・内訳表示・統計ログ
 
 ### 実施内容（マイルストーン0: docsのみ）
