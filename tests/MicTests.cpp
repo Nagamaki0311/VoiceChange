@@ -2729,6 +2729,7 @@ private:
         };
 
         double worstRatio = 0.0;
+        juce::String worstName;
 
         for (const double freq : { 200.0, 210.0 })
         for (const auto& sc : scenarios)
@@ -2746,19 +2747,27 @@ private:
 
                 const auto out = runEqScenario (sc.initial, steps, total, signal);
 
-                const bool ok = vc::test::checkNoClick (out.data() + t - steady, steady, out.data() + t, transLen, out.data() + t + afterGap);
+                // 切り替え区間は、切り替えの直前から取る（即時の切り替えの段差［t - 1 → t］も見る）。
+                constexpr int lead = 8;
+                const bool ok = vc::test::checkNoClick (out.data() + t - steady, steady, out.data() + t - lead, transLen + lead, out.data() + t + afterGap);
                 const double before = vc::test::maxAdjacentDiff (out.data() + t - steady, steady);
                 const double after = vc::test::maxAdjacentDiff (out.data() + t + afterGap, steady);
-                const double trans = vc::test::maxAdjacentDiff (out.data() + t, transLen);
+                const double trans = vc::test::maxAdjacentDiff (out.data() + t - lead, transLen + lead);
                 const double ratio = trans / (1.5 * std::max (before, after));
-                worstRatio = std::max (worstRatio, ratio);
+
+                if (ratio > worstRatio)
+                {
+                    worstRatio = ratio;
+                    worstName = juce::String (sc.name) + ", " + juce::String (freq, 0) + " Hz, offset " + juce::String (offset);
+                }
+
                 expect (ok, juce::String ("click detected: ") + sc.name + ", " + juce::String (freq, 0) + " Hz, offset " + juce::String (offset)
                                 + ", transition/threshold " + juce::String (ratio, 3));
                 expect (vc::test::allFinite (out.data(), total), juce::String ("non-finite output: ") + sc.name);
             }
         }
 
-        logMessage ("EQ3: worst transition/threshold ratio over all scenarios " + juce::String (worstRatio, 3) + " (must be <= 1)");
+        logMessage ("EQ3: worst transition/threshold ratio over all scenarios " + juce::String (worstRatio, 3) + " (must be <= 1): " + worstName);
     }
 
     // ----- 分割処理（ブロック長非依存） -----
