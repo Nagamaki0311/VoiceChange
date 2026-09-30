@@ -622,6 +622,26 @@ private:
             expect (line.contains ("speedPpm=-15.5"));   // 速度比補正
             expect (line.contains ("cpu=0.8%"));         // CPU使用率
             expect (line.contains ("memMB=42.0"));       // メモリ(MB)
+            expect (line.contains ("nr=OFF"));           // ノイズ除去（既定はOFF）
+            expect (line.contains ("eq=OFF"));           // EQ
+        }
+
+        beginTest ("StatsLog: ノイズ除去とEQのON/OFFが行に出る（CPU要件の判定条件を区別するため）");
+        {
+            vc::StatsSnapshot s;
+            s.nrEnabled = true;
+            s.eqEnabled = false;
+            auto line = vc::formatStatsLine (s);
+            expect (line.contains ("nr=ON") && line.contains ("eq=OFF"), line);
+
+            s.nrEnabled = false;
+            s.eqEnabled = true;
+            line = vc::formatStatsLine (s);
+            expect (line.contains ("nr=OFF") && line.contains ("eq=ON"), line);
+
+            s.nrEnabled = true;
+            line = vc::formatStatsLine (s);
+            expect (line.contains ("nr=ON") && line.contains ("eq=ON"), line);
         }
 
         beginTest ("StatsLog: 速度比補正が正のときは符号を付ける");

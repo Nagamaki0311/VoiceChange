@@ -538,6 +538,8 @@ private:
         snap.speedCorrectionPpm = (double) fifoStats.speedCorrectionPpm.load (std::memory_order_relaxed);
         snap.cpuPercent = (double) audioIO.getCpuLoad() * 100.0;
         snap.memoryBytes = currentProcessMemoryBytes();
+        snap.nrEnabled = audioIO.engineParams().nrEnabled.load (std::memory_order_relaxed);
+        snap.eqEnabled = audioIO.engineParams().eqEnabled.load (std::memory_order_relaxed);
 
         logFile.appendText (vc::formatStatsLine (snap) + "\n", false, false, nullptr);
     }

@@ -43,8 +43,25 @@
 - 対話動作の確認: 一時的な自己テスト（コミットしていない）でXvfb上にキー・ホイールを注入して確認した。Tab順（背景ノイズ→インパクト→EQ→バンド1［有効・タイプ・周波数・ゲイン・Q］…→バンド5→リセット→先頭）、Tabで欄の編集が始まり全文が選択される、`１．２ｋ`+Enter→1200、↑で1271、Enterで再編集、編集中Escは取消のみでウィンドウは開いたまま（もう一度Escで非表示）、不正入力+Tabは元の値のまま次の欄へ、`-30`+↓→-18（端で止まる）、Shift+Tab、ホイール（250→265→236）、初期値に戻す→元に戻す→もう一度戻す、値を変えると取り消し不可へ、非表示で取り消し不可へ、スイッチ・スライダーがAtomicParamsと設定へ反映。
 - 気づき: X11でウィンドウマネージャがないXvfbでは、`showBeside`直後の`grabKeyboardFocus`が効かないことがある（ウィンドウが未マップ）。Windowsでは`toFront(true)`で前面になるため問題ない想定だが、実機で「表示直後に背景ノイズへフォーカスが当たるか」を確認する項目にする。
 
+### 実施内容（マイルストーン4: ログ・screenshot・docs）
+- `src/core/StatsLog.*`: 統計ログの行に`nr=ON|OFF` `eq=ON|OFF`を追加（`StatsSnapshot`にnrEnabled・eqEnabled）。Main.cppの60秒タイマーがatomicから読む。`tests/AppLogicTests.cpp`のStatsLogテストを更新（既存の全項目テストに`nr=OFF`・`eq=OFF`、ON/OFFの4通りのテストを追加）。
+- README: 機能説明にマイク処理を追加、「マイク処理の使い方」（ノイズ除去・EQ・数値欄の操作・初期値に戻す/元に戻す・全体ON/OFFとの関係）と設定ファイルのキー表を追加、統計ログの書式とCPU判定基準（nr/eqがONのときは増分3.5%以下）を更新、Linuxでの`--screenshot`／`--screenshot-mic`の使い方を追記。
+- design.md 10.7節: 数値欄（Label土台）の実装上の確認結果を、推測から確認済みの記述へ更新。tasks.md: T-013をレビュー中へ。
+
+### 結果
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 9件すべて成功（smoke・ring_buffer・ring_buffer_long・shifter・engine・effects・app_logic・mic・long_run）。所要時間: mic 163.5秒（前回164〜165秒）、long_run 108.0秒（前回108.5秒）、ctest全体 340.8秒（前回343秒）。app_logicは0.01秒。EQ10の追加による増加は数秒以内。
+- `grep -rnE "malloc|mutex|CriticalSection|DBG\(|Logger::" src/core`: 一致なし。
+- Xvfbで`VoiceChange`を8秒動かして生存（timeoutによる終了のみ）。`--screenshot`・`--screenshot-mic`はどちらも460×600のPNG。
+- 目視（Noto Sans CJK JP）: マイク処理ボタンの文字（「マイク処理」の右端は約x428、ボタンの右端は440）が収まる、全体トグルのOFF時の主文と副文が重ならない（「マイク処理のみ適用中（バイパス）」）、内訳行（`内訳 デバイス 0.0 ＋ バッファ 0.0 ＋ 除去 OFF ＋ ピッチ 休止 ms`）が幅420に収まる、マイク処理ウィンドウの要素の順序・位置・はみ出しなし（ノイズ除去ON/EQ ON・OFFで、スイッチ・スライダー・曲線・チェック・ゲインの色が切り替わる）、ローカットのゲイン欄が「—」、無効バンドの文字がtext.secondary、キーボードフォーカス輪郭（スライダー・チェック）と編集中の欄（focus枠・右寄せ）。
+
+### 実装と design.md の差
+- ランプの中抜き（マイク処理ボタン）は、外形が塗りと同じ直径8になるよう線を内側に描いた（線の中心を半径4にすると外形が直径9.5になるため）。全体トグルのランプは既存のまま（線の中心が半径6）。
+- 有効チェックのフォーカス輪郭は、外形が22×22になるよう線を内側に寄せて描いた。
+- メインの3つのスライダーにも`setWantsKeyboardFocus(true)`を追加した（design.md 5章のTab順・3.5節のフォーカス輪郭のため。既存の挙動の変更）。
+- `MicPanel`はタイマーを持たない。メインのマイク処理ボタン・全体トグルの副文・バイパス中の文言は、状態パネルの更新周期（約270ms）でatomicのON/OFFに追従する。
+
 ### 次回開始位置
-- マイルストーン4: 統計ログ（`nr=` `eq=`）、README・docs、全テスト、報告。
+- T-013のレビュー。承認後はT-014（実録音比較ツール）。
 
 ---
 

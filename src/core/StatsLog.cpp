@@ -15,7 +15,9 @@ juce::String formatStatsLine (const StatsSnapshot& s)
          + " overruns=" + juce::String (s.overruns)
          + " speedPpm=" + sign + juce::String (s.speedCorrectionPpm, 1)
          + " cpu=" + juce::String (s.cpuPercent, 1) + "%"
-         + " memMB=" + juce::String (memMb, 1);
+         + " memMB=" + juce::String (memMb, 1)
+         + " nr=" + (s.nrEnabled ? "ON" : "OFF")
+         + " eq=" + (s.eqEnabled ? "ON" : "OFF");
 }
 
 void resetIfLarger (const juce::File& file, juce::int64 limitBytes)
