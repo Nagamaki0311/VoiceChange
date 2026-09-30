@@ -19,6 +19,24 @@
 
 ---
 
+## 2026-09-30 T-012 レビュー修正（テスト追加のみ。src/coreは変更なし）
+
+### 実施内容
+- Medium-1: tests/MicTests.cppに「Settled」を追加。稼働中に1項目（ゲイン、周波数、Q、タイプ、バンド有効/無効、EQ ON/OFF。12ケース）を変更し、400ms待って定常の正弦波（250/1000/3000Hz）のゲインをRBJ Cookbookのdouble自作実装（`rbjMagnitudeDb`）と0.03dB以内で比べる。48k/44.1k。最悪差 0.0002dB。EQ1にもRBJ参照を追加（最大差 0.0455dB［44.1k ローカット80Hz］、限界0.15dB。ほかは0.001dB以下）。
+- Medium-2・Low-1: 「Restart」を追加。(a) Equalizer: ON→OFF（フェード完了）→ONの出力が新規インスタンスとビット一致（`start()`のフィルタリセットを見る）。(b) Engine（EQのみON・バイパス）: EQ ActiveのままNaNブロックの後の出力が新規Engineと一致（`resetMic`のEQリセットを見る）。
+- Low-2・Nit（docs）: README・tasks.md・spec.mdをD-025の3.5%目標に合わせて更新（ミニオン+3.2〜+3.5は境界、レビュー測定+3.54でわずかに超えた、Windows実機で再判断）。D-023の重複表現を整理。
+
+### 結果（変異の検出。すべて元に戻した）
+- `setTarget`の`setTargetValue` 3行を削除 → Settledが落ちた（ゲイン変更が到達しない）。
+- `beginGroup`の`skip(kGroup)` 3行を削除 → Settledが落ちた。
+- `coefficientsStale = smoothing`を`false`に → Settledが落ちた（gain −18→+18で1kHz 17.52dB 対 18.00dB。44.1kも）。
+- `equalizer.reset()`を`resetMic`から削除 → Restart(b)が落ちた。
+- `Equalizer::start`の`b.filter.reset()`を削除 → Restart(a)が落ちた。
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 全9件成功（mic 165秒、long_run 109秒。前回と同等）。
+
+### 次回開始位置
+- T-013（T-012の再レビュー承認後）。
+
 ## 2026-09-30 T-012 EQ（5バンド、ArrayCoefficients）とEngine組み込み、LongRun拡張
 
 ### 実施内容

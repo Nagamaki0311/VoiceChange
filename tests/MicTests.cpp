@@ -13,6 +13,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -2282,6 +2283,61 @@ double referenceMagnitudeDb (double fs, const EqSettings& s, double hz)
     return db;
 }
 
+// RBJ Audio EQ Cookbookのdouble実装（JUCEの式・Coefficientsに依存しない独立した参照値）。単一バンドの振幅[dB]。
+double rbjMagnitudeDb (double fs, const vc::EqBandSettings& b, double f)
+{
+    const double pi = 3.14159265358979323846;
+    const double hz = std::min ((double) b.hz, 0.45 * fs);
+    const double w0 = 2.0 * pi * hz / fs;
+    const double cw = std::cos (w0), sw = std::sin (w0);
+    const double A = std::pow (10.0, (double) b.gainDb / 40.0);
+    const double alpha = sw / (2.0 * (double) b.q);
+    double b0, b1, b2, a0, a1, a2;
+
+    switch (b.type)
+    {
+        case vc::EqType::Peak:
+            b0 = 1 + alpha * A; b1 = -2 * cw; b2 = 1 - alpha * A; a0 = 1 + alpha / A; a1 = -2 * cw; a2 = 1 - alpha / A;
+            break;
+        case vc::EqType::LowShelf:
+        {
+            const double t = 2 * std::sqrt (A) * alpha;
+            b0 = A * ((A + 1) - (A - 1) * cw + t); b1 = 2 * A * ((A - 1) - (A + 1) * cw); b2 = A * ((A + 1) - (A - 1) * cw - t);
+            a0 = (A + 1) + (A - 1) * cw + t; a1 = -2 * ((A - 1) + (A + 1) * cw); a2 = (A + 1) + (A - 1) * cw - t;
+            break;
+        }
+        case vc::EqType::HighShelf:
+        {
+            const double t = 2 * std::sqrt (A) * alpha;
+            b0 = A * ((A + 1) + (A - 1) * cw + t); b1 = -2 * A * ((A - 1) + (A + 1) * cw); b2 = A * ((A + 1) + (A - 1) * cw - t);
+            a0 = (A + 1) - (A - 1) * cw + t; a1 = 2 * ((A - 1) - (A + 1) * cw); a2 = (A + 1) - (A - 1) * cw - t;
+            break;
+        }
+        case vc::EqType::LowCut: // ハイパス
+            b0 = (1 + cw) / 2; b1 = -(1 + cw); b2 = (1 + cw) / 2; a0 = 1 + alpha; a1 = -2 * cw; a2 = 1 - alpha;
+            break;
+        default: // HighCut: ローパス
+            b0 = (1 - cw) / 2; b1 = 1 - cw; b2 = (1 - cw) / 2; a0 = 1 + alpha; a1 = -2 * cw; a2 = 1 - alpha;
+            break;
+    }
+
+    const double w = 2.0 * pi * f / fs;
+    const std::complex<double> z1 = std::polar (1.0, -w), z2 = std::polar (1.0, -2.0 * w);
+    return 20.0 * std::log10 (std::abs ((b0 + b1 * z1 + b2 * z2) / (a0 + a1 * z1 + a2 * z2)));
+}
+
+// 設定全体（EQ OFFなら0dB、有効なバンドのdB和）のRBJ参照値。
+double rbjTotalDb (double fs, const EqSettings& s, bool run, double f)
+{
+    double db = 0.0;
+
+    for (const auto& b : s)
+        if (run && b.on)
+            db += rbjMagnitudeDb (fs, b, f);
+
+    return db;
+}
+
 constexpr int kEqFftOrder = 16;
 
 // Active状態のEqualizerのインパルス応答（65536点）をFFTした振幅[dB]（bin 0〜N/2）。
@@ -2360,6 +2416,8 @@ public:
         runSplit();
         runOutOfRange();
         runBypassAndNonFinite();
+        runSettled();
+        runRestart();
         runEq5();
         runEq9();
     }
@@ -2389,6 +2447,17 @@ private:
                         + juce::String (e.maxAbsDb, 4) + " dB at " + juce::String (e.atHz, 1) + " Hz");
             expect (e.maxAbsDb <= 0.1, juce::String (c.name) + " at " + juce::String (fs, 0) + " Hz: difference " + juce::String (e.maxAbsDb, 4)
                                            + " dB at " + juce::String (e.atHz, 1) + " Hz");
+
+            // 独立参照（RBJ Cookbookのdouble実装）との差。float32係数の量子化を含むため、JUCE参照より緩く0.15dB。
+            const auto measured = measureEqMagnitudeDb (fs, s);
+            const double binHz = fs / (double) (1 << kEqFftOrder);
+            double worstRbj = 0.0;
+
+            for (size_t k = (size_t) std::ceil (20.0 / binHz); (double) k * binHz <= 0.45 * fs; ++k)
+                worstRbj = std::max (worstRbj, std::abs (measured[k] - rbjTotalDb (fs, s, true, (double) k * binHz)));
+
+            logMessage ("EQ1 " + juce::String (fs, 0) + " Hz band " + juce::String (band + 1) + " " + c.name + ": max difference to RBJ " + juce::String (worstRbj, 4) + " dB");
+            expect (worstRbj <= 0.15, juce::String (c.name) + " at " + juce::String (fs, 0) + " Hz: difference to RBJ " + juce::String (worstRbj, 4) + " dB");
         }
 
         // 解析値そのものの確認（JUCEのmake*が型どおりの特性か。ローカットとハイカットの取り違えなどを防ぐ）。
@@ -3068,6 +3137,150 @@ private:
             // 回復後にEQが効いている（+12dB@200Hz。Q=1のピークで、入力0.1の正弦の振幅が約4倍）。
             const double gainDb = rmsDb (out.data() + (int) (1.5 * fs), (int) (0.4 * fs)) - rmsDb (signal.data() + (int) (1.5 * fs), (int) (0.4 * fs));
             expect (std::abs (gainDb - 12.0) < 0.5, "EQ did not recover after the NaN (gain " + juce::String (gainDb, 2) + " dB)");
+        }
+    }
+
+    // ----- 稼働中の変更が目標値へ到達する（RBJ参照） -----
+    // 稼働中に1つの項目を変更して400ms（補間50ms・クロスフェード20msの数倍）待ち、定常の正弦波ゲインをRBJの解析値と比べる。
+    // 44.1kは50ms = 2205サンプルで32の倍数にならない（補間の最後のグループが端数になる）。
+    void runSettled()
+    {
+        beginTest ("Settled: after a change while running (gain, frequency, Q, type, band on/off, EQ on/off) the steady sine gain matches the RBJ value within 0.03 dB (48k/44.1k)");
+
+        struct Case { const char* name; EqState from; std::function<void (EqState&)> change; };
+
+        const auto one = [] (vc::EqType t, float hz, float g, float q, bool run = true)
+        {
+            EqState st;
+            st.run = run;
+            st.settings = makeSingleBandEq (2, t, hz, g, q);
+            return st;
+        };
+
+        const std::vector<Case> cases = {
+            { "gain -18 -> +18 dB", one (vc::EqType::Peak, 1000.0f, -18.0f, 1.0f), [] (EqState& x) { x.settings[2].gainDb = 18.0f; } },
+            { "gain +12 -> -6 dB", one (vc::EqType::LowShelf, 300.0f, 12.0f, 0.71f), [] (EqState& x) { x.settings[2].gainDb = -6.0f; } },
+            { "frequency 500 -> 2000 Hz", one (vc::EqType::Peak, 500.0f, 9.0f, 2.0f), [] (EqState& x) { x.settings[2].hz = 2000.0f; } },
+            { "frequency 4000 -> 250 Hz", one (vc::EqType::HighShelf, 4000.0f, 12.0f, 0.71f), [] (EqState& x) { x.settings[2].hz = 250.0f; } },
+            { "Q 0.5 -> 6", one (vc::EqType::Peak, 1000.0f, 12.0f, 0.5f), [] (EqState& x) { x.settings[2].q = 6.0f; } },
+            { "Q 8 -> 0.3", one (vc::EqType::Peak, 1000.0f, -12.0f, 8.0f), [] (EqState& x) { x.settings[2].q = 0.3f; } },
+            { "type peak -> high shelf", one (vc::EqType::Peak, 1000.0f, 9.0f, 1.0f), [] (EqState& x) { x.settings[2].type = vc::EqType::HighShelf; } },
+            { "type low cut -> high cut", one (vc::EqType::LowCut, 500.0f, 0.0f, 0.71f), [] (EqState& x) { x.settings[2].type = vc::EqType::HighCut; } },
+            { "band disabled", one (vc::EqType::Peak, 1000.0f, 12.0f, 1.0f), [] (EqState& x) { x.settings[2].on = false; } },
+            { "band enabled", [&] { auto x = one (vc::EqType::Peak, 1000.0f, 12.0f, 1.0f); x.settings[2].on = false; return x; }(),
+              [] (EqState& x) { x.settings[2].on = true; } },
+            { "EQ OFF", one (vc::EqType::Peak, 1000.0f, 12.0f, 1.0f), [] (EqState& x) { x.run = false; } },
+            { "EQ ON", one (vc::EqType::Peak, 1000.0f, 12.0f, 1.0f, false), [] (EqState& x) { x.run = true; } },
+        };
+
+        double worst = 0.0;
+
+        for (const double fs : { 48000.0, 44100.0 })
+        for (const auto& c : cases)
+        for (const double f : { 250.0, 1000.0, 3000.0 })
+        {
+            vc::Equalizer eq;
+            eq.prepare (fs);
+            EqState st = c.from;
+            const auto run = [&] (const std::vector<float>& in)
+            {
+                auto out = in;
+
+                for (int pos = 0; pos < (int) out.size(); pos += 480)
+                {
+                    eq.setTarget (st.run, st.settings);
+                    eq.process (out.data() + pos, std::min (480, (int) out.size() - pos));
+                }
+
+                return out;
+            };
+
+            run (makeWhiteNoise ((int) (0.5 * fs), 0.1f, 3));  // 変更前の状態で稼働
+            c.change (st);
+            run (makeWhiteNoise ((int) (0.4 * fs), 0.1f, 4));  // 400ms待つ
+            const int n = (int) (0.3 * fs);
+            const auto in = vc::test::makeSine (f, fs, n, 0.1f);
+            const auto out = run (in);
+            const int from = n / 2;
+            const double gain = rmsDb (out.data() + from, n - from) - rmsDb (in.data() + from, n - from);
+            const double expected = rbjTotalDb (fs, st.settings, st.run, f);
+            worst = std::max (worst, std::abs (gain - expected));
+            expect (std::abs (gain - expected) <= 0.03, juce::String (c.name) + " at " + juce::String (fs, 0) + " Hz, " + juce::String (f, 0)
+                                                          + " Hz sine: gain " + juce::String (gain, 4) + " dB, RBJ " + juce::String (expected, 4) + " dB");
+        }
+
+        logMessage ("Settled: worst difference to RBJ " + juce::String (worst, 4) + " dB (limit 0.03)");
+    }
+
+    // ----- 再開・NaN後の状態が新規インスタンスと同じ -----
+    void runRestart()
+    {
+        beginTest ("Restart: after OFF -> ON, and after a NaN block in Engine, the EQ output is bit-identical to a fresh instance (filter state and Resting are reset)");
+
+        const double fs = 48000.0;
+        const auto boosted = makeSingleBandEq (2, vc::EqType::Peak, 500.0f, 12.0f, 1.0f);
+        const auto x = makeWhiteNoise (4800, 0.1f, 8);
+
+        // (a) Equalizer: ON → OFF（フェード完了）→ ON の出力 = 新規インスタンスのON直後の出力。
+        {
+            vc::Equalizer used, fresh;
+            used.prepare (fs);
+            fresh.prepare (fs);
+            const auto feed = [&] (vc::Equalizer& e, bool run, std::vector<float> in)
+            {
+                for (int pos = 0; pos < (int) in.size(); pos += 480)
+                {
+                    e.setTarget (run, boosted);
+                    e.process (in.data() + pos, std::min (480, (int) in.size() - pos));
+                }
+
+                return in;
+            };
+
+            feed (used, true, makeWhiteNoise (14400, 0.3f, 9));
+            feed (used, false, makeWhiteNoise (4800, 0.3f, 10));
+            expect (! used.isRunning(), "not Resting after OFF");
+            const auto a = feed (used, true, x);
+            const auto b = feed (fresh, true, x);
+            expect (std::memcmp (a.data(), b.data(), sizeof (float) * x.size()) == 0, "OFF -> ON output differs from a fresh instance");
+        }
+
+        // (b) Engine（EQのみON・ノイズ除去OFF・バイパス）: EQ Activeのままnan入力 → 次ブロック以降が新規Engineの最初のブロックと一致。
+        {
+            const auto make = [&] (vc::Engine& e)
+            {
+                e.params().enabled.store (false);
+                e.params().eqEnabled.store (true);
+
+                for (size_t i = 0; i < boosted.size(); ++i)
+                    e.params().eqBands[i].store (boosted[i]);
+
+                e.prepare ({ fs, 512 });
+            };
+
+            vc::Engine used, fresh;
+            make (used);
+            make (fresh);
+
+            auto warm = makeWhiteNoise (14400, 0.3f, 11);
+
+            for (int pos = 0; pos < (int) warm.size(); pos += 480)
+                used.process (warm.data() + pos, 480);
+
+            auto bad = makeWhiteNoise (480, 0.3f, 12);
+            bad[5] = std::numeric_limits<float>::quiet_NaN();
+            used.process (bad.data(), 480);
+            expectEquals ((int) used.getErrorFlags() & 1, 1, "flag not raised");
+
+            auto a = x, b = x;
+
+            for (int pos = 0; pos < (int) x.size(); pos += 480)
+            {
+                used.process (a.data() + pos, 480);
+                fresh.process (b.data() + pos, 480);
+            }
+
+            expect (std::memcmp (a.data(), b.data(), sizeof (float) * x.size()) == 0, "output after a NaN block differs from a fresh Engine (EQ not reset)");
         }
     }
 
