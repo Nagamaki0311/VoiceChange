@@ -78,21 +78,6 @@ juce::Image makeTrayImage (bool on, bool errorBadge)
     return img;
 }
 
-vc::SavedSettings loadSettings (juce::PropertiesFile& props)
-{
-    vc::SavedSettings s;
-    s.inputDevice = props.getValue ("inputDevice");
-    s.outputDevice = props.getValue ("outputDevice");
-    s.gainDb = (float) props.getDoubleValue ("gainDb", 0.0);
-    // pitchは設定ファイルの手編集等で小数になっている可能性があるため、丸めてから整数として読む。
-    s.pitch = (int) std::lround (props.getDoubleValue ("pitch", 0.0));
-    s.reverb = (float) props.getDoubleValue ("reverb", 0.0);
-    s.preset = vc::presetFromId (props.getValue ("preset", "normal")); // 不明な名前・キー無し→Normal
-    s.enabled = props.getBoolValue ("enabled", true);
-    s.trayNoticeShown = props.getBoolValue ("trayNoticeShown", false);
-    return vc::sanitize (s); // 範囲外の値を範囲の端へ丸める
-}
-
 // design.md 7.4節「VB-CABLE未検出ダイアログ（非モーダル）」。
 class VbCableDialog final : public juce::DialogWindow
 {
@@ -393,7 +378,7 @@ public:
         options.storageFormat = juce::PropertiesFile::storeAsXML;
 
         settings = std::make_unique<juce::PropertiesFile> (options);
-        const auto saved = loadSettings (*settings);
+        const auto saved = vc::loadSettings (*settings);
 
         // AudioIO::open()（engine.prepare()を内部で呼ぶ）より前に層1パラメータ・プリセット・
         // ON/OFFを設定しておく必要がある（Engine::prepare()がgainSmoothedの初期値に使うため）。
@@ -403,6 +388,15 @@ public:
         params.reverb.store (saved.reverb, std::memory_order_relaxed);
         params.preset.store ((int) saved.preset, std::memory_order_relaxed);
         params.enabled.store (saved.enabled, std::memory_order_relaxed);
+
+        // マイク処理（ノイズ除去・EQ）。全体ON/OFFの対象外（D-020）。
+        params.nrEnabled.store (saved.nrEnabled, std::memory_order_relaxed);
+        params.nrBackground.store (saved.nrBackground, std::memory_order_relaxed);
+        params.nrImpact.store (saved.nrImpact, std::memory_order_relaxed);
+        params.eqEnabled.store (saved.eqEnabled, std::memory_order_relaxed);
+
+        for (size_t i = 0; i < saved.eqBands.size(); ++i)
+            params.eqBands[i].store (saved.eqBands[i]);
 
         const auto inputNames = audioIO.getInputNames();
         const auto outputNames = audioIO.getOutputNames();

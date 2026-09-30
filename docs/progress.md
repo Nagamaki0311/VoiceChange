@@ -26,8 +26,14 @@
 - README・docs/plan.md: 旧目標3%の記述の残りを直した（README N12の「目標3%を超える」→T-010時点の目標で後に3.5%へ緩和、plan.mdのN12・EQ9の「3%を超えたら報告」→3.5%）。
 - docs/tasks.md: T-013を実装中に。
 
+### 実施内容（マイルストーン1: 設定の保存とテスト）
+- `src/core/Params.h`: `SavedSettings`にnrEnabled・nrBackground・nrImpact・eqEnabled・eqBands（既定はOFF・背景70%・インパクト0%・kEqDefaults）、`sanitize`（非有限→初期値、範囲外→端。EQは既存の`sanitizeEqBand`を共用）、`eqTypeId`／`eqTypeFromId`（不明はpeak）、`eqBandKey`、`loadSettings(const PropertySet&)`（Main.cppから移動。キーなし→初期値）、`storeMicSettings`（マイク処理の全項目を書く）、`EqBandAtomic::load`。数値欄の入力解釈の純粋関数（`parseEqInput`／`formatEqValue`／`roundEqValue`／`stepEqValue`、`EqField`）もここに置いた（Label非依存でテストするため）。
+- `src/core/MicProcessing.*`: `eqBandCoefficients`（IIR::ArrayCoefficients。Equalizerの係数更新と、グラフが共用）、`eqMagnitudeDb`、`eqCurveDb`。`Equalizer::updateCoefficients`はこの関数を使う（確保なし・結果は従来と同じ）。
+- `src/app/Main.cpp`: 起動時に保存値をAtomicParamsへ反映。
+- テスト: `tests/AppLogicTests.cpp`に「MicSettings」7件（範囲外の丸め、NaN/Inf・文字列nan、タイプ名、キーなし、往復［EQ 25項目＋NR3項目＋ON/OFF］）と「EQ数値欄」5件（全角・`1.2k`・単位付き・範囲外→端・不正入力→nullopt・表示形式・刻み）。`tests/MicTests.cpp`にEQ10（グラフの曲線関数がRBJ解析値とEqualizerの実測に一致。48k: 0.0016/0.0083dB、44.1k: 0.0089/0.0268dB、96kは解析値のみ0.0217dB）。
+
 ### 次回開始位置
-- マイルストーン1: 設定の保存（Params.hのSavedSettings・sanitize・eqTypeId、Main.cppの読み書き）とAppLogicTests。
+- マイルストーン2: マイク処理ボタンとメイン画面（MainComponent）。
 
 ---
 
