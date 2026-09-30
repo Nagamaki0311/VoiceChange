@@ -66,6 +66,10 @@
 ### 次回開始位置
 - T-013（設定の保存・マイク処理ボタンとマイク処理ウィンドウ・内訳表示・統計ログ。design.md 10章をDesignerが確定してから）。T-012のレビュー承認後。
 
+### コミット
+- `b3878dc` T-012: Equalizer（5バンドIIR・ArrayCoefficients）、Params.hのEQ定義、Engineへの組み込みとEQ1〜EQ9・分割処理のテスト
+- `1ae9ccf` T-012: LongRun拡張、EQ3判定区間の修正、README・plan・progress・decisionsの更新、T-011 Nit（プローブ条件の追記）
+
 ## 2026-09-29 T-011 レビュー修正（Medium-1〜3・Low・Nit）
 
 ### 実施内容
