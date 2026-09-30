@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstring>
 #include <limits>
 
@@ -726,22 +727,50 @@ void Equalizer::start() noexcept
     state = State::FadingIn;
 }
 
+std::array<float, 6> eqBandCoefficients (EqType type, double sampleRate, float hz, float q, float gainDb) noexcept
+{
+    hz = std::min (hz, (float) (kEqMaxHzRatio * sampleRate));
+    const float gainFactor = juce::Decibels::decibelsToGain (gainDb);
+    using Array = juce::dsp::IIR::ArrayCoefficients<float>;
+
+    switch (type)
+    {
+        case EqType::Peak:      return Array::makePeakFilter (sampleRate, hz, q, gainFactor);
+        case EqType::LowShelf:  return Array::makeLowShelf (sampleRate, hz, q, gainFactor);
+        case EqType::HighShelf: return Array::makeHighShelf (sampleRate, hz, q, gainFactor);
+        case EqType::LowCut:    return Array::makeHighPass (sampleRate, hz, q);  // ローカット = ハイパス。ゲインは使わない
+        case EqType::HighCut:   return Array::makeLowPass (sampleRate, hz, q);   // ハイカット = ローパス。ゲインは使わない
+    }
+
+    return Array::makePeakFilter (sampleRate, hz, q, gainFactor);
+}
+
+double eqMagnitudeDb (const std::array<float, 6>& c, double sampleRate, double hz) noexcept
+{
+    const double w = 2.0 * juce::MathConstants<double>::pi * hz / sampleRate;
+    const std::complex<double> z1 = std::polar (1.0, -w), z2 = std::polar (1.0, -2.0 * w);
+    const auto num = (double) c[0] + (double) c[1] * z1 + (double) c[2] * z2;
+    const auto den = (double) c[3] + (double) c[4] * z1 + (double) c[5] * z2;
+
+    return 20.0 * std::log10 (std::max (1.0e-12, std::abs (num / den)));
+}
+
+double eqCurveDb (const std::array<EqBandSettings, kEqBands>& settings, double sampleRate, double hz) noexcept
+{
+    double db = 0.0;
+
+    for (const auto& b : settings)
+        if (b.on)
+            db += eqMagnitudeDb (eqBandCoefficients (b.type, sampleRate, b.hz, b.q, b.gainDb), sampleRate, hz);
+
+    return db;
+}
+
 void Equalizer::updateCoefficients (Band& b) noexcept
 {
-    const float hz = std::min (b.hz.getCurrentValue(), maxHz);
-    const float q = b.q.getCurrentValue();
-    const float gainFactor = juce::Decibels::decibelsToGain (b.gainDb.getCurrentValue());
-    using Array = juce::dsp::IIR::ArrayCoefficients<float>;
-    auto& c = *b.filter.coefficients;
-
-    switch (b.type)
-    {
-        case EqType::Peak:      c = Array::makePeakFilter (sampleRate, hz, q, gainFactor); break;
-        case EqType::LowShelf:  c = Array::makeLowShelf (sampleRate, hz, q, gainFactor); break;
-        case EqType::HighShelf: c = Array::makeHighShelf (sampleRate, hz, q, gainFactor); break;
-        case EqType::LowCut:    c = Array::makeHighPass (sampleRate, hz, q); break;  // ローカット = ハイパス。ゲインは使わない
-        case EqType::HighCut:   c = Array::makeLowPass (sampleRate, hz, q); break;   // ハイカット = ローパス。ゲインは使わない
-    }
+    // 係数は、作成済みのCoefficientsへ配列を代入するだけ（確保しない）。計算はUIのグラフと共通のeqBandCoefficients。
+    *b.filter.coefficients = eqBandCoefficients (b.type, sampleRate, b.hz.getCurrentValue(), b.q.getCurrentValue(),
+                                                 b.gainDb.getCurrentValue());
 }
 
 // 32サンプルのグループの先頭。サンプル数で数えるため、ブロックの区切りに依存しない。

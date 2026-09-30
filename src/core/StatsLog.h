@@ -24,6 +24,8 @@ struct StatsSnapshot
     double speedCorrectionPpm = 0.0;  // クロックずれ補正量
     double cpuPercent = 0.0;
     std::int64_t memoryBytes = 0;     // プロセスのメモリ使用量(Windows以外は0)
+    bool nrEnabled = false;           // ノイズ除去のON/OFF（CPU要件の判定条件を区別するため。D-025）
+    bool eqEnabled = false;           // EQのON/OFF
 };
 
 // 1時間連続動作テストの判定材料にする行(docs/spec.md「計測とログ」)。全項目を1行に含む。

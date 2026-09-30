@@ -290,6 +290,16 @@ private:
 //   バンドの有効/無効: そのバンドのmix。
 //   タイプの変更: mixを0へ下げる → （素通しになったグループの先頭で）タイプ・係数を切り替え、フィルタ状態をリセット → mixを1へ戻す。
 // 周波数・ゲイン・Qは50msの補間（周波数・Qは乗算的、ゲインはdB）。周波数の実効上限は0.45×出力レート。
+// 1バンドのバイクワッド係数（JUCEのIIR::ArrayCoefficients。並びはb0 b1 b2 a0 a1 a2）。周波数は0.45×fsで頭打ちにする。
+// Equalizerの係数更新（音声スレッド。確保しない）と、マイク処理ウィンドウの周波数特性グラフ（UI）が同じ関数を使い、表示と音がずれないようにする。
+std::array<float, 6> eqBandCoefficients (EqType type, double sampleRate, float hz, float q, float gainDb) noexcept;
+
+// 係数の周波数応答の振幅[dB]（hzは実周波数）。
+double eqMagnitudeDb (const std::array<float, 6>& coefficients, double sampleRate, double hz) noexcept;
+
+// 有効なバンド（on）の振幅[dB]の和。EQ全体のON/OFFは含まない（呼び出し側が決める）。
+double eqCurveDb (const std::array<EqBandSettings, kEqBands>& settings, double sampleRate, double hz) noexcept;
+
 class Equalizer
 {
 public:

@@ -19,6 +19,81 @@
 
 ---
 
+## 2026-09-30 T-013 レビュー修正（Medium 1件・Low 2件・Nit）
+
+### 実施内容
+- Medium: `NumberField`に`canModalEventBeSentToComponent`（常にtrue）を追加。`Label::showEditor()`が`enterModalState(false)`を呼ぶため、編集中は他のすべての部品がモーダルにブロックされ、最初のクリックが吸収されてトレイの緊急OFFが妨げられていた。design.md 10.7に理由と方針を追記。
+- Low(1): `parseEqInput`は33文字以上を不正（nullopt）にした（1万文字0.22秒・10万文字22秒の二乗時間を避ける）。`createEditorComponent`で`setInputRestrictions(16)`。
+- Low(2): `loadSettings`のfloat読み込みを`readClampedFloat`にまとめた（doubleのまま範囲へ丸めてからfloatにする。`1e300`・`3.5e38`・`9e99`は端へ。数字を含んでdoubleでもinfになる`1e400`はオーバーフローとして符号の側の端へ。数字を含まない`inf`・`nan`は従来どおり初期値）。
+- Nit: AppLogicTestsの`==`（-Wfloat-equal）を`expectEquals`に。無効なEqTypeの整数値（99・-1）を渡すsanitizeテストを追加（`eqTypeFromInt`のフォールバックを外すと落ちる）。
+- テスト追加（AppLogic）: 巨大値が端へ丸まる（nrBackground/nrImpact/gainDb/reverb/EQの周波数・ゲイン・Q、`1e400`、`inf`は初期値）、無効EqType、33文字・10万文字は不正で31文字は解釈する。
+
+### 結果
+- モーダル状態の確認（コミットしない一時の自己テスト、Xvfb）: 編集中（`showEditor()`後）は`getNumCurrentlyModalComponents()`が1のまま、`isCurrentlyBlockedByAnotherModalComponent()`がtrueの部品は、マイク処理パネル 0/49・マイク処理ウィンドウ 0/50・メインウィンドウ 0/32。修正前（`canModalEventBeSentToComponent`をfalseにして再現）は 41/49・42/50・32/32でブロックされた。編集中にメインの全体トグルを操作すると1回目で効く（修正前はブロック）。
+- フォーカス喪失による確定: 編集中に入力を`1500`にして背景ノイズ側のスライダーへフォーカスを移すと、周波数が1500に確定し編集が終わる（modal数0）。メインウィンドウのトグルへ移した場合も同様（`777`が確定）。
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 9件すべて成功（mic 165.9秒、long_run 110.6秒、全体345.9秒）。`grep -rnE "malloc|mutex|CriticalSection|DBG\(|Logger::" src/core`は一致なし。
+
+### 次回開始位置
+- T-013の再レビュー。承認後はT-014。
+
+### コミット
+- `0e125e8` T-013レビュー修正: 数値欄の編集中に他の部品をモーダルでブロックしない、長い入力・巨大値の扱い、テスト追加
+
+---
+
+## 2026-09-30 T-013 設定の保存・マイク処理ボタンとウィンドウ・内訳表示・統計ログ
+
+### 実施内容（マイルストーン0: docsのみ）
+- docs/design.md: Designerの確定案を反映。3.3（図2行・表2行）、3.5（マイク処理ボタン全置き換え、スライダーのフォーカス輪郭、全体トグルの領域と副文）、4、5、6.1〜6.3、10章の全文置き換え（10.1〜10.8）。9章の「EQの操作方法」の参照を10.5節Bから10.6節Bへ更新。案の「現行」文言は現行のdesign.mdと全箇所一致した（調整なし）。
+- README・docs/plan.md: 旧目標3%の記述の残りを直した（README N12の「目標3%を超える」→T-010時点の目標で後に3.5%へ緩和、plan.mdのN12・EQ9の「3%を超えたら報告」→3.5%）。
+- docs/tasks.md: T-013を実装中に。
+
+### 実施内容（マイルストーン1: 設定の保存とテスト）
+- `src/core/Params.h`: `SavedSettings`にnrEnabled・nrBackground・nrImpact・eqEnabled・eqBands（既定はOFF・背景70%・インパクト0%・kEqDefaults）、`sanitize`（非有限→初期値、範囲外→端。EQは既存の`sanitizeEqBand`を共用）、`eqTypeId`／`eqTypeFromId`（不明はpeak）、`eqBandKey`、`loadSettings(const PropertySet&)`（Main.cppから移動。キーなし→初期値）、`storeMicSettings`（マイク処理の全項目を書く）、`EqBandAtomic::load`。数値欄の入力解釈の純粋関数（`parseEqInput`／`formatEqValue`／`roundEqValue`／`stepEqValue`、`EqField`）もここに置いた（Label非依存でテストするため）。
+- `src/core/MicProcessing.*`: `eqBandCoefficients`（IIR::ArrayCoefficients。Equalizerの係数更新と、グラフが共用）、`eqMagnitudeDb`、`eqCurveDb`。`Equalizer::updateCoefficients`はこの関数を使う（確保なし・結果は従来と同じ）。
+- `src/app/Main.cpp`: 起動時に保存値をAtomicParamsへ反映。
+- テスト: `tests/AppLogicTests.cpp`に「MicSettings」7件（範囲外の丸め、NaN/Inf・文字列nan、タイプ名、キーなし、往復［EQ 25項目＋NR3項目＋ON/OFF］）と「EQ数値欄」5件（全角・`1.2k`・単位付き・範囲外→端・不正入力→nullopt・表示形式・刻み）。`tests/MicTests.cpp`にEQ10（グラフの曲線関数がRBJ解析値とEqualizerの実測に一致。48k: 0.0016/0.0083dB、44.1k: 0.0089/0.0268dB、96kは解析値のみ0.0217dB）。
+
+### 実施内容（マイルストーン2: マイク処理ボタンとメイン画面）
+- `src/app/MainComponent.*`: `MicButton`（幅104・x336、ランプ、ツールチップ、説明、Tab順2）、入力コンボを幅240に、`ToggleSwitch`を主文の語・副文・高さを渡せる形に共用化（主文は部品内x40・幅132、副文はx176・幅228で重ならない。1行・最小横倍率0.9）。全体トグルの副文はマイク処理の状態で「原音をそのまま出力中（バイパス）」／「マイク処理のみ適用中（バイパス）」、説明（setDescription）にも入れる。状態パネルの内訳に「除去」（遅延0のときは`除去 OFF`）、バイパス中メッセージの4通り。Tab順を1〜15へ振り直し。`drawLinearSlider`に、スライダーごとの`liveState`プロパティ（全体バイパスより優先）とキーボードフォーカス輪郭（つまみ＋3px、16×26）を追加。
+- メインの3つのスライダーに`setWantsKeyboardFocus(true)`を追加した（JUCEのSliderは既定でフォーカスを受けず、design.md 5章のTab順・矢印キーとフォーカス輪郭が効いていなかったため）。
+- 画面確認（Xvfb、Noto Sans CJK JP）: マイク処理ボタンの文字が収まる、全体トグルの主文と副文が重ならない、内訳行が幅420に収まる。
+
+### 実施内容（マイルストーン3: マイク処理ウィンドウ）
+- `src/app/MicPanel.h/.cpp`（新規）: `MicWindow`（DocumentWindow、閉じるボタンのみ、非モーダル、460×600、閉じる/Escで非表示、初回はメインの右隣［収まらなければメインの中央に重ねる］、表示のたびに背景ノイズのスライダーへフォーカス）、`MicPanel`（内容。ノイズ除去スイッチ・背景ノイズ/インパクトのスライダー・EQスイッチ・グラフ・5バンド行・ヒント・「EQを初期値に戻す」と取り消し）、`NumberField`（Labelベースの数値欄。クリック/Tabで編集、Enter確定［欄にフォーカスが残る］、Esc取消［ウィンドウは閉じない］、Tab確定、↑↓とホイール、UIAの題名・値）、`BandCheck`、`EqGraph`（`eqCurveDb`で曲線を計算）。値の変更は即座にAtomicParamsへ反映し、`storeMicSettings`で保存（メッセージスレッドのみが書く）。タイマーは持たず、値が変わったときだけ再描画する。
+- `src/app/Main.cpp`: マイク処理ウィンドウの所有、メインのマイク処理ボタンで開く、メインをトレイへ格納するとき一緒に非表示、`--screenshot-mic <path>`。
+- 対話動作の確認: 一時的な自己テスト（コミットしていない）でXvfb上にキー・ホイールを注入して確認した。Tab順（背景ノイズ→インパクト→EQ→バンド1［有効・タイプ・周波数・ゲイン・Q］…→バンド5→リセット→先頭）、Tabで欄の編集が始まり全文が選択される、`１．２ｋ`+Enter→1200、↑で1271、Enterで再編集、編集中Escは取消のみでウィンドウは開いたまま（もう一度Escで非表示）、不正入力+Tabは元の値のまま次の欄へ、`-30`+↓→-18（端で止まる）、Shift+Tab、ホイール（250→265→236）、初期値に戻す→元に戻す→もう一度戻す、値を変えると取り消し不可へ、非表示で取り消し不可へ、スイッチ・スライダーがAtomicParamsと設定へ反映。
+- 気づき: X11でウィンドウマネージャがないXvfbでは、`showBeside`直後の`grabKeyboardFocus`が効かないことがある（ウィンドウが未マップ）。Windowsでは`toFront(true)`で前面になるため問題ない想定だが、実機で「表示直後に背景ノイズへフォーカスが当たるか」を確認する項目にする。
+
+### 実施内容（マイルストーン4: ログ・screenshot・docs）
+- `src/core/StatsLog.*`: 統計ログの行に`nr=ON|OFF` `eq=ON|OFF`を追加（`StatsSnapshot`にnrEnabled・eqEnabled）。Main.cppの60秒タイマーがatomicから読む。`tests/AppLogicTests.cpp`のStatsLogテストを更新（既存の全項目テストに`nr=OFF`・`eq=OFF`、ON/OFFの4通りのテストを追加）。
+- README: 機能説明にマイク処理を追加、「マイク処理の使い方」（ノイズ除去・EQ・数値欄の操作・初期値に戻す/元に戻す・全体ON/OFFとの関係）と設定ファイルのキー表を追加、統計ログの書式とCPU判定基準（nr/eqがONのときは増分3.5%以下）を更新、Linuxでの`--screenshot`／`--screenshot-mic`の使い方を追記。
+- design.md 10.7節: 数値欄（Label土台）の実装上の確認結果を、推測から確認済みの記述へ更新。tasks.md: T-013をレビュー中へ。
+
+### 結果
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 9件すべて成功（smoke・ring_buffer・ring_buffer_long・shifter・engine・effects・app_logic・mic・long_run）。所要時間: mic 163.5秒（前回164〜165秒）、long_run 108.0秒（前回108.5秒）、ctest全体 340.8秒（前回343秒）。app_logicは0.01秒。EQ10の追加による増加は数秒以内。
+- `grep -rnE "malloc|mutex|CriticalSection|DBG\(|Logger::" src/core`: 一致なし。
+- Xvfbで`VoiceChange`を8秒動かして生存（timeoutによる終了のみ）。`--screenshot`・`--screenshot-mic`はどちらも460×600のPNG。
+- 目視（Noto Sans CJK JP）: マイク処理ボタンの文字（「マイク処理」の右端は約x428、ボタンの右端は440）が収まる、全体トグルのOFF時の主文と副文が重ならない（「マイク処理のみ適用中（バイパス）」）、内訳行（`内訳 デバイス 0.0 ＋ バッファ 0.0 ＋ 除去 OFF ＋ ピッチ 休止 ms`）が幅420に収まる、マイク処理ウィンドウの要素の順序・位置・はみ出しなし（ノイズ除去ON/EQ ON・OFFで、スイッチ・スライダー・曲線・チェック・ゲインの色が切り替わる）、ローカットのゲイン欄が「—」、無効バンドの文字がtext.secondary、キーボードフォーカス輪郭（スライダー・チェック）と編集中の欄（focus枠・右寄せ）。
+
+### 実装と design.md の差
+- ランプの中抜き（マイク処理ボタン）は、外形が塗りと同じ直径8になるよう線を内側に描いた（線の中心を半径4にすると外形が直径9.5になるため）。全体トグルのランプは既存のまま（線の中心が半径6）。
+- 有効チェックのフォーカス輪郭は、外形が22×22になるよう線を内側に寄せて描いた。
+- メインの3つのスライダーにも`setWantsKeyboardFocus(true)`を追加した（design.md 5章のTab順・3.5節のフォーカス輪郭のため。既存の挙動の変更）。
+- `MicPanel`はタイマーを持たない。メインのマイク処理ボタン・全体トグルの副文・バイパス中の文言は、状態パネルの更新周期（約270ms）でatomicのON/OFFに追従する。
+
+### 次回開始位置
+- T-013のレビュー。承認後はT-014（実録音比較ツール）。
+
+### コミット
+- `62625cc` T-013 手順0: マイク処理UIのデザイン確定案をdesign.mdへ反映、旧目標3%の記述を3.5%へ
+- `dfbe487` T-013: マイク処理の設定の保存・復元（SavedSettings・sanitize・タイプ名・数値欄の入力解釈）とグラフ用の係数関数、テスト
+- `f44fb7a` T-013: マイク処理ボタン・全体トグルの副文・内訳の除去・バイパス中の文言・Tab順・スライダーのフォーカス輪郭
+- `0d98825` T-013: マイク処理ウィンドウ（ノイズ除去・EQ・周波数特性グラフ・数値欄）とMain.cppでの所有・表示、--screenshot-mic
+- `bac2969` T-013: 統計ログにnr=・eq=を追加、README（マイク処理の使い方・設定キー）、docs、レビュー中へ
+
+---
+
 ## 2026-09-30 T-012 レビュー修正（テスト追加のみ。src/coreは変更なし）
 
 ### 実施内容

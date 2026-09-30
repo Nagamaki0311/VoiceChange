@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <functional>
 
 // ===== SECTION: MainComponent =====
 // docs/design.md をUIの正本とする。座標・色・フォントサイズは同書3章の値を使う。
@@ -150,16 +151,43 @@ private:
 };
 
 // ===== SECTION: ToggleSwitch =====
-// design.md 3.5節「全体ON/OFFトグル」。ランプ付きの横長スイッチ、自前描画。
+// design.md 3.5節「全体ON/OFFトグル」・10.3節「スイッチ」。ランプ付きの横長スイッチ、自前描画。
+// メインの全体ON/OFF（高さ48）とマイク処理ウィンドウのスイッチ2つ（高さ40）で共用する。ランプは部品内(24, 高さ/2)、
+// 主文は部品内x40・幅132に左寄せ、副文は部品内x176・幅228に右寄せ（重ならない）。
 class ToggleSwitch final : public juce::Button
 {
 public:
     ToggleSwitch();
 
+    // 主文の語（「エフェクト」「ノイズ除去」「EQ」。ONのとき「語 ON」、OFFのとき「語 OFF」）と、状態ごとの副文。
+    void setTexts (const juce::String& wordIn, const juce::String& onSubText, const juce::String& offSubText);
+    // OFFの副文だけを差し替える（メインのトグルはマイク処理の状態で出し分ける）。
+    void setOffSubText (const juce::String& subText);
+    const juce::String& getDisplayedSubText() const noexcept { return getToggleState() ? onSub : offSub; }
+
     void paintButton (juce::Graphics&, bool isHighlighted, bool isDown) override;
 
 private:
+    juce::String word, onSub, offSub;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (ToggleSwitch)
+};
+
+// ===== SECTION: MicButton =====
+// design.md 3.5節「マイク処理ボタン」。入力行の右端。ランプはノイズ除去かEQのどちらかがONなら塗り、両方OFFなら中抜き。
+class MicButton final : public juce::Button
+{
+public:
+    MicButton();
+
+    void setLampOn (bool on);
+
+    void paintButton (juce::Graphics&, bool isHighlighted, bool isDown) override;
+
+private:
+    bool lampOn = false;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MicButton)
 };
 
 // ===== SECTION: StatusPanel =====
@@ -180,6 +208,8 @@ struct StatusData
     double bufferMs = 0.0;
     double shifterMs = 0.0;
     bool shifterResting = true;
+    double noiseMs = 0.0;
+    bool noiseResting = true; // ノイズ除去の遅延が0（OFF中と、ONにした直後の準備中）は「除去 OFF」
 
     juce::String inputModeText;
     juce::String outputModeText;
@@ -215,6 +245,9 @@ class MainComponent final : public juce::Component,
                              private juce::Timer
 {
 public:
+    // マイク処理ボタン（クリック・Enter・Space）が押されたときに呼ぶ。マイク処理ウィンドウはMain.cppが所有する。
+    std::function<void()> onOpenMicPanel;
+
     // audioIO・settingsはMain.cpp（アプリ全体）が所有し、本コンポーネントより長生きする。
     // コンボボックスの選択表示は、起動時にopen()を試みたデバイス名（失敗していてもよい）を
     // AudioIO::getDesiredInputName()/getDesiredOutputName()から読む（design.md 3.5節）。
@@ -251,6 +284,9 @@ private:
 
     void applyToggle();
     void refreshEnabledAppearance();
+    // ノイズ除去・EQのON/OFF（AtomicParams。マイク処理ウィンドウが書く）に、ボタンのランプ・ツールチップ・説明、
+    // 全体トグルの副文と説明を合わせる。状態パネルの更新周期（約270ms）ごとに呼ぶ。
+    void refreshMicAppearance (bool nrOn, bool eqOn);
 
     void updateStatus (bool slowUpdate);
     // announceKeyは経過秒数など毎秒変わる部分を除いた文言。キーが変わったときだけ読み上げ通知する。
@@ -267,6 +303,7 @@ private:
 
     juce::Label inputLabel, outputLabel, levelLabel, gainLabel, pitchLabel, reverbLabel;
     DeviceComboBox inputCombo, outputCombo;
+    MicButton micButton;
 
     LevelMeter levelMeter;
     juce::Label levelValueLabel;
@@ -278,6 +315,8 @@ private:
     ToggleSwitch toggleButton;
 
     StatusPanel statusPanel;
+
+    bool micStateKnown = false, shownNrOn = false, shownEqOn = false; // refreshMicAppearanceの変化検出
 
     int frameCounter = 0;
     int accessibilityFrameCounter = 0; // 30fps想定で30回=約1秒ごとにstatusPanelのdescriptionを更新

@@ -2420,9 +2420,65 @@ public:
         runRestart();
         runEq5();
         runEq9();
+        runEq10();
     }
 
 private:
+    // ----- EQ10: マイク処理ウィンドウのグラフの曲線（eqCurveDb）-----
+    // グラフは、Equalizerと同じ係数の関数（eqBandCoefficients）から曲線を作る。RBJの解析値（独立参照）と、Equalizerの実測（インパルス応答のFFT）に一致し、
+    // OFFのバンドは曲線に入らないことを確かめる（表示と音がずれないこと。docs/design.md 10.3節）。
+    void runEq10()
+    {
+        beginTest ("EQ10: graph curve (eqCurveDb) matches the RBJ analytic value and the measured Equalizer response");
+
+        EqSettings s {};
+        s[0] = { true, vc::EqType::LowCut, 90.0f, 5.0f, 0.71f };       // ゲインは使わない
+        s[1] = { true, vc::EqType::LowShelf, 250.0f, 4.5f, 0.71f };
+        s[2] = { false, vc::EqType::Peak, 1000.0f, 12.0f, 2.0f };      // 無効: 曲線に入らない
+        s[3] = { true, vc::EqType::Peak, 3000.0f, -6.0f, 1.4f };
+        s[4] = { true, vc::EqType::HighShelf, 8000.0f, 3.0f, 0.71f };
+
+        for (const double fs : { 48000.0, 44100.0, 96000.0 })
+        {
+            double worstRbj = 0.0;
+
+            for (double f = 20.0; f <= 20000.0; f *= 1.05)
+            {
+                if (f > 0.45 * fs)
+                    break;
+
+                worstRbj = std::max (worstRbj, std::abs (vc::eqCurveDb (s, fs, f) - rbjTotalDb (fs, s, true, f)));
+            }
+
+            logMessage ("EQ10 " + juce::String (fs, 0) + " Hz: curve vs RBJ max difference " + juce::String (worstRbj, 4) + " dB");
+            expect (worstRbj <= 0.15, "curve vs RBJ at " + juce::String (fs, 0) + " Hz: " + juce::String (worstRbj, 4) + " dB");
+
+            // 実測との比較は、EQ1と同じ48k/44.1kだけ（96kは20Hz付近でfloat32係数の量子化が大きく、0.18dB差になる。解析値との差は0.03dB以下）。
+            if (fs > 50000.0)
+                continue;
+
+            const auto measured = measureEqMagnitudeDb (fs, s);
+            const double binHz = fs / (double) (1 << kEqFftOrder);
+            double worstMeasured = 0.0;
+
+            for (size_t k = (size_t) std::ceil (20.0 / binHz); (double) k * binHz <= 0.45 * fs; ++k)
+                worstMeasured = std::max (worstMeasured, std::abs (measured[k] - vc::eqCurveDb (s, fs, (double) k * binHz)));
+
+            logMessage ("EQ10 " + juce::String (fs, 0) + " Hz: curve vs measured Equalizer max difference " + juce::String (worstMeasured, 4) + " dB");
+            expect (worstMeasured <= 0.1, "curve vs measured at " + juce::String (fs, 0) + " Hz: " + juce::String (worstMeasured, 4) + " dB");
+        }
+
+        // 周波数の実効上限（0.45 fs）: 44.1kHzで20 kHzのバンドは19845 Hzとして扱う（Equalizerと同じ）。
+        EqSettings edge = makeSingleBandEq (0, vc::EqType::Peak, 20000.0f, 12.0f, 2.0f);
+        expect (std::abs (vc::eqCurveDb (edge, 44100.0, 19845.0) - rbjTotalDb (44100.0, edge, true, 19845.0)) <= 0.15, "clamped band frequency");
+
+        // すべて無効なら0 dB。
+        for (auto& b : s)
+            b.on = false;
+
+        expect (std::abs (vc::eqCurveDb (s, 48000.0, 1000.0)) < 1.0e-9, "all bands off is flat");
+    }
+
     // ----- EQ1: 各タイプの周波数特性 -----
     void runEq1()
     {
