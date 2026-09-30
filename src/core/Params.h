@@ -67,9 +67,98 @@ constexpr std::array<PresetSpec, 8> kPresets { {
 // マイク処理（ノイズ除去）の背景ノイズの初期値。AtomicParamsの初期値と、Engineが非有限値を読んだときの代替値。
 constexpr float kNrBackgroundDefault = 0.7f;
 
+// ===== SECTION: EQ（T-012） =====
+// マイク処理のEQ（5バンド）。docs/spec.md「マイク処理: EQ」、docs/decisions.md D-024、docs/plan.md 8.2節参照。
+// UI表示名（design.md）と内部識別子の対照表:
+//   Peak = ピーキング / LowShelf = ローシェルフ / HighShelf = ハイシェルフ
+//   LowCut = ローカット（ハイパスフィルタ。IIR::makeHighPass） / HighCut = ハイカット（ローパスフィルタ。IIR::makeLowPass）
+enum class EqType
+{
+    Peak = 0,
+    LowShelf,
+    HighShelf,
+    LowCut,
+    HighCut
+};
+
+constexpr int kEqBands = 5;
+
+struct EqBandSettings
+{
+    bool on;
+    EqType type;
+    float hz;
+    float gainDb;
+    float q;
+};
+
+// 範囲（spec.mdの表）。周波数の実効上限は、さらに0.45×出力レートで頭打ちにする（Equalizer側）。
+constexpr float kEqMinHz = 20.0f, kEqMaxHz = 20000.0f;
+constexpr float kEqMaxGainDb = 18.0f;
+constexpr float kEqMinQ = 0.10f, kEqMaxQ = 10.0f;
+
+// 初期値（仮）。spec.mdの初期値のとおり。T-015でSonarの設定を再現した値に置き換える。
+constexpr std::array<EqBandSettings, kEqBands> kEqDefaults { {
+    { true, EqType::LowShelf,    100.0f, 0.0f, 0.71f },
+    { true, EqType::Peak,        250.0f, 0.0f, 0.71f },
+    { true, EqType::Peak,       1000.0f, 0.0f, 0.71f },
+    { true, EqType::Peak,       3000.0f, 0.0f, 0.71f },
+    { true, EqType::HighShelf,  8000.0f, 0.0f, 0.71f },
+} };
+
+// int値をEqTypeへ。範囲外ならfallback。
+inline EqType eqTypeFromInt (int value, EqType fallback) noexcept
+{
+    return value >= (int) EqType::Peak && value <= (int) EqType::HighCut ? static_cast<EqType> (value) : fallback;
+}
+
+// 非有限値は初期値（fallback）へ、範囲外は端へ丸める。juce::jlimitはNaNをそのまま返すため、範囲チェックの前に非有限値を除く。
+// Equalizer::setTargetが毎ブロックこれを通す（設定ファイルの読み込み側［T-013のsanitize］も同じ関数を使う）。
+inline EqBandSettings sanitizeEqBand (EqBandSettings s, const EqBandSettings& fallback) noexcept
+{
+    if (! std::isfinite (s.hz))
+        s.hz = fallback.hz;
+    if (! std::isfinite (s.gainDb))
+        s.gainDb = fallback.gainDb;
+    if (! std::isfinite (s.q))
+        s.q = fallback.q;
+
+    s.hz = juce::jlimit (kEqMinHz, kEqMaxHz, s.hz);
+    s.gainDb = juce::jlimit (-kEqMaxGainDb, kEqMaxGainDb, s.gainDb);
+    s.q = juce::jlimit (kEqMinQ, kEqMaxQ, s.q);
+
+    return s;
+}
+
+// UIスレッドと音声スレッド間で受け渡すEQ1バンドの値。各フィールドは独立にatomicで読み書きする
+// （周波数とゲインが1ブロックだけ新旧混在しうるが、どちらも有効値で補間されるため許容する。plan.md 8.2）。
+struct EqBandAtomic
+{
+    std::atomic<bool> on { true };
+    std::atomic<int> type { (int) EqType::Peak }; // EqTypeのint値
+    std::atomic<float> hz { 1000.0f };
+    std::atomic<float> gainDb { 0.0f };
+    std::atomic<float> q { 0.71f };
+
+    void store (const EqBandSettings& s) noexcept
+    {
+        on.store (s.on, std::memory_order_relaxed);
+        type.store ((int) s.type, std::memory_order_relaxed);
+        hz.store (s.hz, std::memory_order_relaxed);
+        gainDb.store (s.gainDb, std::memory_order_relaxed);
+        q.store (s.q, std::memory_order_relaxed);
+    }
+};
+
 // UIスレッドと音声スレッド間で受け渡す層1パラメータ。すべてatomicのみ（音声スレッドはロックしない）。
 struct AtomicParams
 {
+    AtomicParams()
+    {
+        for (size_t i = 0; i < eqBands.size(); ++i)
+            eqBands[i].store (kEqDefaults[i]);
+    }
+
     std::atomic<float> gainDb { 0.0f };  // -20〜+20dB
     std::atomic<float> reverb { 0.0f };  // 0〜1（0〜100%）
     std::atomic<int> pitch { 0 };        // -12〜+12半音（層1ピッチ、1半音刻み）
@@ -79,7 +168,11 @@ struct AtomicParams
     // マイク処理（ノイズ除去）。全体ON/OFFの対象外（D-020）。docs/spec.md「マイク処理: ノイズ除去」。
     std::atomic<bool> nrEnabled { false };
     std::atomic<float> nrBackground { kNrBackgroundDefault }; // 背景ノイズ 0〜1（0〜100%）
-    std::atomic<float> nrImpact { 0.0f };                     // インパクトノイズ 0〜1。保持するだけで、使うのはT-011
+    std::atomic<float> nrImpact { 0.0f };                     // インパクトノイズ 0〜1
+
+    // マイク処理（EQ）。同じく全体ON/OFFの対象外（D-020）。docs/spec.md「マイク処理: EQ」。
+    std::atomic<bool> eqEnabled { false };
+    std::array<EqBandAtomic, kEqBands> eqBands;               // 初期値はkEqDefaults（コンストラクタで設定）
 };
 
 static_assert (std::atomic<float>::is_always_lock_free);

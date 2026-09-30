@@ -627,4 +627,267 @@ bool NoiseReducer::process (float* buf, int n) noexcept
     return true;
 }
 
+// ===== SECTION: Equalizer =====
+
+namespace
+{
+constexpr double kEqFadeSeconds = 0.020;   // EQ全体・バンドの有効/無効・タイプ変更のクロスフェード
+constexpr double kEqSmoothSeconds = 0.050; // 周波数・ゲイン・Qの補間
+constexpr float kEqMaxHzRatio = 0.45f;     // 周波数の実効上限 = 0.45 × 出力レート
+} // namespace
+
+void Equalizer::prepare (double newSampleRate)
+{
+    jassert (newSampleRate > 0.0);
+
+    sampleRate = newSampleRate;
+    maxHz = (float) (kEqMaxHzRatio * sampleRate);
+    fadeStep = 1.0 / (double) std::max (1, (int) std::lround (kEqFadeSeconds * sampleRate));
+
+    for (size_t i = 0; i < bands.size(); ++i)
+    {
+        auto& b = bands[i];
+
+        // Coefficientsはここで作る（make*が確保する）。以後は音声スレッドで、同じオブジェクトへ配列を代入するだけ。
+        b.filter.coefficients = juce::dsp::IIR::Coefficients<float>::makePeakFilter (sampleRate, 1000.0f, 1.0f, 1.0f);
+        b.filter.reset();
+
+        b.hz.reset (sampleRate, kEqSmoothSeconds);
+        b.q.reset (sampleRate, kEqSmoothSeconds);
+        b.gainDb.reset (sampleRate, kEqSmoothSeconds);
+
+        b.target = sanitizeEqBand (kEqDefaults[i], kEqDefaults[i]);
+        b.target.hz = std::min (b.target.hz, maxHz);
+        b.type = b.target.type;
+        b.hz.setCurrentAndTargetValue (b.target.hz);
+        b.q.setCurrentAndTargetValue (b.target.q);
+        b.gainDb.setCurrentAndTargetValue (b.target.gainDb);
+    }
+
+    runTarget = false;
+    reset();
+}
+
+void Equalizer::setTarget (bool run, const std::array<EqBandSettings, kEqBands>& settings) noexcept
+{
+    runTarget = run;
+    const bool resting = state == State::Resting;
+
+    for (size_t i = 0; i < bands.size(); ++i)
+    {
+        auto& b = bands[i];
+        b.target = sanitizeEqBand (settings[i], kEqDefaults[i]);
+        b.target.hz = std::min (b.target.hz, maxHz);
+
+        if (resting) // 休止中の値の変化は補間しない（起動時に古い値から動かさない）
+        {
+            b.hz.setCurrentAndTargetValue (b.target.hz);
+            b.q.setCurrentAndTargetValue (b.target.q);
+            b.gainDb.setCurrentAndTargetValue (b.target.gainDb);
+        }
+        else
+        {
+            b.hz.setTargetValue (b.target.hz);
+            b.q.setTargetValue (b.target.q);
+            b.gainDb.setTargetValue (b.target.gainDb);
+        }
+    }
+}
+
+void Equalizer::reset() noexcept
+{
+    state = State::Resting;
+    gain = 0.0;
+    phase = 0;
+    coefficientsStale = true;
+
+    for (auto& b : bands)
+    {
+        b.filter.reset(); // 次数は変わらないため確保しない
+        b.mix = 0.0;
+        b.idle = true;
+    }
+}
+
+// Restingから稼働へ。バンドは目標の状態（有効なら処理後、無効なら素通し）で始め、全体のgainで0から20msかけて入れる。
+void Equalizer::start() noexcept
+{
+    for (auto& b : bands)
+    {
+        b.type = b.target.type;
+        b.filter.reset();
+        b.mix = b.target.on ? 1.0 : 0.0;
+        b.idle = ! b.target.on;
+    }
+
+    phase = 0;
+    coefficientsStale = true;
+    gain = 0.0;
+    state = State::FadingIn;
+}
+
+void Equalizer::updateCoefficients (Band& b) noexcept
+{
+    const float hz = std::min (b.hz.getCurrentValue(), maxHz);
+    const float q = b.q.getCurrentValue();
+    const float gainFactor = juce::Decibels::decibelsToGain (b.gainDb.getCurrentValue());
+    using Array = juce::dsp::IIR::ArrayCoefficients<float>;
+    auto& c = *b.filter.coefficients;
+
+    switch (b.type)
+    {
+        case EqType::Peak:      c = Array::makePeakFilter (sampleRate, hz, q, gainFactor); break;
+        case EqType::LowShelf:  c = Array::makeLowShelf (sampleRate, hz, q, gainFactor); break;
+        case EqType::HighShelf: c = Array::makeHighShelf (sampleRate, hz, q, gainFactor); break;
+        case EqType::LowCut:    c = Array::makeHighPass (sampleRate, hz, q); break;  // ローカット = ハイパス。ゲインは使わない
+        case EqType::HighCut:   c = Array::makeLowPass (sampleRate, hz, q); break;   // ハイカット = ローパス。ゲインは使わない
+    }
+}
+
+// 32サンプルのグループの先頭。サンプル数で数えるため、ブロックの区切りに依存しない。
+void Equalizer::beginGroup() noexcept
+{
+    bool smoothing = false;
+
+    for (auto& b : bands)
+    {
+        // 素通しになったバンドで、タイプを切り替える（フィルタ状態は、処理を再開するときにリセットする）。
+        if (b.idle && b.type != b.target.type)
+        {
+            b.type = b.target.type;
+            coefficientsStale = true;
+        }
+
+        smoothing = smoothing || b.hz.isSmoothing() || b.q.isSmoothing() || b.gainDb.isSmoothing();
+    }
+
+    if (! smoothing && ! coefficientsStale)
+        return;
+
+    // このグループの係数は、グループの先頭の補間値から計算し、補間値を32サンプル進める。補間が終わった直後のグループでは、
+    // 最後の補間値で計算したままなので、もう1グループ（目標値で）計算する。
+    for (auto& b : bands)
+    {
+        updateCoefficients (b);
+        b.hz.skip (kGroup);
+        b.q.skip (kGroup);
+        b.gainDb.skip (kGroup);
+    }
+
+    coefficientsStale = smoothing;
+}
+
+// 1つのバンドをsegの[0, len)へ掛ける（len <= kGroup）。mixは1サンプルごとに動く。
+void Equalizer::processBand (Band& b, float* seg, int len) noexcept
+{
+    const bool up = b.target.on && b.type == b.target.type; // 処理後の側へ向かうか
+
+    if (b.idle)
+    {
+        if (! up)
+            return; // 素通しのまま（フィルタは動かさない）
+
+        b.filter.reset(); // 処理を再開するときは、古い状態を持ち込まない
+        b.idle = false;
+    }
+
+    // processSample（1サンプルずつ）を使う。Filter::process()は呼び出しごとに状態のsnapToZeroをするため、
+    // ブロックの区切りによって結果が変わりうる。snapToZeroはグループの終わり（process()の側）で行う。
+    float ch[kGroup];
+
+    for (int i = 0; i < len; ++i)
+        ch[i] = b.filter.processSample (seg[i]);
+
+    if (phase + len == kGroup)
+        b.filter.snapToZero();
+
+    if (up && b.mix >= 1.0)
+    {
+        std::memcpy (seg, ch, sizeof (float) * (size_t) len);
+        return;
+    }
+
+    for (int i = 0; i < len; ++i)
+    {
+        seg[i] = (float) ((double) seg[i] * (1.0 - b.mix) + (double) ch[i] * b.mix);
+        b.mix = juce::jlimit (0.0, 1.0, b.mix + (up ? fadeStep : -fadeStep));
+    }
+
+    if (! up && b.mix <= 0.0)
+        b.idle = true;
+}
+
+// EQ全体のクロスフェード。dryは処理前のセグメント、segはバンドを通した後。状態の切り替わりはサンプル単位。
+void Equalizer::mixGlobal (float* seg, const float* dry, int len) noexcept
+{
+    const bool ascending = state == State::FadingIn;
+
+    for (int i = 0; i < len; ++i)
+    {
+        seg[i] = (float) ((double) dry[i] * (1.0 - gain) + (double) seg[i] * gain);
+        gain = juce::jlimit (0.0, 1.0, gain + (ascending ? fadeStep : -fadeStep));
+
+        if (ascending && gain >= 1.0)
+        {
+            state = State::Active; // 残りは処理後のまま
+            return;
+        }
+
+        if (! ascending && gain <= 0.0)
+        {
+            state = State::Resting; // 残りは入力のまま
+            std::memcpy (seg + i + 1, dry + i + 1, sizeof (float) * (size_t) (len - i - 1));
+            return;
+        }
+    }
+}
+
+void Equalizer::process (float* buf, int n) noexcept
+{
+    switch (state)
+    {
+        case State::Resting:
+            if (runTarget)
+                start();
+            break;
+
+        case State::FadingIn:
+        case State::Active:
+            if (! runTarget)
+                state = State::FadingOut;
+            break;
+
+        case State::FadingOut:
+            if (runTarget)
+                state = State::FadingIn;
+            break;
+    }
+
+    int pos = 0;
+
+    while (pos < n && state != State::Resting)
+    {
+        if (phase == 0)
+            beginGroup();
+
+        const int len = std::min (n - pos, kGroup - phase);
+        float* seg = buf + pos;
+
+        float dry[kGroup];
+        const bool crossfading = state != State::Active;
+
+        if (crossfading)
+            std::memcpy (dry, seg, sizeof (float) * (size_t) len);
+
+        for (auto& b : bands)
+            processBand (b, seg, len);
+
+        if (crossfading)
+            mixGlobal (seg, dry, len);
+
+        phase = (phase + len) % kGroup;
+        pos += len;
+    }
+}
+
 } // namespace vc

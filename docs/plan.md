@@ -410,7 +410,7 @@ F1〜F3が通らなかった場合は閾値を緩めず、測定値を添えて�
 2. ライブラリのソースはdenoise.c、rnn.c、pitch.c、kiss_fft.c、celt_lpc.c、nnet.c、nnet_default.c、parse_lpcnet_weights.c、rnnoise_tables.c、および（モデル側の）rnnoise_data.c。x86/以下はCPU別最適化を有効にした場合のみ。
 3. `rnnoise_create`は`malloc`を使う。`rnnoise_process_frame`（denoise.c・rnn.c・nnet.c）はスタック配列だけを使う。parse_lpcnet_weights.cの確保はファイル/バッファからモデルを読むときだけ。
 4. 入出力はint16の値域のfloat。FRAME_SIZE 480、WINDOW_SIZE 960。v0.2には1フレームの先読み遅延を足すコミット（84fe83b）が入っている。
-5. JUCEの`IIR::ArrayCoefficients`は`std::array`を返し、`Coefficients::operator=(std::array)`は`clearQuick()`＋`ensureStorageAllocated(max(8, Num))`で代入するため、容量があれば再確保しない（JUCE masterで確認。9.0.2での一致はT-012で確認）。
+5. JUCEの`IIR::ArrayCoefficients`は`std::array`を返し、`Coefficients::operator=(std::array)`は`clearQuick()`＋`ensureStorageAllocated(max(8, Num))`で代入するため、容量があれば再確保しない（JUCE masterで確認。9.0.2のソース［`juce_IIRFilter_Impl.h`の`assignImpl`、`juce_ArrayBase.h`の`ensureAllocatedSize`］でも同じで、T-012でEQ5［new・malloc計数］が0回であることを確認した）。`Filter::reset()`も次数が同じなら再確保しない。`Filter::process()`は呼び出しごとに状態を`snapToZero`するためブロックの区切りで結果が変わりうる。EQは`processSample`を使い、`snapToZero`は32サンプルのグループの終わりで行う（T-012）。
 6. 既存のアロケーション検出（tests/TestMain.cpp）はC++の`operator new`だけを数え、Cの`malloc`は数えない。
 
 ### 8.2 実装方針
@@ -443,14 +443,17 @@ enum class EqType { Peak, LowShelf, HighShelf, LowCut, HighCut };
 constexpr int kEqBands = 5;
 struct EqBandSettings { bool on; EqType type; float hz, gainDb, q; };
 constexpr std::array<EqBandSettings, kEqBands> kEqDefaults;  // spec.mdの初期値（仮）。T-015でSonarの再現値に置き換える
-struct EqBandAtomic { std::atomic<bool> on; std::atomic<int> type; std::atomic<float> hz, gainDb, q; };
+constexpr float kEqMinHz = 20, kEqMaxHz = 20000, kEqMaxGainDb = 18, kEqMinQ = 0.1f, kEqMaxQ = 10;
+EqType eqTypeFromInt (int, EqType fallback) noexcept;         // 範囲外ならfallback
+EqBandSettings sanitizeEqBand (EqBandSettings, const EqBandSettings& fallback) noexcept;  // 非有限値→fallback、範囲外→端。SavedSettingsのsanitize（T-013）も使う
+struct EqBandAtomic { std::atomic<bool> on; std::atomic<int> type; std::atomic<float> hz, gainDb, q; void store (const EqBandSettings&) noexcept; };
 // AtomicParams に追加
 std::atomic<bool>  nrEnabled { false };
 std::atomic<float> nrBackground { 0.7f }, nrImpact { 0.0f };   // 0〜1
 std::atomic<bool>  eqEnabled { false };
-std::array<EqBandAtomic, kEqBands> eqBands;                    // 初期値はkEqDefaults
+std::array<EqBandAtomic, kEqBands> eqBands;                    // 初期値はkEqDefaults（AtomicParamsのコンストラクタで設定）
 // SavedSettings に同じ項目を追加し、sanitize()で非有限値→初期値、範囲の端へ丸める
-const char* eqTypeId (EqType) noexcept;  EqType eqTypeFromId (const juce::String&) noexcept;  // 不明ならPeak
+const char* eqTypeId (EqType) noexcept;  EqType eqTypeFromId (const juce::String&) noexcept;  // 不明ならPeak（T-013）
 
 // MicProcessing.h
 class NoiseReducer {
@@ -463,10 +466,11 @@ public:
 };
 class Equalizer {
 public:
-    void prepare (double fs, int maxBlock);            // Coefficientsをmake*で作成（ここだけで確保）
-    void setTarget (bool run, const std::array<EqBandSettings, kEqBands>&) noexcept;
-    void process (float* buf, int n) noexcept;         // OFFのフェード完了後は何もしない
+    void prepare (double fs);                          // Coefficientsをmake*で作成（ここだけで確保）。maxBlockは要らない（32サンプルのスタック配列で処理する）
+    void setTarget (bool run, const std::array<EqBandSettings, kEqBands>&) noexcept;  // sanitizeEqBandで丸め、周波数は0.45×fsで頭打ち
+    void process (float* buf, int n) noexcept;         // OFFのフェード完了後は何もしない（戻り値なし。非有限値は最終出力の検査で検出し、resetMic()でリセットされる）
     void reset() noexcept;
+    bool isRunning() const noexcept;                   // Resting以外。テスト用
 };
 ```
 
@@ -477,7 +481,7 @@ public:
 
 #### Engineへの組み込み
 
-- `processChunk`: `updateInputPeak`の直後、バイパス判定の前に`noiseReducer.setTarget/process` → `equalizer.setTarget/process`を置く（D-020）。以降の`dryScratch`はマイク処理後の信号になる。
+- `processChunk`: `updateInputPeak`の直後、バイパス判定の前に`noiseReducer.setTarget/process` → `equalizer.setTarget/process`を置く（D-020）。以降の`dryScratch`はマイク処理後の信号になる。EQのパラメータはatomicから毎ブロック読み（`eqTypeFromInt`で不正なtypeは初期値）、丸めと非有限値の扱いは`Equalizer::setTarget`が`sanitizeEqBand`で行う。
 - `resetChain()`は層1・層2だけにする（現状の内容のまま）。`resetMic()`（noiseReducer/equalizerのreset）を新設し、`handleNonFinite`は両方を呼ぶ。バイパス解除時は`resetChain()`だけを呼ぶ。
 - `int getNoiseReducerLatencySamples() const noexcept`を追加する。`AudioIO::getLatency()`は`LatencyBreakdown::noiseMs`を加えてtotalに含める。W2（device + ring > 48ms）の式は変えない。
 - atomicは各フィールドを独立に読む（1バンドの周波数とゲインが1ブロックだけ新旧混在しうるが、どちらも有効値で補間されるため許容する）。
@@ -555,7 +559,9 @@ public:
 | EQ7 | 低い声 | 全バンドのゲインが0dBのフラット設定（kEqDefaultsの値には依存しない。T-015で置き換わるため）で85Hz正弦の変化 ≤ 0.1dB |
 | EQ9 | CPU（参考値） | 48kHz・480ブロック・10秒で、EQのみON、およびノイズ除去（N12と同条件）＋EQ ONのとき、ノーマル・トークボックス・ミニオンの処理時間÷音声時間を出力（失敗判定なし）。ON時の増分が3%を超えたら報告する |
 
-- LongRun: 既存のシナリオに「90秒ごとにノイズ除去のON/OFF、45秒ごとに背景ノイズとEQバンド1のゲインを変更」を加える。合格条件は既存と同じ（確保0回を含む）。
+- 実装メモ: 係数の再計算とタイプ切替は32サンプルのグループの先頭で、サンプル数で数える（ブロック長に依存しない）。補間値は係数計算のあと32サンプルぶんまとめて進める（`SmoothedValue::skip(32)`。部分的なskipは丸めの順序が変わりビット一致しないため）。EQ全体・バンド・タイプの切り替えは20msのクロスフェード（`mix`が0〜1）。フィルタ状態は、稼働の開始とバンドの処理再開（素通しから戻すとき）でリセットする。
+- 追加テスト（表の外）: 分割処理（ブロック長{1,7,128,441,480,4096}の混在列・1サンプル・333・一括のビット一致。パラメータ変更を9600サンプルごとの共通の位置で行う。Equalizer単体とEngine経由）、範囲外・NaN/Inf・不正なtypeの扱い（Engine）、バイパスがEQ出力をそのまま通しEQをリセットしないこと、NaN入力でのブロック無音・フラグ・EQの復帰。
+- LongRun: 既存のシナリオに「90秒ごとにノイズ除去のON/OFF、45秒ごとに背景ノイズとEQバンド1のゲインを変更」を加える（EQは常時ON）。合格条件は既存と同じ（確保0回を含む）に、切替回数・ノイズ除去の稼働ブロックがあること・出力FIFOの枯渇0回を足した。
 - 完了条件: Mic・Engine・LongRunが通り、CIの両ジョブが成功する。
 
 #### T-013: 設定の保存・UI（マイク処理ボタン・マイク処理ウィンドウ・内訳表示）・統計ログ

@@ -2,6 +2,9 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
+#include <juce_dsp/juce_dsp.h>
+
+#include "Params.h"
 
 #include <algorithm>
 #include <array>
@@ -16,7 +19,7 @@ struct DenoiseState;
 // ===== SECTION: NoiseReducer =====
 // ノイズ除去: フレーミング・48kHz変換・RNNoise・原音との混合・状態遷移・遅延報告。
 // docs/spec.md「マイク処理: ノイズ除去」、docs/decisions.md D-019〜D-022・D-025、docs/plan.md 8.2節参照。
-// 混合の後に、VAD連動の広帯域ゲート（D-022）とインパクト抑制（D-023）を掛ける（T-011）。EQはT-012。
+// 混合の後に、VAD連動の広帯域ゲート（D-022）とインパクト抑制（D-023）を掛ける（T-011）。EQはEqualizer（同ファイル末尾）。
 //
 // 状態遷移はPitchShifterと同じ表（20msのクロスフェード。gainは0=原音/1=処理後の連続値）。
 // 同じ表の2か所目のため共通化しない（3か所目が出たら検討する。plan.md 8.2）:
@@ -270,6 +273,81 @@ private:
 
     // 音声スレッドのみが書く。UIスレッドはgetLatencySamples()でloadのみ。
     std::atomic<int> latencySamplesForUi { 0 };
+};
+
+// ===== SECTION: Equalizer =====
+// 5バンドのパラメトリックEQ（T-012）。docs/spec.md「マイク処理: EQ」、D-024、docs/plan.md 8.2節参照。
+// juce::dsp::IIR::Filter（2次）を5段直列に並べる。係数はIIR::ArrayCoefficients（std::arrayを返す）で計算し、prepare()で
+// 作成済みのCoefficientsへ代入する（Array::clearQuick + ensureStorageAllocatedで、容量8があれば再確保しない。JUCE 9.0.2で確認）。
+//
+// 時間の基準はすべてサンプル数（ブロックの区切りに依存しない）。処理は32サンプルのグループ単位で進め、グループの先頭で
+//   (1) クロスフェードが終わって素通しになったバンドのタイプ切替、(2) 補間中の係数の再計算（補間値を32サンプル進める）
+// を行う。ブロックの境界がグループの途中に来ても、グループの先頭の位置は変わらない。
+// ただし目標値（setTarget）の反映だけはブロックの先頭（呼び出し側の粒度）で、NoiseReducerと同じ。
+//
+// 切り替え（すべて20msのクロスフェード。mix = 0で素通し、1で処理後）:
+//   EQ全体のON/OFF: 全体のgain（Resting → FadingIn → Active → FadingOut → Resting）。Restingでは何もしない（ビット一致）。
+//   バンドの有効/無効: そのバンドのmix。
+//   タイプの変更: mixを0へ下げる → （素通しになったグループの先頭で）タイプ・係数を切り替え、フィルタ状態をリセット → mixを1へ戻す。
+// 周波数・ゲイン・Qは50msの補間（周波数・Qは乗算的、ゲインはdB）。周波数の実効上限は0.45×出力レート。
+class Equalizer
+{
+public:
+    // メッセージスレッドのみ。デバイス停止中に呼ぶ。Coefficientsの作成（確保）はここだけ。
+    void prepare (double sampleRate);
+
+    // 音声スレッドのみ。各ブロックの先頭で呼ぶ。範囲外の値は端へ丸め、非有限値は初期値（kEqDefaults）にする。
+    void setTarget (bool run, const std::array<EqBandSettings, kEqBands>& settings) noexcept;
+
+    // 音声スレッドのみ。その場で処理する。OFFのフェード完了後（Resting）は何もしない（bufに触れない）。
+    void process (float* buf, int n) noexcept;
+
+    // 音声スレッドのみ。Restingへ戻し、フィルタ状態を消去する（確保なし）。
+    void reset() noexcept;
+
+    // EQがRestingでない（処理中・フェード中）か。テスト用。
+    bool isRunning() const noexcept { return state != State::Resting; }
+
+private:
+    enum class State
+    {
+        Resting,
+        FadingIn,
+        Active,
+        FadingOut
+    };
+
+    static constexpr int kGroup = 32; // 係数の再計算周期（サンプル）
+
+    struct Band
+    {
+        juce::dsp::IIR::Filter<float> filter;
+        EqBandSettings target {};  // 丸め済みの目標値（周波数はfsで頭打ち済み）
+        EqType type = EqType::Peak; // 係数に使っているタイプ（targetのタイプへは、素通しの間に切り替える）
+        juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> hz { 1000.0f };
+        juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> q { 0.71f };
+        juce::SmoothedValue<float> gainDb { 0.0f };
+        double mix = 0.0;          // 0=素通し, 1=処理後
+        bool idle = true;          // フィルタを動かしていない（mix = 0で、目標も素通し）
+    };
+
+    void start() noexcept;                    // Restingから稼働へ。全バンドを目標へ即時に合わせ、フィルタを消去する
+    void beginGroup() noexcept;               // 32サンプルのグループの先頭の処理
+    void updateCoefficients (Band& b) noexcept;
+    void processBand (Band& b, float* seg, int len) noexcept;
+    void mixGlobal (float* seg, const float* dry, int len) noexcept;
+
+    State state = State::Resting;
+    double gain = 0.0; // 0=素通し, 1=EQ。反転しても現在値から続けて動く。
+    bool runTarget = false;
+
+    double sampleRate = 48000.0;
+    float maxHz = 21600.0f; // 0.45 × fs
+    double fadeStep = 1.0;  // 20msのクロスフェードの1サンプルあたりの増分
+    int phase = 0;          // グループ内の位置（0〜kGroup-1）
+    bool coefficientsStale = true;
+
+    std::array<Band, kEqBands> bands;
 };
 
 } // namespace vc

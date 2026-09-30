@@ -36,6 +36,7 @@ void Engine::prepare (const EngineConfig& config)
     fxOldScratch.assign ((size_t) maxBlockSamples, 0.0f);
 
     noiseReducer.prepare (sampleRate, maxBlockSamples);
+    equalizer.prepare (sampleRate);
     shifter.prepare (sampleRate, maxBlockSamples);
     detector.prepare (sampleRate, maxBlockSamples);
     echo.prepare (sampleRate, maxBlockSamples);
@@ -113,6 +114,7 @@ void Engine::resetChain() noexcept
 void Engine::resetMic() noexcept
 {
     noiseReducer.reset();
+    equalizer.reset();
 }
 
 void Engine::handleNonFinite (float* buf, int n) noexcept
@@ -313,7 +315,7 @@ void Engine::processChunk (float* buf, int n) noexcept
 
     updateInputPeak (buf, n);
 
-    // マイク処理（D-020）: バイパス判定の前。全体OFFでも動き、バイパス解除でリセットしない。
+    // マイク処理（D-020: ノイズ除去 → EQ）: バイパス判定の前。全体OFFでも動き、バイパス解除でリセットしない。
     // 以降のdryScratch・バイパスの素通しは、マイク処理後の信号になる。
     const float rawNrBackground = atomicParams.nrBackground.load (std::memory_order_relaxed);
     const float rawNrImpact = atomicParams.nrImpact.load (std::memory_order_relaxed);
@@ -329,6 +331,23 @@ void Engine::processChunk (float* buf, int n) noexcept
         handleNonFinite (buf, n);
         return;
     }
+
+    // EQ（NoiseReducerの直後）。各フィールドは独立に読む（1ブロックだけ新旧混在しうる。plan.md 8.2）。
+    // 範囲外・非有限値・不正なタイプのint値は、Equalizer::setTarget（sanitizeEqBand）が丸める・初期値にする。
+    std::array<EqBandSettings, kEqBands> eqSettings;
+
+    for (size_t i = 0; i < eqSettings.size(); ++i)
+    {
+        const auto& a = atomicParams.eqBands[i];
+        eqSettings[i] = { a.on.load (std::memory_order_relaxed),
+                          eqTypeFromInt (a.type.load (std::memory_order_relaxed), kEqDefaults[i].type),
+                          a.hz.load (std::memory_order_relaxed),
+                          a.gainDb.load (std::memory_order_relaxed),
+                          a.q.load (std::memory_order_relaxed) };
+    }
+
+    equalizer.setTarget (atomicParams.eqEnabled.load (std::memory_order_relaxed), eqSettings);
+    equalizer.process (buf, n);
 
     if (! targetOn && chainGain <= 0.0)
     {

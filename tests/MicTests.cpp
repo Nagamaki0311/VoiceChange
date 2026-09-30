@@ -1,4 +1,5 @@
 #include <juce_core/juce_core.h>
+#include <juce_dsp/juce_dsp.h>
 
 #include "AllocationGuard.h"
 #include "TestSignals.h"
@@ -9,8 +10,10 @@
 #include <rnnoise.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -20,7 +23,7 @@
 // ===== SECTION: MicTests =====
 // マイク処理のテスト（カテゴリMic、quick）。T-009のN0a〜N0e（RNNoiseそのものの確認）と、
 // T-010のNoiseReducer・Engine組み込み（N3a・N4a・N6〜N11。docs/plan.md 8.3）。
-// N1・N2・N3b・N4b・N5とEQ（EQ1〜）はT-011以降で追加する。
+// N1・N2・N3b・N4b・N5はT-011、EQ（EQ1〜EQ9）はT-012で追加した。
 // RNNoiseの入出力はint16の値域のfloat（±32768）、1フレーム480サンプル（48kHzで10ms）。
 
 namespace
@@ -2220,5 +2223,1262 @@ private:
 };
 
 static GateImpactTests gateImpactTests;
+
+// ===== SECTION: Equalizer（T-012） =====
+// EQ1〜EQ7・EQ9と、分割処理（ブロック長非依存）、範囲外・非有限値、バイパスとの関係。閾値は暫定で、外れたら緩めずに実測値を報告する。
+
+using EqSettings = std::array<vc::EqBandSettings, vc::kEqBands>;
+
+// kEqDefaultsには依存しないフラット設定（全バンドのゲイン0dB。タイプ・周波数・Qはspecの初期値と同じ並びだが値は独立に書く）。
+EqSettings makeFlatEq()
+{
+    return { { { true, vc::EqType::LowShelf, 100.0f, 0.0f, 0.71f },
+               { true, vc::EqType::Peak, 250.0f, 0.0f, 0.71f },
+               { true, vc::EqType::Peak, 1000.0f, 0.0f, 0.71f },
+               { true, vc::EqType::Peak, 3000.0f, 0.0f, 0.71f },
+               { true, vc::EqType::HighShelf, 8000.0f, 0.0f, 0.71f } } };
+}
+
+// バンドbandだけ有効にし、残りを無効にした設定。
+EqSettings makeSingleBandEq (int band, vc::EqType type, float hz, float gainDb, float q)
+{
+    auto s = makeFlatEq();
+
+    for (auto& b : s)
+        b.on = false;
+
+    s[(size_t) band] = { true, type, hz, gainDb, q };
+    return s;
+}
+
+// 解析値: 丸め済みの値から、JUCEのCoefficients（make*）の getMagnitudeForFrequency。
+// Equalizerは同じ式のArrayCoefficientsを使うため、周波数特性が一致するかは「フィルタの構成・補間・クロスフェードが特性を変えないか」の確認になる。
+juce::dsp::IIR::Coefficients<float>::Ptr makeReferenceCoefficients (double fs, const vc::EqBandSettings& b)
+{
+    using C = juce::dsp::IIR::Coefficients<float>;
+    const float hz = std::min (b.hz, (float) (0.45 * fs));
+    const float gain = juce::Decibels::decibelsToGain (b.gainDb);
+
+    switch (b.type)
+    {
+        case vc::EqType::Peak:      return C::makePeakFilter (fs, hz, b.q, gain);
+        case vc::EqType::LowShelf:  return C::makeLowShelf (fs, hz, b.q, gain);
+        case vc::EqType::HighShelf: return C::makeHighShelf (fs, hz, b.q, gain);
+        case vc::EqType::LowCut:    return C::makeHighPass (fs, hz, b.q);
+        case vc::EqType::HighCut:   return C::makeLowPass (fs, hz, b.q);
+    }
+
+    return nullptr;
+}
+
+// 解析値のdB（有効なバンドの和）。
+double referenceMagnitudeDb (double fs, const EqSettings& s, double hz)
+{
+    double db = 0.0;
+
+    for (const auto& b : s)
+        if (b.on)
+            db += 20.0 * std::log10 (makeReferenceCoefficients (fs, b)->getMagnitudeForFrequency (hz, fs));
+
+    return db;
+}
+
+// RBJ Audio EQ Cookbookのdouble実装（JUCEの式・Coefficientsに依存しない独立した参照値）。単一バンドの振幅[dB]。
+double rbjMagnitudeDb (double fs, const vc::EqBandSettings& b, double f)
+{
+    const double pi = 3.14159265358979323846;
+    const double hz = std::min ((double) b.hz, 0.45 * fs);
+    const double w0 = 2.0 * pi * hz / fs;
+    const double cw = std::cos (w0), sw = std::sin (w0);
+    const double A = std::pow (10.0, (double) b.gainDb / 40.0);
+    const double alpha = sw / (2.0 * (double) b.q);
+    double b0, b1, b2, a0, a1, a2;
+
+    switch (b.type)
+    {
+        case vc::EqType::Peak:
+            b0 = 1 + alpha * A; b1 = -2 * cw; b2 = 1 - alpha * A; a0 = 1 + alpha / A; a1 = -2 * cw; a2 = 1 - alpha / A;
+            break;
+        case vc::EqType::LowShelf:
+        {
+            const double t = 2 * std::sqrt (A) * alpha;
+            b0 = A * ((A + 1) - (A - 1) * cw + t); b1 = 2 * A * ((A - 1) - (A + 1) * cw); b2 = A * ((A + 1) - (A - 1) * cw - t);
+            a0 = (A + 1) + (A - 1) * cw + t; a1 = -2 * ((A - 1) + (A + 1) * cw); a2 = (A + 1) + (A - 1) * cw - t;
+            break;
+        }
+        case vc::EqType::HighShelf:
+        {
+            const double t = 2 * std::sqrt (A) * alpha;
+            b0 = A * ((A + 1) + (A - 1) * cw + t); b1 = -2 * A * ((A - 1) + (A + 1) * cw); b2 = A * ((A + 1) + (A - 1) * cw - t);
+            a0 = (A + 1) - (A - 1) * cw + t; a1 = 2 * ((A - 1) - (A + 1) * cw); a2 = (A + 1) - (A - 1) * cw - t;
+            break;
+        }
+        case vc::EqType::LowCut: // ハイパス
+            b0 = (1 + cw) / 2; b1 = -(1 + cw); b2 = (1 + cw) / 2; a0 = 1 + alpha; a1 = -2 * cw; a2 = 1 - alpha;
+            break;
+        default: // HighCut: ローパス
+            b0 = (1 - cw) / 2; b1 = 1 - cw; b2 = (1 - cw) / 2; a0 = 1 + alpha; a1 = -2 * cw; a2 = 1 - alpha;
+            break;
+    }
+
+    const double w = 2.0 * pi * f / fs;
+    const std::complex<double> z1 = std::polar (1.0, -w), z2 = std::polar (1.0, -2.0 * w);
+    return 20.0 * std::log10 (std::abs ((b0 + b1 * z1 + b2 * z2) / (a0 + a1 * z1 + a2 * z2)));
+}
+
+// 設定全体（EQ OFFなら0dB、有効なバンドのdB和）のRBJ参照値。
+double rbjTotalDb (double fs, const EqSettings& s, bool run, double f)
+{
+    double db = 0.0;
+
+    for (const auto& b : s)
+        if (run && b.on)
+            db += rbjMagnitudeDb (fs, b, f);
+
+    return db;
+}
+
+constexpr int kEqFftOrder = 16;
+
+// Active状態のEqualizerのインパルス応答（65536点）をFFTした振幅[dB]（bin 0〜N/2）。
+std::vector<double> measureEqMagnitudeDb (double fs, const EqSettings& s)
+{
+    constexpr int n = 1 << kEqFftOrder;
+    vc::Equalizer eq;
+    eq.prepare (fs);
+    eq.setTarget (true, s);
+
+    std::vector<float> warm (2048, 0.0f); // FadingInを終わらせる（20ms = 960サンプル）
+    eq.process (warm.data(), (int) warm.size());
+
+    std::vector<float> data ((size_t) n * 2, 0.0f);
+    data[0] = 1.0f;
+    eq.setTarget (true, s);
+    eq.process (data.data(), n);
+
+    juce::dsp::FFT fft (kEqFftOrder);
+    fft.performRealOnlyForwardTransform (data.data(), true);
+
+    std::vector<double> db ((size_t) n / 2 + 1);
+
+    for (size_t k = 0; k < db.size(); ++k)
+        db[k] = 20.0 * std::log10 (std::max (1.0e-12, std::hypot ((double) data[2 * k], (double) data[2 * k + 1])));
+
+    return db;
+}
+
+// 20Hz〜0.45fsの各binで、測定値と解析値の差の最大[dB]と、その周波数。
+struct EqMagnitudeError
+{
+    double maxAbsDb = 0.0;
+    double atHz = 0.0;
+};
+
+EqMagnitudeError compareEqMagnitude (double fs, const EqSettings& s)
+{
+    const auto measured = measureEqMagnitudeDb (fs, s);
+    const double binHz = fs / (double) (1 << kEqFftOrder);
+    EqMagnitudeError e;
+
+    for (size_t k = (size_t) std::ceil (20.0 / binHz); (double) k * binHz <= 0.45 * fs; ++k)
+    {
+        const double f = (double) k * binHz;
+        const double diff = std::abs (measured[k] - referenceMagnitudeDb (fs, s, f));
+
+        if (diff > e.maxAbsDb)
+        {
+            e.maxAbsDb = diff;
+            e.atHz = f;
+        }
+    }
+
+    return e;
+}
+
+double rmsDb (const float* data, int n)
+{
+    return 20.0 * std::log10 (std::max (1.0e-12, vc::test::rms (data, n)));
+}
+
+class EqualizerTests final : public juce::UnitTest
+{
+public:
+    EqualizerTests() : juce::UnitTest ("Equalizer", "Mic") {}
+
+    void runTest() override
+    {
+        runEq1();
+        runEq2();
+        runEq4();
+        runEq7();
+        runEq6();
+        runEq3();
+        runSplit();
+        runOutOfRange();
+        runBypassAndNonFinite();
+        runSettled();
+        runRestart();
+        runEq5();
+        runEq9();
+    }
+
+private:
+    // ----- EQ1: 各タイプの周波数特性 -----
+    void runEq1()
+    {
+        beginTest ("EQ1: frequency response of each type (impulse response, 65536-point FFT) matches getMagnitudeForFrequency within 0.1 dB over 20 Hz .. 0.45 fs");
+
+        struct Case { const char* name; vc::EqType type; float hz, gainDb, q; };
+        const Case cases[] = {
+            { "peak 1 kHz +6 dB Q1", vc::EqType::Peak, 1000.0f, 6.0f, 1.0f },
+            { "low shelf 200 Hz +6 dB Q0.71", vc::EqType::LowShelf, 200.0f, 6.0f, 0.71f },
+            { "high shelf 5 kHz -4 dB Q0.71", vc::EqType::HighShelf, 5000.0f, -4.0f, 0.71f },
+            { "low cut 80 Hz Q0.71", vc::EqType::LowCut, 80.0f, 0.0f, 0.71f },
+            { "high cut 12 kHz Q0.71", vc::EqType::HighCut, 12000.0f, 0.0f, 0.71f },
+        };
+
+        for (const double fs : { 48000.0, 44100.0 })
+        for (const auto& c : cases)
+        for (const int band : { 0, 4 }) // バンド位置によらない
+        {
+            const auto s = makeSingleBandEq (band, c.type, c.hz, c.gainDb, c.q);
+            const auto e = compareEqMagnitude (fs, s);
+            logMessage ("EQ1 " + juce::String (fs, 0) + " Hz band " + juce::String (band + 1) + " " + c.name + ": max difference "
+                        + juce::String (e.maxAbsDb, 4) + " dB at " + juce::String (e.atHz, 1) + " Hz");
+            expect (e.maxAbsDb <= 0.1, juce::String (c.name) + " at " + juce::String (fs, 0) + " Hz: difference " + juce::String (e.maxAbsDb, 4)
+                                           + " dB at " + juce::String (e.atHz, 1) + " Hz");
+
+            // 独立参照（RBJ Cookbookのdouble実装）との差。float32係数の量子化を含むため、JUCE参照より緩く0.15dB。
+            const auto measured = measureEqMagnitudeDb (fs, s);
+            const double binHz = fs / (double) (1 << kEqFftOrder);
+            double worstRbj = 0.0;
+
+            for (size_t k = (size_t) std::ceil (20.0 / binHz); (double) k * binHz <= 0.45 * fs; ++k)
+                worstRbj = std::max (worstRbj, std::abs (measured[k] - rbjTotalDb (fs, s, true, (double) k * binHz)));
+
+            logMessage ("EQ1 " + juce::String (fs, 0) + " Hz band " + juce::String (band + 1) + " " + c.name + ": max difference to RBJ " + juce::String (worstRbj, 4) + " dB");
+            expect (worstRbj <= 0.15, juce::String (c.name) + " at " + juce::String (fs, 0) + " Hz: difference to RBJ " + juce::String (worstRbj, 4) + " dB");
+        }
+
+        // 解析値そのものの確認（JUCEのmake*が型どおりの特性か。ローカットとハイカットの取り違えなどを防ぐ）。
+        {
+            const double fs = 48000.0;
+            const auto peak = measureEqMagnitudeDb (fs, makeSingleBandEq (2, vc::EqType::Peak, 1000.0f, 6.0f, 1.0f));
+            const auto low = measureEqMagnitudeDb (fs, makeSingleBandEq (0, vc::EqType::LowShelf, 200.0f, 6.0f, 0.71f));
+            const auto high = measureEqMagnitudeDb (fs, makeSingleBandEq (4, vc::EqType::HighShelf, 5000.0f, -4.0f, 0.71f));
+            const auto lowCut = measureEqMagnitudeDb (fs, makeSingleBandEq (0, vc::EqType::LowCut, 80.0f, 0.0f, 0.71f));
+            const auto highCut = measureEqMagnitudeDb (fs, makeSingleBandEq (4, vc::EqType::HighCut, 12000.0f, 0.0f, 0.71f));
+            const auto bin = [&] (double hz) { return (size_t) std::lround (hz * (double) (1 << kEqFftOrder) / fs); };
+
+            expectWithinAbsoluteError (peak[bin (1000.0)], 6.0, 0.05);
+            expectWithinAbsoluteError (peak[bin (60.0)], 0.0, 0.3);
+            expectWithinAbsoluteError (low[bin (20.0)], 6.0, 0.3);
+            expectWithinAbsoluteError (low[bin (5000.0)], 0.0, 0.3);
+            expectWithinAbsoluteError (high[bin (20000.0)], -4.0, 0.5);
+            expectWithinAbsoluteError (high[bin (200.0)], 0.0, 0.05);
+            expectWithinAbsoluteError (lowCut[bin (80.0)], -3.0, 0.1);
+            expectWithinAbsoluteError (lowCut[bin (5000.0)], 0.0, 0.05);
+            expect (lowCut[bin (20.0)] < -20.0, "low cut attenuates 20 Hz");
+            expectWithinAbsoluteError (highCut[bin (12000.0)], -3.0, 0.1);
+            expectWithinAbsoluteError (highCut[bin (200.0)], 0.0, 0.05);
+        }
+    }
+
+    // ----- EQ2: 直列 -----
+    void runEq2()
+    {
+        beginTest ("EQ2: five bands at once match the sum of the bands' dB within 0.1 dB");
+
+        const EqSettings configs[] = {
+            { { { true, vc::EqType::LowShelf, 120.0f, 4.0f, 0.71f },
+                { true, vc::EqType::Peak, 400.0f, -5.0f, 1.2f },
+                { true, vc::EqType::Peak, 1800.0f, 6.0f, 2.0f },
+                { true, vc::EqType::Peak, 4500.0f, -3.0f, 0.8f },
+                { true, vc::EqType::HighShelf, 9000.0f, 3.0f, 0.71f } } },
+            { { { true, vc::EqType::LowCut, 60.0f, 0.0f, 0.71f },
+                { true, vc::EqType::Peak, 300.0f, 3.0f, 1.0f },
+                { true, vc::EqType::Peak, 1200.0f, -4.0f, 1.0f },
+                { true, vc::EqType::Peak, 3500.0f, 5.0f, 3.0f },
+                { true, vc::EqType::HighCut, 14000.0f, 0.0f, 0.71f } } },
+            { { { true, vc::EqType::LowShelf, 100.0f, 18.0f, 0.71f },
+                { false, vc::EqType::Peak, 250.0f, 12.0f, 0.71f }, // 無効なバンドは和に入らない
+                { true, vc::EqType::Peak, 1000.0f, -18.0f, 0.5f },
+                { true, vc::EqType::Peak, 3000.0f, 9.0f, 4.0f },
+                { true, vc::EqType::HighShelf, 8000.0f, -12.0f, 0.71f } } },
+        };
+
+        for (const double fs : { 48000.0, 44100.0 })
+            for (size_t c = 0; c < std::size (configs); ++c)
+            {
+                const auto e = compareEqMagnitude (fs, configs[c]);
+                logMessage ("EQ2 " + juce::String (fs, 0) + " Hz config " + juce::String ((int) c + 1) + ": max difference "
+                            + juce::String (e.maxAbsDb, 4) + " dB at " + juce::String (e.atHz, 1) + " Hz");
+                expect (e.maxAbsDb <= 0.1, "config " + juce::String ((int) c + 1) + " at " + juce::String (fs, 0) + " Hz: difference "
+                                               + juce::String (e.maxAbsDb, 4) + " dB at " + juce::String (e.atHz, 1) + " Hz");
+            }
+    }
+
+    // ----- EQ4: 極端な値 -----
+    void runEq4()
+    {
+        beginTest ("EQ4: extreme values (20 kHz -> 0.45 fs, Q 0.1/10, gain +-18 dB) on 10 s of white noise stay finite and match the analytic RMS (no divergence)");
+
+        double worstDb = 0.0;
+        double peakOut = 0.0;
+
+        for (const double fs : { 48000.0, 44100.0 })
+        {
+            const int n = (int) (10.0 * fs);
+            const auto noise = makeWhiteNoise (n, 0.25f, 4242);
+            const float hzs[] = { 20.0f, 1000.0f, 20000.0f };
+            const float qs[] = { 0.1f, 10.0f };
+            const float gains[] = { -18.0f, 18.0f };
+            const vc::EqType types[] = { vc::EqType::Peak, vc::EqType::LowShelf, vc::EqType::HighShelf, vc::EqType::LowCut, vc::EqType::HighCut };
+
+            const auto check = [&] (const EqSettings& s, const juce::String& label)
+            {
+                vc::Equalizer eq;
+                eq.prepare (fs);
+                auto out = noise;
+                int pos = 0;
+
+                while (pos < n) // 480ごと。毎ブロックsetTarget
+                {
+                    const int len = std::min (480, n - pos);
+                    eq.setTarget (true, s);
+                    eq.process (out.data() + pos, len);
+                    pos += len;
+                }
+
+                expect (vc::test::allFinite (out.data(), n), label + ": non-finite output");
+
+                // 白色雑音の出力パワー = 入力パワー × |H|²の平均（解析値）。後半5秒で比べる。
+                constexpr int bins = 8192;
+                double meanSq = 0.0;
+
+                for (int k = 0; k < bins; ++k)
+                {
+                    const double f = (0.5 * fs) * ((double) k + 0.5) / (double) bins;
+                    const double mag = std::pow (10.0, referenceMagnitudeDb (fs, s, f) / 20.0);
+                    meanSq += mag * mag;
+                }
+
+                const double expectedDb = 10.0 * std::log10 (meanSq / bins);
+                const double measuredDb = rmsDb (out.data() + n / 2, n / 2) - rmsDb (noise.data() + n / 2, n / 2);
+                worstDb = std::max (worstDb, std::abs (measuredDb - expectedDb));
+                peakOut = std::max (peakOut, vc::test::peakAbs (out.data(), n));
+                expect (std::abs (measuredDb - expectedDb) <= 3.0,
+                        label + ": RMS gain " + juce::String (measuredDb, 2) + " dB, analytic " + juce::String (expectedDb, 2) + " dB");
+            };
+
+            for (const auto type : types)
+                for (const float hz : hzs)
+                    for (const float q : qs)
+                        for (const float g : gains)
+                            check (makeSingleBandEq (2, type, hz, g, q),
+                                   juce::String (fs, 0) + " Hz type " + juce::String ((int) type) + " hz " + juce::String (hz, 0) + " Q " + juce::String (q, 1)
+                                       + " gain " + juce::String (g, 0));
+
+            // 5バンドすべてが極端（直列でゲインが重なる）。
+            for (const float q : qs)
+                for (const float g : gains)
+                    check ({ { { true, vc::EqType::LowShelf, 20.0f, g, q },
+                               { true, vc::EqType::Peak, 20.0f, g, q },
+                               { true, vc::EqType::Peak, 20000.0f, g, q },
+                               { true, vc::EqType::Peak, 1000.0f, g, q },
+                               { true, vc::EqType::HighShelf, 20000.0f, g, q } } },
+                           juce::String (fs, 0) + " Hz all bands extreme, Q " + juce::String (q, 1) + " gain " + juce::String (g, 0));
+        }
+
+        logMessage ("EQ4: worst RMS difference to the analytic value " + juce::String (worstDb, 2) + " dB (threshold 3 dB), largest output peak "
+                    + juce::String (peakOut, 1));
+    }
+
+    // ----- EQ7: 低い声 -----
+    void runEq7()
+    {
+        beginTest ("EQ7: all bands at 0 dB (flat): an 85 Hz sine changes by <= 0.1 dB");
+
+        for (const double fs : { 48000.0, 44100.0 })
+        {
+            const int n = (int) (2.0 * fs);
+            const auto in = vc::test::makeSine (85.0, fs, n, 0.3f);
+            auto out = in;
+
+            vc::Equalizer eq;
+            eq.prepare (fs);
+
+            for (int pos = 0; pos < n; pos += 480)
+            {
+                eq.setTarget (true, makeFlatEq());
+                eq.process (out.data() + pos, std::min (480, n - pos));
+            }
+
+            const int from = (int) (0.5 * fs);
+            const double changeDb = rmsDb (out.data() + from, n - from) - rmsDb (in.data() + from, n - from);
+            logMessage ("EQ7 " + juce::String (fs, 0) + " Hz: 85 Hz sine change " + juce::String (changeDb, 5) + " dB");
+            expect (std::abs (changeDb) <= 0.1, juce::String (fs, 0) + " Hz: change " + juce::String (changeDb, 5) + " dB");
+        }
+    }
+
+    // ----- EQ6: OFF時のビット一致 -----
+    void runEq6()
+    {
+        beginTest ("EQ6: Equalizer::process leaves the buffer bit-identical while OFF (from the start, and after ON -> OFF completes); the fade is not");
+
+        juce::Random rng (77);
+        const auto makeInput = [&] (int n)
+        {
+            std::vector<float> v ((size_t) n);
+
+            for (auto& x : v)
+                x = (rng.nextFloat() * 2.0f - 1.0f) * 1.7f; // |x| > 1を含む
+
+            return v;
+        };
+
+        const auto boosted = makeSingleBandEq (2, vc::EqType::Peak, 500.0f, 12.0f, 1.0f);
+
+        for (const double fs : { 48000.0, 44100.0 })
+        {
+            vc::Equalizer eq;
+            eq.prepare (fs);
+
+            const auto identical = [&] (int blocks, const juce::String& label)
+            {
+                for (int b = 0; b < blocks; ++b)
+                {
+                    const auto in = makeInput (b % 3 == 0 ? 480 : 137);
+                    auto out = in;
+                    eq.setTarget (false, boosted);
+                    eq.process (out.data(), (int) out.size());
+                    expect (std::memcmp (in.data(), out.data(), sizeof (float) * in.size()) == 0, label + ": block " + juce::String (b) + " modified");
+                }
+            };
+
+            identical (20, juce::String (fs, 0) + " Hz, from the start");
+
+            // ON: 変化する。
+            bool changed = false;
+
+            for (int b = 0; b < 30; ++b)
+            {
+                const auto in = makeInput (480);
+                auto out = in;
+                eq.setTarget (true, boosted);
+                eq.process (out.data(), 480);
+                changed = changed || std::memcmp (in.data(), out.data(), sizeof (float) * 480) != 0;
+            }
+
+            expect (changed, "control: ON did not change the signal");
+            expect (eq.isRunning(), "control: not running while ON");
+
+            // ON -> OFF: フェード中は変化し、完了後（20ms = 960サンプル）はビット一致。
+            {
+                const auto in = makeInput (200);
+                auto out = in;
+                eq.setTarget (false, boosted);
+                eq.process (out.data(), 200);
+                expect (std::memcmp (in.data(), out.data(), sizeof (float) * 200) != 0, "control: FadingOut left the buffer untouched");
+            }
+
+            for (int b = 0; b < 4; ++b)
+            {
+                auto out = makeInput (480);
+                eq.setTarget (false, boosted);
+                eq.process (out.data(), 480);
+            }
+
+            expect (! eq.isRunning(), "still running after the fade-out");
+            identical (20, juce::String (fs, 0) + " Hz, after ON -> OFF");
+
+            // Engine経由（EQ OFF・ノイズ除去OFF・バイパス）でも、既存のE4aと同じくビット一致（|x| <= 1）。
+            vc::Engine engine;
+            engine.params().enabled.store (false);
+            engine.prepare ({ fs, 512 });
+            auto in = makeInput (2000);
+
+            for (auto& x : in)
+                x = juce::jlimit (-1.0f, 1.0f, x);
+
+            auto out = in;
+            engine.process (out.data(), (int) out.size());
+            expect (std::memcmp (in.data(), out.data(), sizeof (float) * in.size()) == 0, "Engine bypass with EQ OFF is not bit-identical");
+        }
+    }
+
+    // ----- EQ3: クリック -----
+    // 200Hz/210Hzの正弦（A = 0.3、-80dBFSの雑音付き）の、切り替え前後の定常区間と切り替え区間の隣接差を、N9aと同じ判定器で比べる。
+    struct EqState
+    {
+        bool run = true;
+        EqSettings settings = makeFlatEq();
+    };
+
+    struct EqStep
+    {
+        int atSample;
+        std::function<void (EqState&)> apply;
+    };
+
+    std::vector<float> runEqScenario (EqState state, std::vector<EqStep> steps, int total, const std::vector<float>& signal)
+    {
+        vc::Equalizer eq;
+        eq.prepare (kFs);
+
+        std::sort (steps.begin(), steps.end(), [] (const EqStep& a, const EqStep& b) { return a.atSample < b.atSample; });
+
+        auto out = signal;
+        int pos = 0;
+        size_t next = 0;
+
+        while (pos < total)
+        {
+            while (next < steps.size() && steps[next].atSample <= pos)
+                steps[next++].apply (state);
+
+            int len = std::min (480, total - pos);
+
+            if (next < steps.size())
+                len = std::min (len, steps[next].atSample - pos);
+
+            eq.setTarget (state.run, state.settings);
+            eq.process (out.data() + pos, len);
+            pos += len;
+        }
+
+        return out;
+    }
+
+    void runEq3()
+    {
+        beginTest ("EQ3: no clicks when gain, frequency, Q, type, band on/off or EQ on/off change (click judge as in N9a)");
+
+        const int total = (int) (4.2 * kFs);
+        const int steady = (int) (0.5 * kFs);
+        const int transLen = (int) (0.4 * kFs);
+        const int afterGap = (int) (1.0 * kFs);
+        const int base = (int) (2.0 * kFs);
+
+        struct Scenario
+        {
+            const char* name;
+            EqState initial;
+            std::function<void (EqState&)> change;
+            std::function<void (EqState&)> changeBack; // 反転用（あれば、change後400サンプルで適用）
+        };
+
+        const auto oneBand = [] (vc::EqType type, float hz, float gain, float q, bool run = true)
+        {
+            EqState s;
+            s.run = run;
+            s.settings = makeSingleBandEq (2, type, hz, gain, q);
+            return s;
+        };
+
+        const auto withType = [] (vc::EqType t) { return [t] (EqState& s) { s.settings[2].type = t; }; };
+
+        std::vector<Scenario> scenarios = {
+            { "gain -12 -> +12 dB", oneBand (vc::EqType::Peak, 200.0f, -12.0f, 1.0f), [] (EqState& s) { s.settings[2].gainDb = 12.0f; }, nullptr },
+            { "frequency 100 -> 5000 Hz", oneBand (vc::EqType::Peak, 100.0f, 6.0f, 0.5f), [] (EqState& s) { s.settings[2].hz = 5000.0f; }, nullptr },
+            { "Q 0.5 -> 8", oneBand (vc::EqType::Peak, 250.0f, 12.0f, 0.5f), [] (EqState& s) { s.settings[2].q = 8.0f; }, nullptr },
+            { "type peak -> low shelf", oneBand (vc::EqType::Peak, 200.0f, 12.0f, 0.71f), withType (vc::EqType::LowShelf), nullptr },
+            { "type low shelf -> high shelf", oneBand (vc::EqType::LowShelf, 200.0f, 12.0f, 0.71f), withType (vc::EqType::HighShelf), nullptr },
+            { "type high shelf -> low cut", oneBand (vc::EqType::HighShelf, 200.0f, 12.0f, 0.71f), withType (vc::EqType::LowCut), nullptr },
+            { "type low cut -> high cut", oneBand (vc::EqType::LowCut, 200.0f, 0.0f, 0.71f), withType (vc::EqType::HighCut), nullptr },
+            { "type high cut -> peak", oneBand (vc::EqType::HighCut, 200.0f, 12.0f, 0.71f), withType (vc::EqType::Peak), nullptr },
+            { "type change reversed mid-fade (peak -> low shelf -> peak)", oneBand (vc::EqType::Peak, 200.0f, 12.0f, 0.71f), withType (vc::EqType::LowShelf), withType (vc::EqType::Peak) },
+            { "band disabled", oneBand (vc::EqType::Peak, 200.0f, 12.0f, 1.0f), [] (EqState& s) { s.settings[2].on = false; }, nullptr },
+            { "band enabled", [&] { auto s = oneBand (vc::EqType::Peak, 200.0f, 12.0f, 1.0f); s.settings[2].on = false; return s; }(),
+              [] (EqState& s) { s.settings[2].on = true; }, nullptr },
+            { "EQ ON -> OFF", oneBand (vc::EqType::Peak, 200.0f, 12.0f, 1.0f), [] (EqState& s) { s.run = false; }, nullptr },
+            { "EQ OFF -> ON", oneBand (vc::EqType::Peak, 200.0f, 12.0f, 1.0f, false), [] (EqState& s) { s.run = true; }, nullptr },
+            { "EQ reversed mid-fade (ON -> OFF -> ON)", oneBand (vc::EqType::Peak, 200.0f, 12.0f, 1.0f), [] (EqState& s) { s.run = false; }, [] (EqState& s) { s.run = true; } },
+            { "EQ reversed mid-fade (OFF -> ON -> OFF, -12 dB)", oneBand (vc::EqType::Peak, 200.0f, -12.0f, 1.0f, false), [] (EqState& s) { s.run = true; }, [] (EqState& s) { s.run = false; } },
+        };
+
+        double worstRatio = 0.0;
+        juce::String worstName;
+
+        for (const double freq : { 200.0, 210.0 })
+        for (const auto& sc : scenarios)
+        {
+            auto signal = vc::test::makeSine (freq, kFs, total, 0.3f);
+            vc::test::addNoiseFloor (signal, -80.0f);
+
+            for (const int offset : { 0, 37, 211 })
+            {
+                const int t = base + offset;
+                std::vector<EqStep> steps { { t, sc.change } };
+
+                if (sc.changeBack)
+                    steps.push_back ({ t + 400, sc.changeBack });
+
+                const auto out = runEqScenario (sc.initial, steps, total, signal);
+
+                // 切り替え区間は、切り替えの直前から取る（即時の切り替えの段差［t - 1 → t］も見る）。
+                constexpr int lead = 8;
+                const bool ok = vc::test::checkNoClick (out.data() + t - steady, steady, out.data() + t - lead, transLen + lead, out.data() + t + afterGap);
+                const double before = vc::test::maxAdjacentDiff (out.data() + t - steady, steady);
+                const double after = vc::test::maxAdjacentDiff (out.data() + t + afterGap, steady);
+                const double trans = vc::test::maxAdjacentDiff (out.data() + t - lead, transLen + lead);
+                const double ratio = trans / (1.5 * std::max (before, after));
+
+                if (ratio > worstRatio)
+                {
+                    worstRatio = ratio;
+                    worstName = juce::String (sc.name) + ", " + juce::String (freq, 0) + " Hz, offset " + juce::String (offset);
+                }
+
+                expect (ok, juce::String ("click detected: ") + sc.name + ", " + juce::String (freq, 0) + " Hz, offset " + juce::String (offset)
+                                + ", transition/threshold " + juce::String (ratio, 3));
+                expect (vc::test::allFinite (out.data(), total), juce::String ("non-finite output: ") + sc.name);
+            }
+        }
+
+        logMessage ("EQ3: worst transition/threshold ratio over all scenarios " + juce::String (worstRatio, 3) + " (must be <= 1): " + worstName);
+    }
+
+    // ----- 分割処理（ブロック長非依存） -----
+    // 2つの時刻表: パラメータの変更（ゲイン・周波数・Q・タイプ・有効/無効・ON/OFF、フェード中の反転を含む）を、
+    // 9600サンプル（200ms）ごとの共通の位置で行う。ブロックの区切りは列ごとに違う（変更の位置では必ず区切る）。
+    static std::vector<EqStep> splitSteps()
+    {
+        std::vector<EqStep> steps;
+        const auto add = [&] (int at, std::function<void (EqState&)> f) { steps.push_back ({ at, std::move (f) }); };
+        const int u = 9600;
+
+        add (0 * u, [] (EqState& s) { s.run = true; });
+        add (1 * u, [] (EqState& s) { s.settings[0].gainDb = 9.0f; });
+        add (2 * u, [] (EqState& s) { s.settings[2].hz = 2500.0f; });
+        add (3 * u, [] (EqState& s) { s.settings[1].q = 4.0f; s.settings[1].gainDb = -7.0f; });
+        add (4 * u, [] (EqState& s) { s.settings[1].type = vc::EqType::HighCut; });
+        add (5 * u, [] (EqState& s) { s.settings[3].on = false; });
+        add (6 * u, [] (EqState& s) { s.settings[3].on = true; });
+        add (7 * u, [] (EqState& s) { s.settings[4].gainDb = -12.0f; s.settings[4].hz = 5000.0f; });
+        add (8 * u, [] (EqState& s) { s.settings[0].type = vc::EqType::Peak; s.settings[0].hz = 200.0f; });
+        add (9 * u, [] (EqState& s) { s.run = false; });
+        add (9 * u + 300, [] (EqState& s) { s.run = true; });                 // FadingOut中の反転
+        add (10 * u, [] (EqState& s) { s.settings[2].type = vc::EqType::LowCut; });
+        add (10 * u + 301, [] (EqState& s) { s.settings[2].type = vc::EqType::Peak; }); // タイプ変更のフェード中の反転
+        add (11 * u, [] (EqState& s) { for (auto& b : s.settings) b.gainDb = -18.0f; });
+        add (12 * u, [] (EqState& s) { for (auto& b : s.settings) b.gainDb = 18.0f; });
+        add (13 * u, [] (EqState& s) { s.settings[1].type = vc::EqType::LowShelf; s.run = false; });
+        add (13 * u + 500, [] (EqState& s) { s.run = true; });
+        return steps;
+    }
+
+    // sizes列のブロック長で処理する（変更の位置では必ず区切る）。Engine経由（バイパス: EQの出力が見える）。
+    std::vector<float> runSplit (double fs, const std::vector<float>& signal, const std::vector<int>& sizes, bool viaEngine)
+    {
+        auto steps = splitSteps();
+        std::sort (steps.begin(), steps.end(), [] (const EqStep& a, const EqStep& b) { return a.atSample < b.atSample; });
+
+        constexpr int maxBlock = 4096;
+        vc::Engine engine;
+        vc::Equalizer eq;
+
+        if (viaEngine)
+        {
+            engine.params().enabled.store (false);
+            engine.prepare ({ fs, maxBlock });
+        }
+        else
+        {
+            eq.prepare (fs);
+        }
+
+        EqState state;
+        state.run = false;
+        auto out = signal;
+        const int total = (int) out.size();
+        int pos = 0;
+        size_t next = 0;
+        size_t k = 0;
+
+        while (pos < total)
+        {
+            bool changed = false;
+
+            while (next < steps.size() && steps[next].atSample <= pos)
+            {
+                steps[next++].apply (state);
+                changed = true;
+            }
+
+            if (changed && viaEngine)
+            {
+                auto& p = engine.params();
+                p.eqEnabled.store (state.run);
+
+                for (size_t i = 0; i < state.settings.size(); ++i)
+                    p.eqBands[i].store (state.settings[i]);
+            }
+
+            int len = std::min (sizes[k++ % sizes.size()], total - pos);
+
+            if (next < steps.size())
+                len = std::min (len, steps[next].atSample - pos);
+
+            if (viaEngine)
+            {
+                engine.process (out.data() + pos, len);
+            }
+            else
+            {
+                eq.setTarget (state.run, state.settings);
+                eq.process (out.data() + pos, len);
+            }
+
+            pos += len;
+        }
+
+        return out;
+    }
+
+    void runSplit()
+    {
+        beginTest ("Split: mixed block lengths {1, 7, 128, 441, 480, 4096} and 1-sample / one-shot processing are bit-identical (EQ parameter changes included)");
+
+        for (const double fs : { 48000.0, 44100.0 })
+        for (const bool viaEngine : { false, true })
+        {
+            const int n = 15 * 9600 + 4000;
+            auto signal = vc::test::makeSpeechLikeVowel (140.0, fs, n, 0.05f);
+            const auto noise = makeWhiteNoise (n, 0.02f, 13);
+
+            for (size_t i = 0; i < signal.size(); ++i)
+                signal[i] += noise[i];
+
+            const auto ref = runSplit (fs, signal, { 480 }, viaEngine);
+            const auto mixed = runSplit (fs, signal, std::vector<int> (std::begin (kMixedBlocks), std::end (kMixedBlocks)), viaEngine);
+            const auto oneSample = runSplit (fs, signal, { 1 }, viaEngine);
+            const auto odd = runSplit (fs, signal, { 333 }, viaEngine);
+            const auto big = runSplit (fs, signal, { 100000 }, viaEngine);
+
+            const juce::String label = juce::String (fs, 0) + " Hz" + (viaEngine ? " (Engine)" : " (Equalizer)");
+            expect (std::memcmp (mixed.data(), ref.data(), sizeof (float) * (size_t) n) == 0, label + ": mixed blocks differ from 480-blocks");
+            expect (std::memcmp (oneSample.data(), ref.data(), sizeof (float) * (size_t) n) == 0, label + ": 1-sample blocks differ from 480-blocks");
+            expect (std::memcmp (odd.data(), ref.data(), sizeof (float) * (size_t) n) == 0, label + ": 333-blocks differ from 480-blocks");
+            expect (std::memcmp (big.data(), ref.data(), sizeof (float) * (size_t) n) == 0, label + ": one-shot differs from 480-blocks");
+            expect (vc::test::allFinite (ref.data(), n), label + ": non-finite output");
+
+            // 対照: EQがこの信号を実際に変えている（ON区間がある）。
+            double diff = 0.0;
+
+            for (int i = 0; i < n; ++i)
+                diff = std::max (diff, (double) std::abs (ref[(size_t) i] - signal[(size_t) i]));
+
+            expect (diff > 0.01, label + ": control: the EQ did not change the signal (max change " + juce::String (diff, 5) + ")");
+        }
+    }
+
+    // ----- Engineの範囲外・非有限値の扱い -----
+    void runOutOfRange()
+    {
+        beginTest ("Out-of-range EQ parameters are rounded to the ends, NaN/Inf and an invalid type go to the initial value (same output as explicit values)");
+
+        const double fs = 44100.0; // 周波数の上限（0.45 fs = 19845Hz）も確認する
+        const int n = (int) (1.0 * fs);
+        auto signal = vc::test::makeSpeechLikeVowel (140.0, fs, n, 0.05f);
+        const auto noise = makeWhiteNoise (n, 0.02f, 21);
+
+        for (size_t i = 0; i < signal.size(); ++i)
+            signal[i] += noise[i];
+
+        const auto runWith = [&] (const std::function<void (vc::AtomicParams&)>& setup)
+        {
+            vc::Engine engine;
+            engine.params().enabled.store (false); // EQの出力がそのまま見える
+            engine.params().eqEnabled.store (true);
+            setup (engine.params());
+            engine.prepare ({ fs, 480 });
+            auto out = signal;
+            engine.process (out.data(), n);
+            return out;
+        };
+
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const float inf = std::numeric_limits<float>::infinity();
+        const auto& d = vc::kEqDefaults;
+
+        // 範囲外 → 端。
+        const auto clampedOut = runWith ([&] (vc::AtomicParams& p)
+        {
+            p.eqBands[0].store ({ true, vc::EqType::Peak, 5.0f, 100.0f, 0.0f });
+            p.eqBands[1].store ({ true, vc::EqType::HighShelf, 50000.0f, -100.0f, 100.0f });
+            p.eqBands[2].store ({ true, vc::EqType::Peak, -3.0f, 18.4f, -2.0f });
+        });
+        const auto endsOut = runWith ([&] (vc::AtomicParams& p)
+        {
+            p.eqBands[0].store ({ true, vc::EqType::Peak, 20.0f, 18.0f, 0.1f });
+            p.eqBands[1].store ({ true, vc::EqType::HighShelf, 20000.0f, -18.0f, 10.0f });
+            p.eqBands[2].store ({ true, vc::EqType::Peak, 20.0f, 18.0f, 0.1f });
+        });
+        expect (std::memcmp (clampedOut.data(), endsOut.data(), sizeof (float) * (size_t) n) == 0, "out-of-range values were not rounded to the ends");
+        expect (vc::test::allFinite (clampedOut.data(), n), "non-finite output with out-of-range values");
+
+        // NaN/Inf・不正なタイプ → 初期値（周波数・ゲイン・Qは各バンドのkEqDefaults、タイプは範囲外ならkEqDefaultsのタイプ）。
+        const auto badOut = runWith ([&] (vc::AtomicParams& p)
+        {
+            p.eqBands[0].store ({ true, vc::EqType::Peak, nan, 6.0f, 1.0f });
+            p.eqBands[1].store ({ true, vc::EqType::Peak, 500.0f, inf, -inf });
+            p.eqBands[2].store ({ true, vc::EqType::Peak, 1000.0f, -inf, nan });
+            p.eqBands[3].type.store (99);
+            p.eqBands[3].gainDb.store (6.0f);
+            p.eqBands[4].type.store (-1);
+            p.eqBands[4].gainDb.store (-6.0f);
+        });
+        const auto goodOut = runWith ([&] (vc::AtomicParams& p)
+        {
+            p.eqBands[0].store ({ true, vc::EqType::Peak, d[0].hz, 6.0f, 1.0f });
+            p.eqBands[1].store ({ true, vc::EqType::Peak, 500.0f, d[1].gainDb, d[1].q });
+            p.eqBands[2].store ({ true, vc::EqType::Peak, 1000.0f, d[2].gainDb, d[2].q });
+            p.eqBands[3].store ({ true, d[3].type, d[3].hz, 6.0f, d[3].q });
+            p.eqBands[4].store ({ true, d[4].type, d[4].hz, -6.0f, d[4].q });
+        });
+        expect (std::memcmp (badOut.data(), goodOut.data(), sizeof (float) * (size_t) n) == 0, "NaN/Inf/invalid type were not replaced by the initial values");
+        expect (vc::test::allFinite (badOut.data(), n), "non-finite output with NaN/Inf parameters");
+
+        // Equalizer単体: 0.45 fsを超える周波数は0.45 fsと同じ。
+        {
+            const auto measureAt = [&] (float hz)
+            {
+                return measureEqMagnitudeDb (fs, makeSingleBandEq (2, vc::EqType::HighCut, hz, 0.0f, 0.71f));
+            };
+
+            const auto a = measureAt (20000.0f);
+            const auto b = measureAt ((float) (0.45 * fs));
+            expect (a == b, "20 kHz at 44.1 kHz is not rounded to 0.45 fs");
+        }
+    }
+
+    // ----- バイパスとの関係・NaN -----
+    void runBypassAndNonFinite()
+    {
+        beginTest ("Engine: the bypass passes the EQ output (bit-identical to Equalizer alone) and does not reset the EQ; NaN input silences the block, raises the flag and resets the EQ");
+
+        const double fs = 48000.0;
+        const int n = (int) (2.0 * fs);
+        const auto signal = vc::test::makeSine (200.0, fs, n, 0.1f);
+        const auto boosted = makeSingleBandEq (2, vc::EqType::Peak, 200.0f, 12.0f, 1.0f);
+
+        {
+            // Equalizer単体（480ブロック）
+            auto ref = signal;
+            vc::Equalizer eq;
+            eq.prepare (fs);
+
+            for (int pos = 0; pos < n; pos += 480)
+            {
+                eq.setTarget (true, boosted);
+                eq.process (ref.data() + pos, std::min (480, n - pos));
+            }
+
+            vc::Engine engine;
+            engine.params().eqEnabled.store (true);
+            engine.prepare ({ fs, 512 });
+
+            for (size_t i = 0; i < boosted.size(); ++i)
+                engine.params().eqBands[i].store (boosted[i]);
+
+            auto out = signal;
+
+            // バイパスの切り替えを繰り返しても、EQはリセットされない（出力はEQ単体と一致しつづける）。
+            // 有効時はチェーンを通る（ノーマル）ため、バイパス中の区間だけ比べる。
+            engine.params().enabled.store (false);
+            for (int pos = 0; pos < n; pos += 480)
+            {
+                if (pos == 480 * 40)
+                    engine.params().enabled.store (true);
+                if (pos == 480 * 50)
+                    engine.params().enabled.store (false);
+
+                engine.process (out.data() + pos, std::min (480, n - pos));
+
+                if (pos < 480 * 40 || pos >= 480 * 50 + 480 * 2) // バイパス（完全バイパスになった後）の区間
+                {
+                    const int len = std::min (480, n - pos);
+                    expect (std::memcmp (out.data() + pos, ref.data() + pos, sizeof (float) * (size_t) len) == 0,
+                            "bypass output differs from the EQ output at sample " + juce::String (pos));
+                }
+            }
+        }
+
+        // NaN入力（EQのみON、ノイズ除去OFF）: そのブロックは無音、フラグ、以後は有限でEQが再び効く。
+        {
+            vc::Engine engine;
+            engine.params().eqEnabled.store (true);
+            engine.prepare ({ fs, 512 });
+
+            for (size_t i = 0; i < boosted.size(); ++i)
+                engine.params().eqBands[i].store (boosted[i]);
+
+            auto out = signal;
+            int pos = 0;
+
+            for (; pos < (int) (0.5 * fs); pos += 480)
+                engine.process (out.data() + pos, 480);
+
+            expectEquals ((int) engine.getErrorFlags(), 0);
+            out[(size_t) pos + 3] = std::numeric_limits<float>::quiet_NaN();
+            engine.process (out.data() + pos, 480);
+            expect (vc::test::peakAbs (out.data() + pos, 480) == 0.0, "the block with NaN input is not silent");
+            expectEquals ((int) engine.getErrorFlags() & 1, 1, "error flag not raised");
+            pos += 480;
+
+            const auto afterNaN = signal; // 以降は正常な入力
+            std::copy (afterNaN.begin() + pos, afterNaN.end(), out.begin() + pos);
+
+            for (; pos + 480 <= n; pos += 480)
+                engine.process (out.data() + pos, 480);
+
+            expect (vc::test::allFinite (out.data() + (int) (0.6 * fs), (int) (1.0 * fs)), "non-finite output after recovery");
+            // 回復後にEQが効いている（+12dB@200Hz。Q=1のピークで、入力0.1の正弦の振幅が約4倍）。
+            const double gainDb = rmsDb (out.data() + (int) (1.5 * fs), (int) (0.4 * fs)) - rmsDb (signal.data() + (int) (1.5 * fs), (int) (0.4 * fs));
+            expect (std::abs (gainDb - 12.0) < 0.5, "EQ did not recover after the NaN (gain " + juce::String (gainDb, 2) + " dB)");
+        }
+    }
+
+    // ----- 稼働中の変更が目標値へ到達する（RBJ参照） -----
+    // 稼働中に1つの項目を変更して400ms（補間50ms・クロスフェード20msの数倍）待ち、定常の正弦波ゲインをRBJの解析値と比べる。
+    // 44.1kは50ms = 2205サンプルで32の倍数にならない（補間の最後のグループが端数になる）。
+    void runSettled()
+    {
+        beginTest ("Settled: after a change while running (gain, frequency, Q, type, band on/off, EQ on/off) the steady sine gain matches the RBJ value within 0.03 dB (48k/44.1k)");
+
+        struct Case { const char* name; EqState from; std::function<void (EqState&)> change; };
+
+        const auto one = [] (vc::EqType t, float hz, float g, float q, bool run = true)
+        {
+            EqState st;
+            st.run = run;
+            st.settings = makeSingleBandEq (2, t, hz, g, q);
+            return st;
+        };
+
+        const std::vector<Case> cases = {
+            { "gain -18 -> +18 dB", one (vc::EqType::Peak, 1000.0f, -18.0f, 1.0f), [] (EqState& x) { x.settings[2].gainDb = 18.0f; } },
+            { "gain +12 -> -6 dB", one (vc::EqType::LowShelf, 300.0f, 12.0f, 0.71f), [] (EqState& x) { x.settings[2].gainDb = -6.0f; } },
+            { "frequency 500 -> 2000 Hz", one (vc::EqType::Peak, 500.0f, 9.0f, 2.0f), [] (EqState& x) { x.settings[2].hz = 2000.0f; } },
+            { "frequency 4000 -> 250 Hz", one (vc::EqType::HighShelf, 4000.0f, 12.0f, 0.71f), [] (EqState& x) { x.settings[2].hz = 250.0f; } },
+            { "Q 0.5 -> 6", one (vc::EqType::Peak, 1000.0f, 12.0f, 0.5f), [] (EqState& x) { x.settings[2].q = 6.0f; } },
+            { "Q 8 -> 0.3", one (vc::EqType::Peak, 1000.0f, -12.0f, 8.0f), [] (EqState& x) { x.settings[2].q = 0.3f; } },
+            { "type peak -> high shelf", one (vc::EqType::Peak, 1000.0f, 9.0f, 1.0f), [] (EqState& x) { x.settings[2].type = vc::EqType::HighShelf; } },
+            { "type low cut -> high cut", one (vc::EqType::LowCut, 500.0f, 0.0f, 0.71f), [] (EqState& x) { x.settings[2].type = vc::EqType::HighCut; } },
+            { "band disabled", one (vc::EqType::Peak, 1000.0f, 12.0f, 1.0f), [] (EqState& x) { x.settings[2].on = false; } },
+            { "band enabled", [&] { auto x = one (vc::EqType::Peak, 1000.0f, 12.0f, 1.0f); x.settings[2].on = false; return x; }(),
+              [] (EqState& x) { x.settings[2].on = true; } },
+            { "EQ OFF", one (vc::EqType::Peak, 1000.0f, 12.0f, 1.0f), [] (EqState& x) { x.run = false; } },
+            { "EQ ON", one (vc::EqType::Peak, 1000.0f, 12.0f, 1.0f, false), [] (EqState& x) { x.run = true; } },
+        };
+
+        double worst = 0.0;
+
+        for (const double fs : { 48000.0, 44100.0 })
+        for (const auto& c : cases)
+        for (const double f : { 250.0, 1000.0, 3000.0 })
+        {
+            vc::Equalizer eq;
+            eq.prepare (fs);
+            EqState st = c.from;
+            const auto run = [&] (const std::vector<float>& in)
+            {
+                auto out = in;
+
+                for (int pos = 0; pos < (int) out.size(); pos += 480)
+                {
+                    eq.setTarget (st.run, st.settings);
+                    eq.process (out.data() + pos, std::min (480, (int) out.size() - pos));
+                }
+
+                return out;
+            };
+
+            run (makeWhiteNoise ((int) (0.5 * fs), 0.1f, 3));  // 変更前の状態で稼働
+            c.change (st);
+            run (makeWhiteNoise ((int) (0.4 * fs), 0.1f, 4));  // 400ms待つ
+            const int n = (int) (0.3 * fs);
+            const auto in = vc::test::makeSine (f, fs, n, 0.1f);
+            const auto out = run (in);
+            const int from = n / 2;
+            const double gain = rmsDb (out.data() + from, n - from) - rmsDb (in.data() + from, n - from);
+            const double expected = rbjTotalDb (fs, st.settings, st.run, f);
+            worst = std::max (worst, std::abs (gain - expected));
+            expect (std::abs (gain - expected) <= 0.03, juce::String (c.name) + " at " + juce::String (fs, 0) + " Hz, " + juce::String (f, 0)
+                                                          + " Hz sine: gain " + juce::String (gain, 4) + " dB, RBJ " + juce::String (expected, 4) + " dB");
+        }
+
+        logMessage ("Settled: worst difference to RBJ " + juce::String (worst, 4) + " dB (limit 0.03)");
+    }
+
+    // ----- 再開・NaN後の状態が新規インスタンスと同じ -----
+    void runRestart()
+    {
+        beginTest ("Restart: after OFF -> ON, and after a NaN block in Engine, the EQ output is bit-identical to a fresh instance (filter state and Resting are reset)");
+
+        const double fs = 48000.0;
+        const auto boosted = makeSingleBandEq (2, vc::EqType::Peak, 500.0f, 12.0f, 1.0f);
+        const auto x = makeWhiteNoise (4800, 0.1f, 8);
+
+        // (a) Equalizer: ON → OFF（フェード完了）→ ON の出力 = 新規インスタンスのON直後の出力。
+        {
+            vc::Equalizer used, fresh;
+            used.prepare (fs);
+            fresh.prepare (fs);
+            const auto feed = [&] (vc::Equalizer& e, bool run, std::vector<float> in)
+            {
+                for (int pos = 0; pos < (int) in.size(); pos += 480)
+                {
+                    e.setTarget (run, boosted);
+                    e.process (in.data() + pos, std::min (480, (int) in.size() - pos));
+                }
+
+                return in;
+            };
+
+            feed (used, true, makeWhiteNoise (14400, 0.3f, 9));
+            feed (used, false, makeWhiteNoise (4800, 0.3f, 10));
+            expect (! used.isRunning(), "not Resting after OFF");
+            const auto a = feed (used, true, x);
+            const auto b = feed (fresh, true, x);
+            expect (std::memcmp (a.data(), b.data(), sizeof (float) * x.size()) == 0, "OFF -> ON output differs from a fresh instance");
+        }
+
+        // (b) Engine（EQのみON・ノイズ除去OFF・バイパス）: EQ Activeのままnan入力 → 次ブロック以降が新規Engineの最初のブロックと一致。
+        {
+            const auto make = [&] (vc::Engine& e)
+            {
+                e.params().enabled.store (false);
+                e.params().eqEnabled.store (true);
+
+                for (size_t i = 0; i < boosted.size(); ++i)
+                    e.params().eqBands[i].store (boosted[i]);
+
+                e.prepare ({ fs, 512 });
+            };
+
+            vc::Engine used, fresh;
+            make (used);
+            make (fresh);
+
+            auto warm = makeWhiteNoise (14400, 0.3f, 11);
+
+            for (int pos = 0; pos < (int) warm.size(); pos += 480)
+                used.process (warm.data() + pos, 480);
+
+            auto bad = makeWhiteNoise (480, 0.3f, 12);
+            bad[5] = std::numeric_limits<float>::quiet_NaN();
+            used.process (bad.data(), 480);
+            expectEquals ((int) used.getErrorFlags() & 1, 1, "flag not raised");
+
+            auto a = x, b = x;
+
+            for (int pos = 0; pos < (int) x.size(); pos += 480)
+            {
+                used.process (a.data() + pos, 480);
+                fresh.process (b.data() + pos, 480);
+            }
+
+            expect (std::memcmp (a.data(), b.data(), sizeof (float) * x.size()) == 0, "output after a NaN block differs from a fresh Engine (EQ not reset)");
+        }
+    }
+
+    // ----- EQ5: アロケーション -----
+    void runEq5()
+    {
+        beginTest ("EQ5: no allocations in Engine::process for EQ parameter sweeps, type changes, band on/off, EQ on/off and NaN parameters (new and malloc)");
+
+        for (const double fs : { 48000.0, 44100.0 })
+        {
+            constexpr int maxBlock = 512;
+            const int n = (int) (2.0 * fs);
+            auto signal = vc::test::makeSpeechLikeVowel (140.0, fs, n, 0.05f);
+            const auto noise = makeWhiteNoise (n, 0.02f, 5);
+
+            for (size_t i = 0; i < signal.size(); ++i)
+                signal[i] += noise[i];
+
+            vc::Engine engine;
+            engine.prepare ({ fs, maxBlock });
+            auto& params = engine.params();
+
+            std::vector<float> work ((size_t) maxBlock);
+            int cursor = 0;
+            int blockToggle = 0;
+
+            const auto run = [&] (int samples, bool injectNaN = false)
+            {
+                for (int done = 0; done < samples;)
+                {
+                    const int len = std::min ((blockToggle++ & 1) ? 137 : 480, samples - done);
+
+                    for (int i = 0; i < len; ++i)
+                    {
+                        work[(size_t) i] = signal[(size_t) cursor];
+                        cursor = (cursor + 1) % n;
+                    }
+
+                    if (injectNaN)
+                        work[3] = std::numeric_limits<float>::quiet_NaN();
+
+                    engine.process (work.data(), len);
+                    done += len;
+                }
+            };
+
+            const int ms20 = (int) (0.02 * fs);
+            const int settle = (int) (0.2 * fs);
+            const vc::EqType types[] = { vc::EqType::Peak, vc::EqType::LowShelf, vc::EqType::HighShelf, vc::EqType::LowCut, vc::EqType::HighCut };
+
+            std::size_t allocations = 0;
+            {
+                vc::test::ScopedAllocationGuard guard;
+
+                run (ms20 * 5);                                        // OFF（Resting）
+                params.eqEnabled.store (true);                         // Resting → FadingIn → Active
+                run (settle);
+
+                for (int step = 0; step <= 60; ++step)                 // 掃引（周波数・ゲイン・Q）。毎回係数が再計算される
+                {
+                    for (int b = 0; b < vc::kEqBands; ++b)
+                    {
+                        params.eqBands[(size_t) b].hz.store (20.0f * std::pow (1000.0f, (float) ((step + b * 10) % 61) / 60.0f));
+                        params.eqBands[(size_t) b].gainDb.store (-18.0f + 36.0f * (float) ((step * 7 + b * 13) % 61) / 60.0f);
+                        params.eqBands[(size_t) b].q.store (0.1f * std::pow (100.0f, (float) ((step * 3 + b * 5) % 61) / 60.0f));
+                    }
+
+                    run (ms20 / 2);
+                }
+
+                for (int round = 0; round < 3; ++round)                // タイプ変更（素通しへ → 切替 → フィルタ状態リセット → 戻す）
+                    for (const auto type : types)
+                    {
+                        for (auto& b : params.eqBands)
+                            b.type.store ((int) type);
+
+                        run (ms20 * 3);
+                    }
+
+                for (int b = 0; b < vc::kEqBands; ++b)                 // バンドの有効/無効（フェード中の反転を含む）
+                {
+                    params.eqBands[(size_t) b].on.store (false);
+                    run (ms20 / 2);
+                    params.eqBands[(size_t) b].on.store (true);
+                    run (ms20 / 2);
+                    params.eqBands[(size_t) b].on.store (false);
+                    run (settle);
+                    params.eqBands[(size_t) b].on.store (true);
+                    run (settle);
+                }
+
+                params.eqEnabled.store (false);                        // Active → FadingOut → Resting
+                run (ms20 / 2);
+                params.eqEnabled.store (true);                         // FadingOut → FadingIn（反転）
+                run (ms20 / 2);
+                params.eqEnabled.store (false);
+                run (settle);
+                params.eqEnabled.store (true);
+                run (settle);
+
+                params.eqBands[0].hz.store (std::numeric_limits<float>::quiet_NaN()); // 非有限値・不正なタイプも安全に扱う
+                params.eqBands[1].gainDb.store (std::numeric_limits<float>::infinity());
+                params.eqBands[2].q.store (-std::numeric_limits<float>::infinity());
+                params.eqBands[3].type.store (1234);
+                run (settle);
+
+                run (ms20, true);                                      // NaN注入 → 全体リセット → 再開
+                run (settle);
+                params.enabled.store (false);                          // バイパス中もEQは動く
+                run (settle);
+                run (ms20, true);
+                run (settle);
+
+                allocations = guard.count();
+            }
+
+            expectEquals ((int) allocations, 0, "allocations at " + juce::String (fs, 0) + " Hz");
+        }
+    }
+
+    // ----- EQ9: CPU（参考値。失敗判定なし） -----
+    // 48kHz・480ブロック・10秒で、全OFF / EQのみON / ノイズ除去のみON（N12と同条件: 背景70%・インパクト50%）/ ノイズ除去＋EQ ON /
+    // （参考）EQのみONで、毎ブロック全バンドのパラメータを動かし続けたとき。2回測って小さい方を採る。
+    // EQの設定は、ゲインを付けた5バンド（係数が定常のときの通常の使用）。
+    void runEq9()
+    {
+        beginTest ("EQ9 (reference): CPU cost of 10 s of audio at 480-sample blocks: all OFF / EQ ON / noise reduction ON / noise reduction + EQ ON / EQ with parameters sweeping (never fails)");
+
+        struct Case { double fs; vc::Preset preset; };
+
+        for (const Case c : { Case { kFs, vc::Preset::Normal }, Case { kFs, vc::Preset::Talkbox }, Case { kFs, vc::Preset::Minion },
+                              Case { 44100.0, vc::Preset::Normal } })
+        {
+            const int n = (int) (10.0 * c.fs);
+            auto signal = vc::test::makeSpeechLikeVowel (140.0, c.fs, n, 0.3f);
+            const auto pink = vc::test::makePinkNoise (n, 0.03f);
+
+            for (size_t i = 0; i < signal.size(); ++i)
+                signal[i] += pink[i];
+
+            constexpr int modes = 5; // 0: 全OFF, 1: EQ, 2: ノイズ除去, 3: ノイズ除去＋EQ, 4: EQ（パラメータ掃引）
+            double percent[modes] = { 1.0e9, 1.0e9, 1.0e9, 1.0e9, 1.0e9 };
+            double maxBlockMs[modes] = {};
+
+            for (int repeat = 0; repeat < 2; ++repeat)
+            {
+                for (int mode = 0; mode < modes; ++mode)
+                {
+                    vc::Engine engine;
+                    engine.prepare ({ c.fs, 480 });
+                    engine.params().preset.store ((int) c.preset);
+                    engine.params().nrEnabled.store (mode == 2 || mode == 3);
+                    engine.params().nrBackground.store (0.7f);
+                    engine.params().nrImpact.store (0.5f);
+                    engine.params().eqEnabled.store (mode == 1 || mode >= 3);
+
+                    const float gains[vc::kEqBands] = { 3.0f, -2.0f, 4.0f, -3.0f, 2.0f };
+
+                    for (int b = 0; b < vc::kEqBands; ++b)
+                        engine.params().eqBands[(size_t) b].gainDb.store (gains[b]);
+
+                    auto data = signal;
+                    double totalMs = 0.0;
+                    double maxMs = 0.0;
+                    int block = 0;
+
+                    for (int pos = 0; pos + 480 <= n; pos += 480, ++block)
+                    {
+                        if (mode == 4)
+                            for (int b = 0; b < vc::kEqBands; ++b)
+                            {
+                                engine.params().eqBands[(size_t) b].gainDb.store (gains[b] + ((block + b) % 2 == 0 ? 1.0f : -1.0f));
+                                engine.params().eqBands[(size_t) b].hz.store (vc::kEqDefaults[(size_t) b].hz * (1.0f + 0.1f * (float) ((block + b) % 3)));
+                            }
+
+                        const auto t0 = std::chrono::steady_clock::now();
+                        engine.process (data.data() + pos, 480);
+                        const auto t1 = std::chrono::steady_clock::now();
+                        const double ms = std::chrono::duration<double, std::milli> (t1 - t0).count();
+                        totalMs += ms;
+                        maxMs = std::max (maxMs, ms);
+                    }
+
+                    percent[mode] = std::min (percent[mode], 100.0 * totalMs / 10000.0);
+                    maxBlockMs[mode] = maxMs;
+                }
+            }
+
+            logMessage ("EQ9 " + juce::String (c.fs, 0) + " Hz " + juce::String (vc::kPresets[(size_t) c.preset].id) + ": OFF "
+                        + juce::String (percent[0], 3) + " %, EQ ON " + juce::String (percent[1], 3) + " % (increase " + juce::String (percent[1] - percent[0], 3)
+                        + " points), noise reduction ON " + juce::String (percent[2], 3) + " % (increase " + juce::String (percent[2] - percent[0], 3)
+                        + "), noise reduction + EQ ON " + juce::String (percent[3], 3) + " % (increase " + juce::String (percent[3] - percent[0], 3)
+                        + " points, of which EQ " + juce::String (percent[3] - percent[2], 3) + "), EQ with sweeping parameters " + juce::String (percent[4], 3)
+                        + " % (increase " + juce::String (percent[4] - percent[0], 3) + "), max block " + juce::String (maxBlockMs[3], 3) + " ms");
+        }
+    }
+};
+
+static EqualizerTests equalizerTests;
 
 } // namespace

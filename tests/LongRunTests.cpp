@@ -156,6 +156,7 @@ public:
         engine.prepare ({ kOutRate, 1024 });
         engine.params().gainDb.store (6.0f);
         engine.params().reverb.store (0.2f);
+        engine.params().eqEnabled.store (true); // EQは常時ON。バンド1のゲインを45秒ごとに変える（T-012）
 
         const double inPeriod = (double) kBi / (kInRate * (1.0 + kPpmIn * 1.0e-6));
         const double outPeriod = (double) kBo / kOutRate;
@@ -177,6 +178,13 @@ public:
         // 制御の切替は出力イベントの模擬時刻で行う。
         int lastPresetSlot = -1, lastPitchSlot = -1, lastBypassSlot = 0;
         int presetChanges = 0, pitchChanges = 0, bypassChanges = 0;
+
+        // マイク処理（T-012）: 90秒ごとにノイズ除去のON/OFF、45秒ごとに背景ノイズとEQバンド1のゲインを変更する。
+        int lastNrSlot = 0, lastMicParamSlot = -1;
+        int nrChanges = 0, micParamChanges = 0;
+        std::uint64_t nrActiveBlocks = 0;
+        constexpr std::array<float, 5> kBackgrounds { 0.7f, 0.0f, 1.0f, 0.3f, 0.5f };
+        constexpr std::array<float, 5> kBand1GainsDb { 0.0f, 6.0f, -6.0f, 12.0f, -12.0f };
 
         // c/d/e用（RingBufferTests.cppのS7と同じ適用区間）。
         constexpr double kCFrom = 300.0, kDStart = 300.0, kEFrom = 600.0;
@@ -240,6 +248,23 @@ public:
                 ++bypassChanges;
             }
 
+            const int nrSlot = (int) (pendingOut / 90.0);
+            if (nrSlot != lastNrSlot)
+            {
+                engine.params().nrEnabled.store (nrSlot % 2 == 1);
+                lastNrSlot = nrSlot;
+                ++nrChanges;
+            }
+
+            const int micParamSlot = (int) (pendingOut / 45.0);
+            if (micParamSlot != lastMicParamSlot)
+            {
+                engine.params().nrBackground.store (kBackgrounds[(size_t) micParamSlot % kBackgrounds.size()]);
+                engine.params().eqBands[0].gainDb.store (kBand1GainsDb[(size_t) micParamSlot % kBand1GainsDb.size()]);
+                lastMicParamSlot = micParamSlot;
+                ++micParamChanges;
+            }
+
             std::size_t count = 0;
             {
                 vc::test::ScopedAllocationGuard guard;
@@ -256,6 +281,9 @@ public:
             }
             const double elapsed = juce::Time::highResolutionTicksToSeconds (juce::Time::getHighResolutionTicks() - t0);
             allocations += count;
+
+            if (engine.getNoiseReducerLatencySamples() > 0)
+                ++nrActiveBlocks;
 
             cpuSeconds += elapsed;
             const auto presetIdx = (size_t) (presetSlot % (int) vc::kPresets.size());
@@ -345,7 +373,9 @@ public:
                     + ", errorFlags=" + juce::String ((int) engine.getErrorFlags())
                     + ", allocations=" + juce::String ((int) allocations)
                     + ", changes preset=" + juce::String (presetChanges) + " pitch=" + juce::String (pitchChanges)
-                    + " bypass=" + juce::String (bypassChanges));
+                    + " bypass=" + juce::String (bypassChanges) + " nr=" + juce::String (nrChanges) + " micParams=" + juce::String (micParamChanges)
+                    + ", nrActiveBlocks=" + juce::String ((int) nrActiveBlocks)
+                    + ", nrUnderflows=" + juce::String (engine.debugNoiseReducer().getUnderflowCount()));
 
         juce::String cpuText ("LongRun: CPU approx. (process time / audio time) total=" + juce::String (100.0 * cpuSeconds / kDurationSeconds, 2) + "%");
         for (size_t p = 0; p < 8; ++p)
@@ -374,6 +404,9 @@ public:
         for (size_t p = 0; p < 8; ++p)
             expect (rmsByPreset[p] > 1.0e-3, juce::String (vc::kPresets[p].id) + ": 非バイパス区間の出力RMSが無音（" + juce::String (rmsByPreset[p], 5) + "）");
         expect (presetChanges >= 360 && pitchChanges >= 514 && bypassChanges == 59, "制御の切替回数が想定と異なる");
+        expect (nrChanges == 39 && micParamChanges == 80, "マイク処理の切替回数が想定と異なる");
+        expect (nrActiveBlocks > 0, "ノイズ除去が一度も稼働しなかった（制御の切替が届いていない）");
+        expectEquals (engine.debugNoiseReducer().getUnderflowCount(), 0, "ノイズ除去の出力FIFOが枯れた");
 
         expectEquals ((int) cViolations, 0, "c) 平滑充填が目標±25%を外れた区間がある");
         expect (diffMs <= 0.5, "d) 平滑充填の後半平均が前半平均より0.5ms相当を超えて増加している");
