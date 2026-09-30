@@ -6,6 +6,7 @@
 
 #include "core/Engine.h"
 #include "core/MicProcessing.h"
+#include "RecordingTool.h"
 
 #include <rnnoise.h>
 
@@ -23,7 +24,7 @@
 // ===== SECTION: MicTests =====
 // マイク処理のテスト（カテゴリMic、quick）。T-009のN0a〜N0e（RNNoiseそのものの確認）と、
 // T-010のNoiseReducer・Engine組み込み（N3a・N4a・N6〜N11。docs/plan.md 8.3）。
-// N1・N2・N3b・N4b・N5はT-011、EQ（EQ1〜EQ9）はT-012で追加した。
+// N1・N2・N3b・N4b・N5はT-011、EQ（EQ1〜EQ9）はT-012、実録音比較ツール（tests/RecordingTool.cpp）の指標の検証M1はT-014で追加した。
 // RNNoiseの入出力はint16の値域のfloat（±32768）、1フレーム480サンプル（48kHzで10ms）。
 
 namespace
@@ -3536,5 +3537,287 @@ private:
 };
 
 static EqualizerTests equalizerTests;
+
+// ===== SECTION: RecordingToolTests（T-014 M1） =====
+// 実録音比較ツール（tests/RecordingTool.cpp）の指標を、既知の合成信号（雑音床・発話レベル・打撃音のピーク・EQの形が構成から決まる）で確かめる。
+class RecordingToolTests final : public juce::UnitTest
+{
+public:
+    RecordingToolTests() : juce::UnitTest ("RecordingTool", "Mic") {}
+
+    void runTest() override
+    {
+        constexpr double fs = 48000.0;
+        constexpr int n = 10 * 48000;
+        constexpr double kTol = 0.5; // M1の許容 [dB]
+        constexpr int kSonarLag = 96, kOursLag = 1440;
+
+        // 帯域の中心周波数（1000Hz×2^((k-12)/3)）の3つの正弦（315Hz・1000Hz・3150Hz）に、周期にならない緩やかな包絡を掛けた「発話」。
+        auto tone = [&] (int k, double gain, int i0, int len)
+        {
+            std::vector<float> v ((size_t) n, 0.0f);
+            const double hz = 1000.0 * std::pow (2.0, (k - 12) / 3.0);
+
+            for (int i = 0; i < len; ++i)
+            {
+                const double t = (double) i / fs;
+                const double env = 0.8 + 0.12 * std::sin (2.0 * juce::MathConstants<double>::pi * 1.3 * t) + 0.08 * std::sin (2.0 * juce::MathConstants<double>::pi * 2.9 * t + 1.0);
+                v[(size_t) (i0 + i)] = (float) (gain * env * std::sin (2.0 * juce::MathConstants<double>::pi * hz * (double) (i0 + i) / fs));
+            }
+
+            return v;
+        };
+
+        const int speechStart = 3 * 48000, speechLen = 3 * 48000, clickStart = (int) (8.5 * fs);
+        std::array<std::vector<float>, 3> parts { tone (7, 1.0, speechStart, speechLen), tone (12, 1.0, speechStart, speechLen), tone (17, 1.0, speechStart, speechLen) };
+
+        // 3つの正弦の和のRMSを-20dBFS（0.1）にする係数。
+        std::vector<float> sum ((size_t) n, 0.0f);
+
+        for (const auto& p : parts)
+            for (int i = 0; i < n; ++i)
+                sum[(size_t) i] += p[(size_t) i];
+
+        const double norm = 0.1 / vc::test::rms (sum.data() + speechStart, speechLen);
+
+        auto build = [&] (double toneGain0, double toneGain1, double toneGain2, double overall, double noiseDb, int seed, int lag)
+        {
+            std::vector<float> x = makeWhiteNoise (n, 1.0f, seed);
+            vc::test::normalizeRms (x, (float) std::pow (10.0, noiseDb / 20.0));
+
+            const double g[3] = { toneGain0, toneGain1, toneGain2 };
+
+            for (int k = 0; k < 3; ++k)
+                for (int i = 0; i < n; ++i)
+                    x[(size_t) i] += (float) (overall * norm * g[k] * parts[(size_t) k][(size_t) i]);
+
+            std::vector<float> click ((size_t) n, 0.0f);
+            vc::test::addClick (click, clickStart, fs, 3000.0, 4.0, (float) overall * 0.316228f);
+
+            for (int i = 0; i < n; ++i)
+                x[(size_t) i] += click[(size_t) i];
+
+            x.insert (x.begin(), (size_t) lag, 0.0f); // 遅らせる（先頭に無音を足して長さは保つ）
+            x.resize ((size_t) n);
+            return std::make_pair (x, vc::test::peakAbs (click.data(), n));
+        };
+
+        const auto raw = build (1.0, 1.0, 1.0, 1.0, -60.0, 1, 0);
+        const auto sonar = build (1.0, 2.0, 0.5, 1.0, -80.0, 2, kSonarLag);   // 帯域ごとに 0 / +6.02 / -6.02dB、雑音床は別（-80dBFS）
+        const auto ours = build (1.0, 1.0, 1.0, 0.5, -60.0 + 20.0 * std::log10 (0.5), 1, kOursLag); // 雑音も発話も-6.02dB、遅れ1440サンプル（ノイズ除去の遅延と同じ）
+
+        const auto rawSpeechOnly = vc::test::rms (sum.data() + speechStart, speechLen) * norm;
+        expectWithinAbsoluteError (20.0 * std::log10 (rawSpeechOnly), -20.0, 0.001);
+
+        // 期待値。雑音床とピークは構成から、発話レベルは各正弦の和の実際のRMS（雑音は無視できる大きさ）から求める。
+        std::vector<float> sonarSpeech ((size_t) n, 0.0f);
+
+        for (int k = 0; k < 3; ++k)
+            for (int i = 0; i < n; ++i)
+                sonarSpeech[(size_t) i] += (float) (norm * (k == 0 ? 1.0 : k == 1 ? 2.0 : 0.5) * parts[(size_t) k][(size_t) i]);
+
+        const double rawSpeechDb = -20.0;
+        const double sonarSpeechDb = 20.0 * std::log10 (vc::test::rms (sonarSpeech.data() + speechStart, speechLen));
+        const double clickDb = 20.0 * std::log10 (raw.second);
+
+        const std::vector<vc::rectool::Segment> script {
+            { 0.0, 3.0, vc::rectool::SegKind::Silence },
+            { 3.0, 6.0, vc::rectool::SegKind::Speech },
+            { 6.0, 8.0, vc::rectool::SegKind::Silence },
+            { 8.45, 8.6, vc::rectool::SegKind::Impact },
+        };
+
+        for (int mode = 0; mode < 2; ++mode) // 0: 区間ファイル（台本）、1: 自動判定
+        {
+            const juce::String label = mode == 0 ? "M1 (segments given): " : "M1 (auto segments): ";
+            beginTest (mode == 0 ? "M1a: known synthetic recording, metrics within 0.5 dB (segments given)" : "M1b: known synthetic recording, metrics within 0.5 dB (auto segments)");
+
+            const auto r = vc::rectool::compareRecordings (raw.first, sonar.first, ours.first, fs, mode == 0 ? &script : nullptr);
+            const auto& fr = r.files[0];
+            const auto& fso = r.files[1];
+            const auto& fou = r.files[2];
+
+            // 位置合わせ（相互相関）: サンプル単位で一致する。
+            expectEquals (fso.alignment.lagSamples, kSonarLag, label + "sonar lag");
+            expectEquals (fou.alignment.lagSamples, kOursLag, label + "ours lag");
+            expect (fso.alignment.confident && fou.alignment.confident, label + "alignment not confident");
+            expect (fso.sharesSegments, label + "sonar did not share the segments");
+
+            // 無声区間の残留雑音（構成: -60 / -80 / -60-6.02）。
+            expectWithinAbsoluteError (fr.silenceRmsDb, -60.0, kTol);
+            expectWithinAbsoluteError (fso.silenceRmsDb, -80.0, kTol);
+            expectWithinAbsoluteError (fou.silenceRmsDb, -60.0 + 20.0 * std::log10 (0.5), kTol);
+            expectWithinAbsoluteError (fr.silenceMedianFrameDb, -60.0, kTol);
+            expectWithinAbsoluteError (fr.silenceDigitalFraction, 0.0, 1.0e-9);
+
+            // 発話区間のレベル・発話と残留雑音の比。
+            expectWithinAbsoluteError (fr.speechRmsDb, rawSpeechDb, kTol);
+            expectWithinAbsoluteError (fso.speechRmsDb, sonarSpeechDb, kTol);
+            expectWithinAbsoluteError (fou.speechRmsDb, rawSpeechDb + 20.0 * std::log10 (0.5), kTol);
+            expectWithinAbsoluteError (fr.snrDb(), 40.0, kTol);
+            expectWithinAbsoluteError (fso.snrDb(), sonarSpeechDb + 80.0, kTol);
+            expectWithinAbsoluteError (fou.snrDb(), 40.0, kTol);
+
+            // 打撃音のピーク（1つだけ見つかること）。
+            int impacts = 0;
+
+            for (size_t i = 0; i < fr.segments.size(); ++i)
+                if (fr.segments[i].kind == vc::rectool::SegKind::Impact)
+                {
+                    ++impacts;
+                    expectWithinAbsoluteError (fr.segmentStats[i].peakDb, clickDb, kTol);
+                    expectWithinAbsoluteError (fso.segmentStats[i].peakDb, clickDb, kTol);
+                    expectWithinAbsoluteError (fou.segmentStats[i].peakDb, clickDb - 6.0206, kTol);
+                }
+
+            expectEquals (impacts, 1, label + "number of impact segments");
+
+            // 発話区間の長時間平均スペクトル: 各正弦の帯域（315Hz・1000Hz・3150Hz = 帯域7・12・17）の差。
+            expect (fr.speechBandsValid && fso.speechBandsValid && fou.speechBandsValid, label + "no speech spectrum");
+            const int bands[3] = { 7, 12, 17 };
+            const double sonarExpected[3] = { 0.0, 6.0206, -6.0206 };
+
+            for (int k = 0; k < 3; ++k)
+            {
+                const auto b = (size_t) bands[k];
+                expectWithinAbsoluteError (fso.speechBands[b] - fr.speechBands[b], sonarExpected[k], kTol);
+                expectWithinAbsoluteError (fou.speechBands[b] - fr.speechBands[b], -6.0206, kTol);
+            }
+
+            // 無声区間のスペクトル: 白色雑音のパワーは帯域幅に比例する。全帯域を足すと（63Hz〜8kHz、22帯域）ほぼ雑音全体の (8000*2^(1/6) - 63/2^(1/6))/24000。
+            double total = 0.0;
+
+            for (int b = 0; b < vc::rectool::kNumBands; ++b)
+                total += std::pow (10.0, fr.silenceBands[(size_t) b] / 10.0);
+
+            const double expectedFraction = (8000.0 * std::pow (2.0, 1.0 / 6.0) - 63.0 / std::pow (2.0, 1.0 / 6.0)) / 24000.0;
+            expectWithinAbsoluteError (10.0 * std::log10 (total), -60.0 + 10.0 * std::log10 (expectedFraction), kTol);
+
+            // K特性の重み付け（発話区間）: oursは-6.02dB。sonarは3つの正弦の帯域ごとのK特性の利得（下の式）で決まるパワー比。
+            expectWithinAbsoluteError (fou.speechKDb - fr.speechKDb, -6.0206, kTol);
+            expect (fr.speechKDb > fr.speechRmsDb, "K-weighted power below the unweighted RMS for a signal with 1k and 3k content");
+
+            expect (! vc::rectool::formatReport (r).isEmpty(), "report is empty");
+        }
+
+        beginTest ("M1c: K-weighting matches the BS.1770 gain (100 Hz -1.13 dB, 1 kHz +0.70 dB, 10 kHz +4.04 dB at 48 kHz)");
+        {
+            const double gains[3][2] = { { 100.0, -1.1335 }, { 1000.0, 0.6977 }, { 10000.0, 4.0419 } };
+
+            for (auto& g : gains)
+            {
+                const auto sine = vc::test::makeSine (g[0], fs, 48000, 0.5f);
+                const double rmsDb = 20.0 * std::log10 (vc::test::rms (sine.data() + 4800, 48000 - 4800));
+                std::vector<float> settled (sine.begin() + 4800, sine.end()); // フィルタの過渡（先頭0.1秒）を除く
+                expectWithinAbsoluteError (vc::rectool::kWeightedLevelDb (settled, fs) - rmsDb, g[1], 0.05, juce::String (g[0], 0) + " Hz");
+            }
+        }
+
+        beginTest ("M1d: an unrelated take is not aligned and gets its own segments; a digital-silence take is reported as such");
+        {
+            auto unrelated = makeWhiteNoise (n, 1.0f, 77);
+            vc::test::normalizeRms (unrelated, (float) std::pow (10.0, -50.0 / 20.0));
+            const auto r = vc::rectool::compareRecordings (raw.first, unrelated, ours.first, fs, nullptr);
+            expect (! r.files[1].alignment.confident, "unrelated noise was aligned (correlation " + juce::String (r.files[1].alignment.correlation, 3) + ")");
+            expect (! r.files[1].sharesSegments, "unrelated take shared the segments");
+            expect (r.files[2].alignment.confident, "ours lost its alignment");
+
+            const std::vector<float> zeros ((size_t) n, 0.0f);
+            const auto z = vc::rectool::compareRecordings (raw.first, zeros, ours.first, fs, &script);
+            expect (z.files[1].silenceRmsDb < vc::rectool::kDigitalSilenceDb, "digital silence not detected");
+            expectWithinAbsoluteError (z.files[1].silenceDigitalFraction, 1.0, 1.0e-9);
+            expect (! vc::rectool::formatReport (z).contains ("nan"), "report contains nan");
+        }
+
+        beginTest ("M1e: segments file parser accepts comments and rejects bad lines");
+        {
+            std::vector<vc::rectool::Segment> segs;
+            juce::String error;
+            expect (vc::rectool::parseSegments ("# script\n0 10 silence\n10.5, 40 speech # talking\n\n45 45.2 impact\n50 60 speech+impact\n", segs, error), error);
+            expectEquals ((int) segs.size(), 4);
+            expect (segs.size() == 4 && segs[1].kind == vc::rectool::SegKind::Speech && std::abs (segs[1].startSec - 10.5) < 1.0e-9 && segs[3].kind == vc::rectool::SegKind::SpeechImpact,
+                    "parsed values");
+            expect (! vc::rectool::parseSegments ("0 10 noise\n", segs, error), "unknown kind accepted");
+            expect (! vc::rectool::parseSegments ("10 5 silence\n", segs, error), "reversed times accepted");
+            expect (! vc::rectool::parseSegments ("1 2\n", segs, error), "missing kind accepted");
+            expect (! vc::rectool::parseSegments ("# only a comment\n", segs, error), "empty file accepted");
+        }
+
+        beginTest ("M1f: 16-bit WAV round trip (sample rate, length, 1 LSB, clipping)");
+        {
+            const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("vc_m1", ".wav");
+            std::vector<float> x (raw.first.begin() + speechStart, raw.first.begin() + speechStart + 4800);
+            x[10] = 1.5f;
+            x[11] = -1.5f;
+            juce::String error;
+            expect (vc::rectool::writeWav16 (file, x, 44100.0, error), error);
+            vc::rectool::Audio back;
+            expect (vc::rectool::readWav (file, back, error), error);
+            expectWithinAbsoluteError (back.sampleRate, 44100.0, 1.0e-6);
+            expectEquals ((int) back.samples.size(), (int) x.size());
+
+            double worst = 0.0;
+
+            for (size_t i = 0; i < std::min (x.size(), back.samples.size()); ++i)
+                if (i != 10 && i != 11)
+                    worst = std::max (worst, (double) std::abs (back.samples[i] - x[i]));
+
+            expect (worst <= 1.0 / 32768.0, "round trip error " + juce::String (worst * 32768.0, 3) + " LSB");
+            expect (back.samples.size() > 11 && back.samples[10] > 0.9999f && back.samples[10] <= 1.0f && back.samples[11] < -0.9999f && back.samples[11] >= -1.0f, "clipping");
+
+            // 上書き: 短いデータで書き直すと、古い内容が残らない。
+            expect (vc::rectool::writeWav16 (file, std::vector<float> (100, 0.25f), 48000.0, error), error);
+            vc::rectool::Audio shorter;
+            expect (vc::rectool::readWav (file, shorter, error), error);
+            expectEquals ((int) shorter.samples.size(), 100);
+            file.deleteFile();
+        }
+
+        beginTest ("M1g: processAudio reports the noise reduction latency and returns an output aligned with the input");
+        {
+            const int len = 4 * 48000;
+            auto speech = vc::test::makeSyllables (len);
+            vc::test::normalizeRms (speech, 0.05f);
+            const auto noise = vc::test::makePinkNoise (len, 0.002f, 5);
+
+            for (int i = 0; i < len; ++i)
+                speech[(size_t) i] += noise[(size_t) i];
+
+            vc::rectool::ProcessSettings on;
+            on.nrBackground = 0.7f;
+            const auto r = vc::rectool::processAudio (speech, fs, on);
+            expectEquals (r.latencySamples, kOursLag);
+            expectEquals ((int) r.output.size(), len);
+            expectEquals ((int) r.errorFlags, 0);
+            expect (vc::test::allFinite (r.output.data(), len), "non-finite output");
+            const auto al = vc::rectool::measureAlignment (speech, r.output, fs);
+            expect (std::abs (al.lagSamples) <= 1 && al.correlation > 0.7, "output not aligned: lag " + juce::String (al.lagSamples) + ", correlation " + juce::String (al.correlation, 3));
+
+            vc::rectool::ProcessSettings off;
+            off.nrEnabled = false;
+            const auto r0 = vc::rectool::processAudio (speech, fs, off);
+            expectEquals (r0.latencySamples, 0);
+            double worst = 0.0;
+
+            for (int i = 0; i < len; ++i)
+                worst = std::max (worst, (double) std::abs (r0.output[(size_t) i] - speech[(size_t) i]));
+
+            expect (worst < 1.0e-6, "noise reduction and EQ off changed the signal by " + juce::String (worst, 8));
+
+            // EQのプリセット: a2・a3は5バンドを置き換えてONにする。
+            vc::rectool::ProcessSettings eq;
+            vc::rectool::applyEqPreset (eq, vc::rectool::EqPreset::A2);
+            expect (eq.eqEnabled && eq.eqBands[4].type == vc::EqType::HighShelf && std::abs (eq.eqBands[4].hz - 5741.0f) < 1.0e-3f, "a2");
+            vc::rectool::applyEqPreset (eq, vc::rectool::EqPreset::A3);
+            expect (eq.eqEnabled && std::abs (eq.eqBands[2].hz - 400.0f) < 1.0e-3f && std::abs (eq.eqBands[3].gainDb - 5.0f) < 1.0e-3f, "a3");
+            vc::rectool::applyEqPreset (eq, vc::rectool::EqPreset::Sonar);
+            expect (eq.eqEnabled && std::abs (eq.eqBands[2].hz - 546.0f) < 1.0e-3f && std::abs (eq.eqBands[4].gainDb + 2.3f) < 1.0e-3f, "sonar");
+            vc::rectool::applyEqPreset (eq, vc::rectool::EqPreset::Off);
+            expect (! eq.eqEnabled, "off");
+        }
+    }
+};
+
+static RecordingToolTests recordingToolTests;
 
 } // namespace

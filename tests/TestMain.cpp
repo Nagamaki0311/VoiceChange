@@ -1,6 +1,7 @@
 #include <juce_core/juce_core.h>
 
 #include "AllocationGuard.h"
+#include "RecordingTool.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -255,9 +256,16 @@ int posix_memalign (void** out, std::size_t alignment, std::size_t size) noexcep
 
 // ===== SECTION: TestMain =====
 // juce::UnitTestランナー。`--category <名前>`で対象カテゴリを絞ってctestに複数登録する。
+// `--process-wav` / `--compare`は実録音比較のオフラインツール（tests/RecordingTool.cpp、T-014）。テストは走らせない。
 
 int main (int argc, char* argv[])
 {
+    if (argc >= 2 && juce::String (argv[1]) == "--process-wav")
+        return vc::rectool::runProcessWav (juce::StringArray (argv + 2, argc - 2));
+
+    if (argc >= 2 && juce::String (argv[1]) == "--compare")
+        return vc::rectool::runCompare (juce::StringArray (argv + 2, argc - 2));
+
     juce::String category;
 
     for (int i = 1; i < argc; ++i)
@@ -270,7 +278,7 @@ int main (int argc, char* argv[])
 
     if (category.isEmpty())
     {
-        std::fprintf (stderr, "usage: %s --category <name>\n", argv[0]);
+        std::fprintf (stderr, "usage: %s --category <name> | --process-wav ... | --compare ...\n", argv[0]);
         return 1;
     }
 
