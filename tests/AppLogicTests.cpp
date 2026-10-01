@@ -286,10 +286,13 @@ private:
 
             const vc::SavedSettings defaults;
             expect (! defaults.nrEnabled && ! defaults.eqEnabled); // D-020: 初回起動時はOFF
-            expectEquals (s.eqOutputGainDb, 0.0f, "キーがなければ出力ゲインは0 dB");
+            expectEquals (s.eqOutputGainDb, vc::kEqOutputGainDefaultDb, "キーがなければ出力ゲインは既定（A2の値）");
+            expectEquals (s.eqOutputGainDb, 2.0f, "既定は+2.0 dB");
+            expectEquals (defaults.eqOutputGainDb, 2.0f, "SavedSettingsの既定も+2.0 dB");
+            expectEquals (vc::AtomicParams().eqOutputGainDb.load(), 2.0f, "AtomicParamsの既定も+2.0 dB");
         }
 
-        beginTest ("MicSettings: eqOutputGainDb（保存・往復・範囲外は端へ・非有限は0 dB）");
+        beginTest ("MicSettings: eqOutputGainDb（保存・往復・範囲外は端へ・非有限は既定の+2.0 dB）");
         {
             juce::PropertySet props;
             vc::SavedSettings s;
@@ -309,15 +312,14 @@ private:
             expectEquals (load ("-99"), -12.0f, "範囲外（下）は-12へ");
             expectEquals (load ("1e300"), 12.0f, "巨大値は端へ");
             expectEquals (load ("1e400"), 12.0f, "オーバーフローは符号の側の端へ");
-            expectEquals (load ("nan"), 0.0f, "nanは0 dB");
-            expectEquals (load ("inf"), 0.0f, "infは0 dB");
-            expectEquals (load ("abc"), 0.0f, "不正な文字列は0 dB");
+            expectEquals (load ("nan"), 2.0f, "nanは既定の+2.0 dB");
+            expectEquals (load ("inf"), 2.0f, "infは既定の+2.0 dB");
 
             vc::SavedSettings bad;
             bad.eqOutputGainDb = std::numeric_limits<float>::quiet_NaN();
-            expectEquals (vc::sanitize (bad).eqOutputGainDb, 0.0f, "sanitize: NaNは0 dB");
+            expectEquals (vc::sanitize (bad).eqOutputGainDb, 2.0f, "sanitize: NaNは既定の+2.0 dB");
             bad.eqOutputGainDb = std::numeric_limits<float>::infinity();
-            expectEquals (vc::sanitize (bad).eqOutputGainDb, 0.0f, "sanitize: Infは0 dB");
+            expectEquals (vc::sanitize (bad).eqOutputGainDb, 2.0f, "sanitize: Infは既定の+2.0 dB");
             bad.eqOutputGainDb = 50.0f;
             expectEquals (vc::sanitize (bad).eqOutputGainDb, 12.0f, "sanitize: 範囲外は端へ");
             bad.eqOutputGainDb = -50.0f;
@@ -537,7 +539,7 @@ private:
             expect (juce::String::fromUTF8 (vc::kEqPresets[1].description).contains (juce::String::fromUTF8 ("声の輪郭がはっきり")));
             expectEquals (juce::String::fromUTF8 (vc::kEqNoneName), juce::String::fromUTF8 ("EQなし"));
             expectEquals (juce::String::fromUTF8 (vc::kEqCustomName), juce::String::fromUTF8 ("カスタム"));
-            expectEquals (vc::kEqOutputGainDefaultDb, 0.0f, "出力ゲインの既定は0 dB");
+            expectEquals (vc::kEqOutputGainDefaultDb, vc::kEqPresets[0].outputGainDb, "出力ゲインの既定はA2の値（値を二重に持たない）");
         }
 
         beginTest ("EQプリセット: 値はsanitizeEqBandとroundEqValueで変わらない（変わる値だと永遠にカスタム表示になる）、A2とA3は違う、出力ゲインは0.1 dB刻みで範囲内");
@@ -583,12 +585,27 @@ private:
             expect (vc::deriveEqPreset (stateOf (false, a2Bands, a2Gain)) == EqPresetId::None, "OFFならA2の値でもEQなし");
             expect (vc::deriveEqPreset (stateOf (false, a3Bands, a3Gain)) == EqPresetId::None, "OFFならA3の値でもEQなし");
             expect (vc::deriveEqPreset (stateOf (false, vc::kEqDefaults, 0.0f)) == EqPresetId::None, "OFF・初期値はEQなし");
+            expect (vc::deriveEqPreset (EqState()) == EqPresetId::None, "既定のEqStateはOFFでEQなし");
             expect (vc::deriveEqPreset (stateOf (true, a2Bands, a2Gain)) == EqPresetId::A2, "ONでA2と一致");
             expect (vc::deriveEqPreset (stateOf (true, a3Bands, a3Gain)) == EqPresetId::A3, "ONでA3と一致");
 
             // 出力ゲインも一致の条件（バンドがA2でも、ゲインが違えばカスタム）。
             expect (vc::deriveEqPreset (stateOf (true, a2Bands, a2Gain + 0.5f)) == EqPresetId::Custom, "出力ゲインが違えばカスタム");
-            expect (vc::deriveEqPreset (stateOf (true, a2Bands, 0.0f)) == EqPresetId::Custom, "初期値の出力ゲイン0ならカスタム");
+            expect (vc::deriveEqPreset (stateOf (true, a2Bands, 0.0f)) == EqPresetId::Custom, "出力ゲインが0 dBならカスタム");
+
+            // 初回にEQスイッチをONにしただけでA2になる（既定のバンドと出力ゲインがA2の値。D-026）。
+            EqState firstRun;
+            firstRun.on = true;
+            expect (vc::deriveEqPreset (firstRun) == EqPresetId::A2, "既定の値でEQをONにするとA2");
+            auto fromParams = vc::AtomicParams().loadEq();
+            fromParams.on = true;
+            expect (vc::deriveEqPreset (fromParams) == EqPresetId::A2, "AtomicParamsの既定でEQをONにするとA2");
+            vc::SavedSettings fresh = vc::loadSettings (juce::PropertySet());
+            EqState fromFile;
+            fromFile.on = true;
+            fromFile.bands = fresh.eqBands;
+            fromFile.outputGainDb = fresh.eqOutputGainDb;
+            expect (vc::deriveEqPreset (fromFile) == EqPresetId::A2, "キーのない設定ファイルでEQをONにするとA2");
 
             // 1つの値が違えばカスタム。
             for (size_t i = 0; i < a2Bands.size(); ++i)

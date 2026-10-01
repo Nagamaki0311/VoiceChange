@@ -2597,8 +2597,8 @@ private:
 
                 expect (same (render (100.0f), render (12.0f)), "+100 dB is not rounded to +12 dB");
                 expect (same (render (-100.0f), render (-12.0f)), "-100 dB is not rounded to -12 dB");
-                expect (same (render (std::numeric_limits<float>::quiet_NaN()), render (0.0f)), "NaN is not replaced by 0 dB");
-                expect (same (render (std::numeric_limits<float>::infinity()), render (0.0f)), "Inf is not replaced by 0 dB");
+                expect (same (render (std::numeric_limits<float>::quiet_NaN()), render (vc::kEqOutputGainDefaultDb)), "NaN is not replaced by the default gain");
+                expect (same (render (std::numeric_limits<float>::infinity()), render (vc::kEqOutputGainDefaultDb)), "Inf is not replaced by the default gain");
                 expect (! same (render (6.0f), render (0.0f)), "control: 6 dB made no difference");
             }
 
@@ -2664,8 +2664,8 @@ private:
         expect (std::abs (levelDb (run (true, 6.0f)) - 6.0) <= 0.02, "+6 dB through the Engine");
         expect (std::abs (levelDb (run (true, -6.0f)) + 6.0) <= 0.02, "-6 dB through the Engine");
         expect (std::abs (levelDb (run (true, 99.0f)) - 12.0) <= 0.02, "99 dB is not rounded to +12 dB");
-        expect (std::abs (levelDb (run (true, std::numeric_limits<float>::quiet_NaN()))) <= 0.02, "NaN is not 0 dB");
-        expect (std::abs (levelDb (run (true, std::numeric_limits<float>::infinity()))) <= 0.02, "Inf is not 0 dB");
+        expect (std::abs (levelDb (run (true, std::numeric_limits<float>::quiet_NaN())) - (double) vc::kEqOutputGainDefaultDb) <= 0.02, "NaN is not the default gain");
+        expect (std::abs (levelDb (run (true, std::numeric_limits<float>::infinity())) - (double) vc::kEqOutputGainDefaultDb) <= 0.02, "Inf is not the default gain");
         expect (std::memcmp (run (false, 12.0f).data(), signal.data(), sizeof (float) * (size_t) n) == 0, "EQ OFF applied the output gain");
     }
 
@@ -3378,6 +3378,7 @@ private:
 
             vc::Engine engine;
             engine.params().eqEnabled.store (true);
+            engine.params().eqOutputGainDb.store (0.0f); // このテストは出力ゲインの既定（+2 dB）に依存しない（EQ単体と比べる・+12 dBのピークだけを測る）
             engine.prepare ({ fs, 512 });
 
             for (size_t i = 0; i < boosted.size(); ++i)
@@ -3410,6 +3411,7 @@ private:
         {
             vc::Engine engine;
             engine.params().eqEnabled.store (true);
+            engine.params().eqOutputGainDb.store (0.0f); // このテストは出力ゲインの既定（+2 dB）に依存しない（EQ単体と比べる・+12 dBのピークだけを測る）
             engine.prepare ({ fs, 512 });
 
             for (size_t i = 0; i < boosted.size(); ++i)

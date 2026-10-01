@@ -309,7 +309,7 @@ public:
     void prepare (double sampleRate);
 
     // 音声スレッドのみ。各ブロックの先頭で呼ぶ。範囲外の値は端へ丸め、非有限値は初期値（kEqDefaults・kEqOutputGainDefaultDb）にする。
-    void setTarget (bool run, const std::array<EqBandSettings, kEqBands>& settings, float outputGainDb = kEqOutputGainDefaultDb) noexcept;
+    void setTarget (bool run, const std::array<EqBandSettings, kEqBands>& settings, float outputGainDb = 0.0f) noexcept; // 出力ゲインの省略は0dB（Equalizer単体の用途。アプリの既定kEqOutputGainDefaultDbはEngineが渡す）
 
     // 音声スレッドのみ。その場で処理する。OFFのフェード完了後（Resting）は何もしない（bufに触れない）。
     void process (float* buf, int n) noexcept;

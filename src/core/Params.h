@@ -100,9 +100,9 @@ constexpr float kEqMaxGainDb = 18.0f;
 constexpr float kEqMinQ = 0.10f, kEqMaxQ = 10.0f;
 
 // EQ出力ゲイン（5バンドの後、EQ全体のクロスフェードの内側で掛けるdB）。docs/spec.md「マイク処理: EQ」、D-026。
-// 既定の0dBは、キーがない設定ファイルと非有限値の代替値。プリセットのゲインはkEqPresetsにある。
+// 既定値（kEqOutputGainDefaultDb）はA2の出力ゲイン。バンドの初期値もA2なので、初回にEQをONにしただけでA2になる（D-026）。
+// キーがない設定ファイルと非有限値の代替値でもある。
 constexpr float kEqMaxOutputGainDb = 12.0f;
-constexpr float kEqOutputGainDefaultDb = 0.0f;
 
 // EQプリセット（docs/design.md 10.3節「EQプリセットボタン」）。表示名・説明・値の単一の出典（名前を変えるときはここだけ直す）。
 // UI表示名と内部識別子の対照表: EQなし = EqPresetId::None（値を持たない。EQをOFFにするだけ）/ A2・A3 = kEqPresets / カスタム = EqPresetId::Custom
@@ -146,8 +146,9 @@ constexpr std::array<EqPresetSpec, 2> kEqPresets { {
       2.0f },
 } };
 
-// 初期値はA2のバンド（T-015: Sonarの設定を再現した値の候補。値を二重に持たない）。出力ゲインの初期値はkEqOutputGainDefaultDb。
+// 初期値はA2のバンドと出力ゲイン（T-015: Sonarの設定を再現した値の候補。値を二重に持たない）。
 constexpr std::array<EqBandSettings, kEqBands> kEqDefaults = kEqPresets[0].bands;
+constexpr float kEqOutputGainDefaultDb = kEqPresets[0].outputGainDb;
 
 // int値をEqTypeへ。範囲外ならfallback。
 inline EqType eqTypeFromInt (int value, EqType fallback) noexcept

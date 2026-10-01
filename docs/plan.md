@@ -452,7 +452,7 @@ std::atomic<bool>  nrEnabled { false };
 std::atomic<float> nrBackground { 0.7f }, nrImpact { 0.0f };   // 0〜1
 std::atomic<bool>  eqEnabled { false };
 std::array<EqBandAtomic, kEqBands> eqBands;                    // 初期値はkEqDefaults（AtomicParamsのコンストラクタで設定）
-std::atomic<float> eqOutputGainDb { 0.0f };                    // T-016: EQ出力ゲイン -12〜+12dB（EQがOFFのときはかからない）
+std::atomic<float> eqOutputGainDb { kEqOutputGainDefaultDb };  // T-016: EQ出力ゲイン -12〜+12dB（既定はA2の+2.0dB。EQがOFFのときはかからない）
 // T-016: EQプリセット（EqPresetId { None, A2, A3, Custom }、EqPresetSpec kEqPresets[2]）、EqState（ON/OFF・5バンド・出力ゲイン）、
 // deriveEqPreset（表示中のプリセットを毎回導出。保存しない）、eqStateAfterPreset、EqPresetUndo（「元に戻す」の記録）、eqStatusText。
 // Equalizer::setTarget (bool run, settings, float outputGainDb)：5バンドの後・EQ全体のクロスフェードの内側で、dB補間（50ms）の出力ゲインを掛ける
@@ -562,7 +562,7 @@ public:
 | EQ6 | OFF時のビット一致 | EQ OFF（フェード完了後）でmemcmp一致 |
 | EQ7 | 低い声 | 全バンドのゲインが0dBのフラット設定（kEqDefaultsの値には依存しない。T-016でA2に置き換わったため）で85Hz正弦の変化 ≤ 0.1dB |
 | EQ9 | CPU（参考値） | 48kHz・480ブロック・10秒で、EQのみON、およびノイズ除去（N12と同条件）＋EQ ONのとき、ノーマル・トークボックス・ミニオンの処理時間÷音声時間を出力（失敗判定なし）。ON時の増分が3.5%を超えたら報告する |
-| EQ11 | 出力ゲイン（T-016） | レベル差 = 出力ゲイン（フラットと+12dBピークの両方で0.02dB以内。ゲインはバンドの後）、0→±12dBの50msのdB補間（段差<6e-4、25msで半分）、EQ全体のクロスフェードの内側（ONは原音から、OFFは原音へ）、OFFではビット一致、範囲外は±12・非有限は0dB（ビット一致で確認）、ブロック長に依存しない（96/160/480/800/4800）、Engine経由でAtomicParams::eqOutputGainDbが反映される。EQ5に出力ゲインの掃引とNaN/Infを追加（確保0回） |
+| EQ11 | 出力ゲイン（T-016） | レベル差 = 出力ゲイン（フラットと+12dBピークの両方で0.02dB以内。ゲインはバンドの後）、0→±12dBの50msのdB補間（段差<6e-4、25msで半分）、EQ全体のクロスフェードの内側（ONは原音から、OFFは原音へ）、OFFではビット一致、範囲外は±12・非有限は既定（Equalizer単体の省略は0dB。ビット一致で確認）、ブロック長に依存しない（96/160/480/800/4800）、Engine経由でAtomicParams::eqOutputGainDbが反映される。EQ5に出力ゲインの掃引とNaN/Infを追加（確保0回） |
 
 - 実装メモ: 係数の再計算とタイプ切替は32サンプルのグループの先頭で、サンプル数で数える（ブロック長に依存しない）。補間値は係数計算のあと32サンプルぶんまとめて進める（`SmoothedValue::skip(32)`。部分的なskipは丸めの順序が変わりビット一致しないため）。EQ全体・バンド・タイプの切り替えは20msのクロスフェード（`mix`が0〜1）。フィルタ状態は、稼働の開始とバンドの処理再開（素通しから戻すとき）でリセットする。
 - 追加テスト（表の外）: 分割処理（ブロック長{1,7,128,441,480,4096}の混在列・1サンプル・333・一括のビット一致。パラメータ変更を9600サンプルごとの共通の位置で行う。Equalizer単体とEngine経由）、範囲外・NaN/Inf・不正なtypeの扱い（Engine）、バイパスがEQ出力をそのまま通しEQをリセットしないこと、NaN入力でのブロック無音・フラグ・EQの復帰。
