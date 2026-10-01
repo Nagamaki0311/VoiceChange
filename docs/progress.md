@@ -19,6 +19,32 @@
 
 ---
 
+## 2026-10-01 T-016 追加対応: EQ出力ゲインの既定をA2の値（+2.0dB）にする
+
+### 実施内容
+- Managerの回答: (1)「EQなし」はEQ OFFのみで出力ゲインの値は変えない（現状のまま）、(3) 削除した「EQを初期値に戻す」と「操作のヒント」は了承、(2) 出力ゲインの既定をA2の値にする。
+- `kEqOutputGainDefaultDb` を `kEqPresets[0].outputGainDb`（+2.0dB）にした（Params.h。値を二重に持たない）。これで、キーのない設定ファイル・非有限値・`AtomicParams`・`SavedSettings`・`EqState`の既定がすべて+2.0dBになり、初回にEQスイッチをONにしただけでA2表示になる（スクリーンショットで確認: 設定ファイルにeqEnabledだけがある状態で「A2」がミント、副文「A2で音質を調整しています」、出力ゲイン+2.0 dB）。EQがOFFの既定では出力ゲインは灰色の「+2.0 dB」（かからない）。キーのない既存の設定は出力ゲインが0dBから+2.0dBに変わるが、EQは既定OFFで未使用のため許容（D-026に1行記録）。
+- `Equalizer::setTarget` の出力ゲイン引数の省略値は0dBのまま（Equalizer単体の用途。アプリの既定はEngineが渡す）。非有限値は既定（+2.0dB）になる。
+- docs: spec.md（表の既定・保存の既定）、design.md（出力ゲインの既定、10.3の初回起動の記述）、plan.md、README（機能説明・設定キーの表）、decisions.md D-026（既定+2.0dB、承認、既存設定への影響）。
+
+### 既定ゲイン変更の影響範囲
+- 既定が0dBの前提だったテスト（修正した）: AppLogicの既定値・キーなし・nan/inf・sanitize・`kEqOutputGainDefaultDb`（0.0→A2の値）の期待値。MicのEQ11の「NaN/Infは0dBへ」（比較先を既定の出力ゲインに）。Engine経由のテスト2件（「バイパスはEQ単体とビット一致」「NaN入力から回復後にEQが効く（+12dBのピークを測る）」）は、EQ単体（出力ゲイン0dB）と比べる・ゲインの絶対値を測るため、`eqOutputGainDb`を0dBに明示した。これらの修正前は188件＋1件が失敗した（変更が効いていることの確認）。
+- 影響がなかったもの: EQ OFF時のビット一致テスト（EQ6・Engineバイパス。出力ゲインはEQ OFFでは掛からない）、EQ1〜EQ10（Equalizer単体は引数の省略で0dB、またはバンドを明示）、EQ5（確保0回）、LongRun、M1系（`ProcessSettings`の既定がEQ OFF、`--eq a2|a3`はプリセットの値）。RecordingToolの`--eq on`は設定ファイル（なければ初期値）のバンドと出力ゲイン（既定+2.0dB）でONになる。
+- 追加したテスト: 既定の`EqState`・`AtomicParams`・キーのない設定ファイルでEQをONにするとA2と判定される、既定値が+2.0dB（AtomicParams・SavedSettings・loadSettings）、非有限値は既定。変異試験: `kEqOutputGainDefaultDb` を0.0にするとAppLogicが11件失敗。
+- 補足（既存の挙動。今回は変更なし）: `loadSettings`の`readClampedFloat`は、数字も`nan`/`inf`も含まない文字列（`abc`）を0として読む（`getDoubleValue`の結果）。READMEの「数値として読めない値は初期値」はこの場合に当てはまらない。出力ゲインに限らず全キー共通。
+
+### 結果
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 9件すべて成功（合計340.73秒［mic 178.15秒、long_run 105.50秒、ring_buffer_long 24.65秒、engine 19.12秒、effects 11.54秒、shifter 1.67秒、app_logic 0.01秒］）。
+- スクリーンショット: `/tmp/claude-0/-home-user-VoiceChange/d8330482-3db2-5a12-8df8-5fd03d8f0490/scratchpad/shots/mic2_freshon.png`（初回にEQをONにした状態）、`mic2_def.png`（既定）。
+
+### コミット
+- `7c90911` T-016: EQ出力ゲインの既定をA2の値（+2.0dB）にする
+
+### 次回開始位置
+- T-016のレビュー（Reviewer）。前のエントリの「出力ゲインの既定0dBで初回にEQをONにすると「カスタム」になること」は、この対応で解消した。
+
+---
+
 ## 2026-10-01 T-016 マイクEQのプリセット切替（EQなし／A2／A3）とEQ出力ゲイン、T-015の初期値部分
 
 ### 実施内容
