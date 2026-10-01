@@ -346,7 +346,8 @@ void Engine::processChunk (float* buf, int n) noexcept
                           a.q.load (std::memory_order_relaxed) };
     }
 
-    equalizer.setTarget (atomicParams.eqEnabled.load (std::memory_order_relaxed), eqSettings);
+    equalizer.setTarget (atomicParams.eqEnabled.load (std::memory_order_relaxed), eqSettings,
+                         atomicParams.eqOutputGainDb.load (std::memory_order_relaxed));
     equalizer.process (buf, n);
 
     if (! targetOn && chainGain <= 0.0)

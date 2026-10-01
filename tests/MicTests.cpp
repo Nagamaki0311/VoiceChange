@@ -2422,9 +2422,253 @@ public:
         runEq5();
         runEq9();
         runEq10();
+        runEq11();
+        runEq11Engine();
     }
 
 private:
+    // ----- EQ11: EQ出力ゲイン（T-016、D-026）-----
+    // 5バンドの後に掛かり、EQ全体のクロスフェードの内側に入る。dBで50msの補間（クリックなし）、範囲外は±12、非有限は0 dB、
+    // OFFでは掛からない（ビット一致）、ブロックの区切りに依存しない。
+    void runEq11()
+    {
+        beginTest ("EQ11: EQ output gain: level change equals the gain after the bands, smooth 50 ms ramp, inside the 20 ms EQ crossfade, bit-identical while OFF, block-size independent, out-of-range/non-finite handled");
+
+        for (const double fs : { 48000.0, 44100.0 })
+        {
+            // (a) 定常: フラットな5バンドと、+12 dBのピーク（500 Hz）のどちらでも、レベル差 = 出力ゲイン（バンドの後で掛かる）。
+            const int n = (int) (1.5 * fs);
+            const int from = (int) (0.5 * fs);
+
+            for (const auto& bands : { makeFlatEq(), makeSingleBandEq (2, vc::EqType::Peak, 500.0f, 12.0f, 1.0f) })
+            {
+                const bool flat = bands[2].gainDb == 0.0f;
+                const auto in = vc::test::makeSine (500.0, fs, n, 0.05f);
+
+                for (const float gain : { -12.0f, -6.0f, 0.0f, 2.0f, 6.0f, 12.0f })
+                {
+                    auto out = in;
+                    vc::Equalizer eq;
+                    eq.prepare (fs);
+
+                    for (int pos = 0; pos < n; pos += 480)
+                    {
+                        eq.setTarget (true, bands, gain);
+                        eq.process (out.data() + pos, std::min (480, n - pos));
+                    }
+
+                    const double changeDb = rmsDb (out.data() + from, n - from) - rmsDb (in.data() + from, n - from);
+                    const double expected = (flat ? 0.0 : 12.0) + (double) gain;
+                    expect (std::abs (changeDb - expected) <= 0.02, juce::String (fs, 0) + " Hz, " + (flat ? "flat" : "+12 dB peak") + ", gain " + juce::String (gain, 1)
+                                                                       + " dB: change " + juce::String (changeDb, 4) + " dB, expected " + juce::String (expected, 2));
+                }
+            }
+
+            // (b) OFFでは掛からない: 最初から、およびON -> OFFのフェード完了後はビット一致。ゲインを動かしても変わらない。
+            {
+                juce::Random rng (11);
+                vc::Equalizer eq;
+                eq.prepare (fs);
+                const auto boosted = makeSingleBandEq (2, vc::EqType::Peak, 500.0f, 12.0f, 1.0f);
+
+                const auto identical = [&] (int blocks, const juce::String& label)
+                {
+                    for (int b = 0; b < blocks; ++b)
+                    {
+                        std::vector<float> in (480);
+
+                        for (auto& x : in)
+                            x = (rng.nextFloat() * 2.0f - 1.0f) * 1.7f;
+
+                        auto out = in;
+                        eq.setTarget (false, boosted, b % 2 == 0 ? 12.0f : -12.0f);
+                        eq.process (out.data(), 480);
+                        expect (std::memcmp (in.data(), out.data(), sizeof (float) * 480) == 0, label + ": block " + juce::String (b) + " modified");
+                    }
+                };
+
+                identical (10, juce::String (fs, 0) + " Hz, from the start");
+
+                for (int b = 0; b < 30; ++b)
+                {
+                    std::vector<float> work (480, 0.1f);
+                    eq.setTarget (true, boosted, 12.0f);
+                    eq.process (work.data(), 480);
+                }
+
+                for (int b = 0; b < 4; ++b)
+                {
+                    std::vector<float> work (480, 0.1f);
+                    eq.setTarget (false, boosted, 12.0f);
+                    eq.process (work.data(), 480);
+                }
+
+                expect (! eq.isRunning(), "still running after the fade-out");
+                identical (10, juce::String (fs, 0) + " Hz, after ON -> OFF");
+            }
+
+            // (c) 補間: Active（0 dB）の直流0.1から+12 dBへ。出力は50msかけてdBで直線的に動く。段差も、目標を取りこぼす遅れもない。
+            for (const float target : { 12.0f, -12.0f })
+            {
+                vc::Equalizer eq;
+                eq.prepare (fs);
+                const int ramp = (int) std::lround (0.050 * fs);
+                std::vector<float> settle ((size_t) (0.2 * fs), 0.1f);
+
+                for (int pos = 0; pos < (int) settle.size(); pos += 480)
+                {
+                    eq.setTarget (true, makeFlatEq(), 0.0f);
+                    eq.process (settle.data() + pos, std::min (480, (int) settle.size() - pos));
+                }
+
+                std::vector<float> out ((size_t) (0.2 * fs), 0.1f);
+                eq.setTarget (true, makeFlatEq(), target);
+                eq.process (out.data(), 480);
+
+                for (int pos = 480; pos < (int) out.size(); pos += 480)
+                {
+                    eq.setTarget (true, makeFlatEq(), target);
+                    eq.process (out.data() + pos, std::min (480, (int) out.size() - pos));
+                }
+
+                double maxStep = 0.0;
+
+                for (size_t i = 1; i < out.size(); ++i)
+                    maxStep = std::max (maxStep, (double) std::abs (out[i] - out[i - 1]));
+
+                const double finalGain = std::pow (10.0, (double) target / 20.0);
+                const double midDb = 20.0 * std::log10 (out[(size_t) (ramp / 2 + 16)] / 0.1);
+                logMessage ("EQ11 " + juce::String (fs, 0) + " Hz: gain 0 -> " + juce::String (target, 0) + " dB: max sample step " + juce::String (maxStep, 6)
+                            + ", level at 25 ms " + juce::String (midDb, 2) + " dB");
+                expect (maxStep < 6.0e-4, "step " + juce::String (maxStep, 6) + " (a 12 dB jump would be ~0.3)");
+                expect (std::abs (midDb - (double) target * 0.5) < 0.3, "not a straight dB ramp: " + juce::String (midDb, 2) + " dB at 25 ms");
+                expect (std::abs (out[(size_t) (ramp + 64)] / 0.1 - finalGain) < 1.0e-3 * finalGain, "did not reach the target within 50 ms + 64 samples");
+                expect (std::abs (out.back() / 0.1 - finalGain) < 1.0e-4 * finalGain, "final gain");
+            }
+
+            // (d) EQ全体のクロスフェードの内側: ON時は原音（0）から処理後（ゲイン込み）へ20msで、OFF時は処理後から原音へ。
+            {
+                const int fade = (int) std::lround (0.020 * fs);
+                vc::Equalizer eq;
+                eq.prepare (fs);
+                std::vector<float> out ((size_t) (0.2 * fs), 0.1f);
+                const float gain = 12.0f;
+                eq.setTarget (true, makeFlatEq(), gain);
+                eq.process (out.data(), (int) out.size());
+
+                const double g = std::pow (10.0, (double) gain / 20.0);
+                expect (std::abs (out[0] - 0.1f) < 1.0e-6f, "the fade starts from the dry signal, not the gained one");
+                expect (std::abs (out[(size_t) (fade / 2)] / 0.1 - (1.0 + g) * 0.5) < 0.02, "the ON fade is not a linear mix of dry and gained");
+                expect (std::abs (out[(size_t) (fade + 8)] / 0.1 - g) < 1.0e-3, "the ON fade is not finished after 20 ms");
+
+                std::vector<float> off ((size_t) (0.2 * fs), 0.1f);
+                eq.setTarget (false, makeFlatEq(), gain);
+                eq.process (off.data(), (int) off.size());
+                expect (std::abs (off[0] / 0.1 - g) < 0.02, "the OFF fade does not start from the gained signal");
+                expect (std::abs (off[(size_t) (fade / 2)] / 0.1 - (1.0 + g) * 0.5) < 0.02, "the OFF fade is not a linear mix of gained and dry");
+                expect (std::memcmp (&off.back(), &out.front(), sizeof (float)) == 0, "the output after the OFF fade is not the dry signal");
+                expect (! eq.isRunning(), "still running after the OFF fade");
+            }
+
+            // (e) 範囲外は端へ、非有限は0 dB（初期値）。ビット一致で比べる。
+            {
+                const auto in = vc::test::makeSpeechLikeVowel (140.0, fs, (int) fs, 0.1f);
+                const auto boosted = makeSingleBandEq (2, vc::EqType::Peak, 500.0f, 6.0f, 1.0f);
+
+                const auto render = [&] (float gain)
+                {
+                    auto out = in;
+                    vc::Equalizer eq;
+                    eq.prepare (fs);
+
+                    for (int pos = 0; pos < (int) out.size(); pos += 480)
+                    {
+                        eq.setTarget (true, boosted, gain);
+                        eq.process (out.data() + pos, std::min (480, (int) out.size() - pos));
+                    }
+
+                    return out;
+                };
+
+                const auto same = [] (const std::vector<float>& a, const std::vector<float>& b)
+                {
+                    return std::memcmp (a.data(), b.data(), sizeof (float) * a.size()) == 0;
+                };
+
+                expect (same (render (100.0f), render (12.0f)), "+100 dB is not rounded to +12 dB");
+                expect (same (render (-100.0f), render (-12.0f)), "-100 dB is not rounded to -12 dB");
+                expect (same (render (std::numeric_limits<float>::quiet_NaN()), render (0.0f)), "NaN is not replaced by 0 dB");
+                expect (same (render (std::numeric_limits<float>::infinity()), render (0.0f)), "Inf is not replaced by 0 dB");
+                expect (! same (render (6.0f), render (0.0f)), "control: 6 dB made no difference");
+            }
+
+            // (f) ブロックの区切りに依存しない: 4800サンプルで0 dB -> +6 dB（4800の約数の長さのブロックで同じ出力）。
+            {
+                const int total = 12000;
+                const auto in = vc::test::makeSpeechLikeVowel (140.0, fs, total, 0.1f);
+                const auto boosted = makeSingleBandEq (2, vc::EqType::Peak, 500.0f, 6.0f, 1.0f);
+
+                const auto render = [&] (int block)
+                {
+                    auto out = in;
+                    vc::Equalizer eq;
+                    eq.prepare (fs);
+
+                    for (int pos = 0; pos < total; pos += block)
+                    {
+                        eq.setTarget (true, boosted, pos < 4800 ? 0.0f : 6.0f);
+                        eq.process (out.data() + pos, std::min (block, total - pos));
+                    }
+
+                    return out;
+                };
+
+                const auto ref = render (480);
+
+                for (const int block : { 96, 160, 800, 4800 })
+                    expect (std::memcmp (ref.data(), render (block).data(), sizeof (float) * (size_t) total) == 0, "block " + juce::String (block) + " differs from block 480");
+            }
+        }
+    }
+
+    // Engine経由: AtomicParams::eqOutputGainDbが反映され、範囲外・NaNは安全に扱われる。EQ OFFでは掛からない。
+    void runEq11Engine()
+    {
+        beginTest ("EQ11 (Engine): AtomicParams::eqOutputGainDb is applied after the bands, ignored while EQ is OFF, and NaN / out-of-range values are handled");
+
+        const double fs = 48000.0;
+        const int n = (int) fs;
+        const auto signal = vc::test::makeSine (500.0, fs, n, 0.05f);
+
+        const auto run = [&] (bool eqOn, float gain)
+        {
+            vc::Engine engine;
+            engine.params().enabled.store (false); // バイパス中もEQの出力がそのまま出る（D-020）
+            engine.params().eqEnabled.store (eqOn);
+            engine.params().eqOutputGainDb.store (gain);
+
+            const auto flat = makeFlatEq();
+
+            for (size_t i = 0; i < flat.size(); ++i)
+                engine.params().eqBands[i].store (flat[i]);
+
+            engine.prepare ({ fs, 480 });
+            auto out = signal;
+            engine.process (out.data(), n);
+            return out;
+        };
+
+        const int from = n / 2;
+        const auto levelDb = [&] (const std::vector<float>& out) { return rmsDb (out.data() + from, n - from) - rmsDb (signal.data() + from, n - from); };
+
+        expect (std::abs (levelDb (run (true, 6.0f)) - 6.0) <= 0.02, "+6 dB through the Engine");
+        expect (std::abs (levelDb (run (true, -6.0f)) + 6.0) <= 0.02, "-6 dB through the Engine");
+        expect (std::abs (levelDb (run (true, 99.0f)) - 12.0) <= 0.02, "99 dB is not rounded to +12 dB");
+        expect (std::abs (levelDb (run (true, std::numeric_limits<float>::quiet_NaN()))) <= 0.02, "NaN is not 0 dB");
+        expect (std::abs (levelDb (run (true, std::numeric_limits<float>::infinity()))) <= 0.02, "Inf is not 0 dB");
+        expect (std::memcmp (run (false, 12.0f).data(), signal.data(), sizeof (float) * (size_t) n) == 0, "EQ OFF applied the output gain");
+    }
+
     // ----- EQ10: マイク処理ウィンドウのグラフの曲線（eqCurveDb）-----
     // グラフは、Equalizerと同じ係数の関数（eqBandCoefficients）から曲線を作る。RBJの解析値（独立参照）と、Equalizerの実測（インパルス応答のFFT）に一致し、
     // OFFのバンドは曲線に入らないことを確かめる（表示と音がずれないこと。docs/design.md 10.3節）。
@@ -3408,6 +3652,20 @@ private:
                     run (ms20 / 2);
                 }
 
+                for (int step = 0; step <= 24; ++step)                 // 出力ゲインの掃引（毎サンプルdB→線形の変換。確保なし）
+                {
+                    params.eqOutputGainDb.store (-12.0f + (float) ((step * 7) % 25));
+                    run (ms20 / 2);
+                }
+
+                params.eqOutputGainDb.store (std::numeric_limits<float>::quiet_NaN());
+                run (ms20);
+                params.eqOutputGainDb.store (-std::numeric_limits<float>::infinity());
+                run (ms20);
+                params.eqOutputGainDb.store (500.0f);
+                run (ms20);
+                params.eqOutputGainDb.store (2.0f);
+
                 for (int round = 0; round < 3; ++round)                // タイプ変更（素通しへ → 切替 → フィルタ状態リセット → 戻す）
                     for (const auto type : types)
                     {
@@ -3909,10 +4167,12 @@ public:
                     const auto out = vc::rectool::processAudio (sine, fs, a3);
                     const int skip = 48000;
                     const double measured = 20.0 * std::log10 (vc::test::rms (out.output.data() + skip, len - skip) / vc::test::rms (sine.data() + skip, len - skip));
-                    const double expected = vc::eqCurveDb (a3.eqBands, fs, hz);
+                    const double expected = vc::eqCurveDb (a3.eqBands, fs, hz) + (double) a3.eqOutputGainDb; // 出力ゲインは曲線に足す（グラフと音を一致させる）
                     expectWithinAbsoluteError (measured, expected, 0.2, juce::String (hz, 0) + " Hz");
                     changed = std::max (changed, std::abs (expected));
                 }
+
+                expect (a3.eqOutputGainDb > 0.5f, "the a3 preset carries an output gain");
 
                 expect (changed > 3.0, "the a3 preset changes some band by only " + juce::String (changed, 2) + " dB");
             }

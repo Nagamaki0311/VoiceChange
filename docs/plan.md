@@ -442,7 +442,7 @@ tests/MicTests.cpp              カテゴリ Mic（N0〜N12、EQ1〜EQ9、M1）
 enum class EqType { Peak, LowShelf, HighShelf, LowCut, HighCut };
 constexpr int kEqBands = 5;
 struct EqBandSettings { bool on; EqType type; float hz, gainDb, q; };
-constexpr std::array<EqBandSettings, kEqBands> kEqDefaults;  // spec.mdの初期値（仮）。T-015でSonarの再現値に置き換える
+constexpr std::array<EqBandSettings, kEqBands> kEqDefaults;  // A2のバンド（T-016。kEqPresets[0].bands）。Sonarの再現値への置き換えはT-015の残り
 constexpr float kEqMinHz = 20, kEqMaxHz = 20000, kEqMaxGainDb = 18, kEqMinQ = 0.1f, kEqMaxQ = 10;
 EqType eqTypeFromInt (int, EqType fallback) noexcept;         // 範囲外ならfallback
 EqBandSettings sanitizeEqBand (EqBandSettings, const EqBandSettings& fallback) noexcept;  // 非有限値→fallback、範囲外→端。SavedSettingsのsanitize（T-013）も使う
@@ -452,6 +452,10 @@ std::atomic<bool>  nrEnabled { false };
 std::atomic<float> nrBackground { 0.7f }, nrImpact { 0.0f };   // 0〜1
 std::atomic<bool>  eqEnabled { false };
 std::array<EqBandAtomic, kEqBands> eqBands;                    // 初期値はkEqDefaults（AtomicParamsのコンストラクタで設定）
+std::atomic<float> eqOutputGainDb { 0.0f };                    // T-016: EQ出力ゲイン -12〜+12dB（EQがOFFのときはかからない）
+// T-016: EQプリセット（EqPresetId { None, A2, A3, Custom }、EqPresetSpec kEqPresets[2]）、EqState（ON/OFF・5バンド・出力ゲイン）、
+// deriveEqPreset（表示中のプリセットを毎回導出。保存しない）、eqStateAfterPreset、EqPresetUndo（「元に戻す」の記録）、eqStatusText。
+// Equalizer::setTarget (bool run, settings, float outputGainDb)：5バンドの後・EQ全体のクロスフェードの内側で、dB補間（50ms）の出力ゲインを掛ける
 // SavedSettings に同じ項目を追加し、sanitize()で非有限値→初期値、範囲の端へ丸める
 const char* eqTypeId (EqType) noexcept;  EqType eqTypeFromId (const juce::String&) noexcept;  // 不明ならPeak（T-013）
 
@@ -556,8 +560,9 @@ public:
 | EQ4 | 極端な値 | f = 20kHz（44.1kでは0.45fsへ丸め）、Q = 0.1/10、ゲイン±18dBで白色雑音を10秒処理し、有限・発散なし |
 | EQ5 | アロケーション | パラメータ・タイプ変更中を含めて確保0回 |
 | EQ6 | OFF時のビット一致 | EQ OFF（フェード完了後）でmemcmp一致 |
-| EQ7 | 低い声 | 全バンドのゲインが0dBのフラット設定（kEqDefaultsの値には依存しない。T-015で置き換わるため）で85Hz正弦の変化 ≤ 0.1dB |
+| EQ7 | 低い声 | 全バンドのゲインが0dBのフラット設定（kEqDefaultsの値には依存しない。T-016でA2に置き換わったため）で85Hz正弦の変化 ≤ 0.1dB |
 | EQ9 | CPU（参考値） | 48kHz・480ブロック・10秒で、EQのみON、およびノイズ除去（N12と同条件）＋EQ ONのとき、ノーマル・トークボックス・ミニオンの処理時間÷音声時間を出力（失敗判定なし）。ON時の増分が3.5%を超えたら報告する |
+| EQ11 | 出力ゲイン（T-016） | レベル差 = 出力ゲイン（フラットと+12dBピークの両方で0.02dB以内。ゲインはバンドの後）、0→±12dBの50msのdB補間（段差<6e-4、25msで半分）、EQ全体のクロスフェードの内側（ONは原音から、OFFは原音へ）、OFFではビット一致、範囲外は±12・非有限は0dB（ビット一致で確認）、ブロック長に依存しない（96/160/480/800/4800）、Engine経由でAtomicParams::eqOutputGainDbが反映される。EQ5に出力ゲインの掃引とNaN/Infを追加（確保0回） |
 
 - 実装メモ: 係数の再計算とタイプ切替は32サンプルのグループの先頭で、サンプル数で数える（ブロック長に依存しない）。補間値は係数計算のあと32サンプルぶんまとめて進める（`SmoothedValue::skip(32)`。部分的なskipは丸めの順序が変わりビット一致しないため）。EQ全体・バンド・タイプの切り替えは20msのクロスフェード（`mix`が0〜1）。フィルタ状態は、稼働の開始とバンドの処理再開（素通しから戻すとき）でリセットする。
 - 追加テスト（表の外）: 分割処理（ブロック長{1,7,128,441,480,4096}の混在列・1サンプル・333・一括のビット一致。パラメータ変更を9600サンプルごとの共通の位置で行う。Equalizer単体とEngine経由）、範囲外・NaN/Inf・不正なtypeの扱い（Engine）、バイパスがEQ出力をそのまま通しEQをリセットしないこと、NaN入力でのブロック無音・フラグ・EQの復帰。
@@ -575,7 +580,7 @@ public:
 #### T-014: 実録音比較のオフライン処理ツールと手順
 
 - 変更対象（実装後の実際）: `tests/RecordingTool.h/.cpp`（ツール本体。ファイルを増やしたのは、TestMain.cppがアロケーション検出フックで大きく、指標・区間判定・WAV入出力が数百行になるため）、`tests/TestMain.cpp`（`--process-wav`・`--compare`への振り分けだけ。引数なしの動作は従来どおり）、`tests/MicTests.cpp`（M1a〜M1g）、`CMakeLists.txt`（`VoiceChangeTests`に`juce_audio_formats`を直接リンク。本体にはjuce_dsp経由で元からリンク済み）、`README.md`（手順）。
-- `VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.7 --impact 0.3 --nr on|off --eq on|off|a2|a3|sonar --settings <VoiceChange.settingsのパス> --segments <区間ファイル> --trace <csv> --float]`: WAVを読み、出力レート＝WAVのレートでEngine（プリセットはノーマル、ゲイン0）に通して書き出す。遅延（ノイズ除去の1440サンプル@48kHz）を取り除いて入力と同じ位置・長さにし、遅延を表示する。既定は16bit PCM。`--float`は32bit float（`--compare`用。16bitは約-90dBFSの量子化雑音があり、それ以下の残留雑音は測れない）。区間ごとのゲート開放割合・インパクト抑制の作動割合を表示（`--trace`は10msごとのCSV）。設定は 既定 → `--settings` → オプション の順。`--eq`のa2・a3・sonarはツール内の定数（T-016でParams.hへ）。
+- `VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.7 --impact 0.3 --nr on|off --eq on|off|a2|a3|sonar --settings <VoiceChange.settingsのパス> --segments <区間ファイル> --trace <csv> --float]`: WAVを読み、出力レート＝WAVのレートでEngine（プリセットはノーマル、ゲイン0）に通して書き出す。遅延（ノイズ除去の1440サンプル@48kHz）を取り除いて入力と同じ位置・長さにし、遅延を表示する。既定は16bit PCM。`--float`は32bit float（`--compare`用。16bitは約-90dBFSの量子化雑音があり、それ以下の残留雑音は測れない）。区間ごとのゲート開放割合・インパクト抑制の作動割合を表示（`--trace`は10msごとのCSV）。設定は 既定 → `--settings` → オプション の順。`--eq`のa2・a3はParams.hのkEqPresets（T-016。出力ゲイン込み）、sonarはツール内の定数。`--eq-gain <dB>`（±12）で出力ゲインを上書きできる（ゲインを振って声量を測るため）。
 - `VoiceChangeTests --compare <raw.wav> <sonar.wav> <ours.wav> [--segments <区間ファイル>] [--sonar-segments <区間ファイル>]`: 区間（silence・speech・impact・speech+impact）ごとに次を表で出す。区間は台本の時刻ファイルで指定し、省略時は生音声のエネルギーで自動判定する。遅延は相互相関で揃える（相関0.3以上。別テイクなら揃えず、sonarは自身の区間）。
   - 無声区間の残留雑音RMS [dBFS]（10msフレームの中央値、-100dBFS未満の割合を併記）と1/3オクターブスペクトル
   - 発話区間のレベル（RMS）と、K特性（BS.1770、ゲートなしの簡易版）の重み付けパワー。生に対する差が声量の主指標（暫定基準: ノイズ除去を通してK特性の差が-0.5dB以上。追加要件）
@@ -590,12 +595,19 @@ public:
 #### T-015: Sonarの設定を初期値に反映し、実録音で評価する（ユーザーの素材待ち）
 
 - 前提: ユーザーからSonarのスクリーンショット（EQと、Noise Reductionのスライダー値）と、同時録音のWAV 2種を受け取っていること。スクリーンショットには、使っているバンド数（5を超えるなら実装のバンド数を増やす）、各バンドのフィルタタイプと周波数・ゲイン・Q、ローカット等の傾きが写っていること。
-- 変更対象: `src/core/Params.h`（kEqDefaults、背景ノイズ・インパクトの初期値）、`docs/spec.md`（初期値の表）、`tests/MicTests.cpp`（EQ8）、`README.md`（評価結果）。
+- 変更対象: `src/core/Params.h`（kEqDefaults、背景ノイズ・インパクトの初期値）、`docs/spec.md`（初期値の表）、`tests/MicTests.cpp`（EQ8）、`README.md`（評価結果）。実施済み: ノイズ除去の初期値（背景65%・インパクト15%）。kEqDefaultsはT-016でA2のバンドになった。Sonarの設定を再現した値への置き換えと評価は未着手。
 - EQ8: kEqDefaultsの周波数特性が、スクリーンショットから読み取った曲線上の点と±1dB以内で一致する。Sonarとフィルタの定義が違う場合は換算の根拠をdecisions.mdに記録する。
 - 初回の評価（ユーザーのOBS録画［別テイク。生・Sonar適用後、EQなし］で、T-014の実装後に実施した分）はprogress.mdのT-014エントリ。Sonarの設定のスクリーンショットと同時録音を受け取ったあとの評価は、この項の本来の内容。
 - 評価（T-014から引き継ぐT-011の項目を含む）: 上記T-014の「T-011から引き継ぐ評価項目」について、実録音での値を報告する。
 - 評価: T-014のツールで比較表を作り、目標（本アプリの「発話と残留雑音の比」がSonar比で−3dB以内、打鍵区間でSonar比+3dB以内、80〜300Hzの長時間スペクトル差±2dB以内）と照らして報告する。目標は判断材料で、合否はユーザーの聴感で決める。
 - 完了条件: 比較表と3ファイル（raw・sonar・ours、発話レベルを揃えたもの）をユーザーへ渡し、ユーザーの聴感の結果（採否・調整値）をprogress.mdとspec.mdに反映した。
+
+#### T-016: マイクEQのプリセット切替（EQなし／A2／A3）とEQ出力ゲイン
+
+- 要件・値: docs/spec.md「マイク処理: EQ」、判断はD-026。UIはdocs/design.md 10.3節（Designer確定）。
+- 変更対象: `src/core/Params.h`（kEqPresets・EqState・deriveEqPreset・EqPresetUndoなどの純粋関数、eqOutputGainDbの保存・読込、EqField::OutputGainDb）、`src/core/MicProcessing.*`（Equalizerの出力ゲイン）、`src/core/Engine.cpp`、`src/app/MicPanel.*`・`MainComponent.*`・`Main.cpp`、`tests/`（AppLogic・MicのEQ5・EQ11・M1g）、`tests/RecordingTool.*`（`--eq a2|a3`をkEqPresetsへ、`--eq-gain`）。
+- 出力ゲインの値は、`--process-wav --float`と`--compare`でユーザーの録音（raw_A）の発話区間のK特性ラウドネスを測って決めた（A2・A3とも+2.0dB。実測表はprogress.md）。
+- 完了条件: ctest全件成功、`--screenshot-mic`で配置を確認、プリセット値・導出規則・ゲイン適用を壊すとテストが落ちる。
 
 ### 8.4 完了条件（追加計画全体）
 
