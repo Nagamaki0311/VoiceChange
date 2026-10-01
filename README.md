@@ -170,10 +170,19 @@ CIとLinux上のテスト（トレイ非対応・実デバイスなし）では�
 VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.65] [--impact 0.15] [--nr on|off]
                  [--eq on|off|a2|a3|sonar] [--eq-gain <dB>] [--settings <VoiceChange.settings>]
                  [--segments <区間ファイル>] [--trace <csv>] [--float]
+                 [--preset <名前>] [--gain <dB>] [--pitch <半音>] [--reverb <0〜1>]
+                 [--semitones <半音>] [--formant <係数>]
+                 [--talkbox-carrier follow|fixed] [--talkbox-hz <Hz>] [--talkbox-chord <半音,...>] [--talkbox-voicing-floor <0〜1>]
 ```
 
 - WAVを読み、WAVのサンプルレートでEngine（プリセット ノーマル、ゲイン0）に通して書き出す。設定は、既定（ノイズ除去ON、背景0.65・インパクト0.15、EQ OFF）→ `--settings`（アプリの設定ファイル。Linuxでは`$HOME/VoiceChange/VoiceChange.settings`、Windowsでは`%APPDATA%\VoiceChange\VoiceChange.settings`）→ 各オプション、の順に上書きされる。`--bg`・`--impact`は0〜1（アプリの0〜100%）、`--nr`は`on`・`off`、`--eq`は下記の値だけを受け付け、それ以外は終了コード2のエラー。入力と出力に同じファイルは指定できない。
 - `--eq`: `on`は設定ファイル（なければ初期値）のバンドでON、`a2`（自然なクリアさ）・`a3`（輪郭はっきり。どちらも本アプリのプリセット。出力ゲイン+2.0dB込み）・`sonar`（現在のSonarのEQの5バンド近似。出力ゲインなし）はバンドと出力ゲインを置き換えてON。`--eq-gain`（-12〜12）は出力ゲインだけを上書きする（ゲインを振って声量を測るため）。
+- 試聴サンプル作成用の項目（T-018。既定はすべて従来どおり: プリセット ノーマル・ゲイン0・ピッチ0・リバーブ0・上書きなし。**`--nr`の既定はONなので、声の加工だけを聴くときは`--nr off --eq off`を付ける**）:
+  - `--preset`（`normal`・`echo`・`helium`・`minion`・`giant`・`kerokero`・`robot`・`talkbox`）、層1の`--gain`（-20〜20dB）・`--pitch`（整数の半音。**製品のスライダーは±12だが、このツールは±36まで受け付ける**）・`--reverb`（0〜1）。
+  - `--semitones`（-48〜48）・`--formant`（0.25〜4）: プリセット表の移調量・フォルマント係数を上書きする（片方だけなら、もう片方は表の値）。製品の表と範囲は変えない。`normal`・`helium`・`minion`・`giant`・`talkbox`のプリセットだけで使える。
+  - `--talkbox-carrier`（`follow` = 検出したf0に追従する製品の動作 / `fixed` = `--talkbox-hz`（40〜1000、既定110）の固定の高さ）、`--talkbox-chord`（キャリアの和音を半音のコンマ区切りで、例`0,4,7`。1〜6個）、`--talkbox-voicing-floor`（キャリアの鋸波の割合の下限。製品は検出器の値そのままで0）。`--preset talkbox`のときだけ使える。
+  - 上書きとトークボックスの実験があるときは、Engineを「マイク処理」と「層1」の2つに分け、間にPitchShifter・PitchDetector・Talkboxを直接置く試聴用の経路を通す（並びは製品のEngineと同じ。同じ値ならプリセットを選んだ場合と同じ音になることをテストM1hで確認している）。それ以外はEngineをそのまま使う。
+  - 不正な値・範囲外・組み合わせの誤りは、説明を出して終了コード2。ピッチシフターが動くときは、その遅延（120ms）も出力から取り除いて入力に揃える（表示される）。
 - 出力は、ノイズ除去の遅延（48kHzで1440サンプル = 30ms。表示される）を取り除いて入力と同じ長さ・同じ位置に揃える。既定は16bit PCM（聴き比べ用）。**`--compare`に渡すWAVは`--float`（32bit float）で書き出す**: 16bitの量子化雑音は約-90dBFSで、それ以下の残留雑音は測れない。
 - 区間ごとの「ゲートが開いていた割合」と「インパクト抑制が働いていた割合」を表示する（区間は`--segments`、省略時は入力の自動判定）。`--trace`は10msごとのCSV（時刻、入力・出力のRMS[dBFS]、ゲート開放の割合、インパクト抑制の割合）。
 

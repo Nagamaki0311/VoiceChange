@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 // ===== SECTION: RecordingTool（T-014） =====
@@ -132,6 +133,11 @@ juce::String formatReport (const CompareResult& result);
 // EQのプリセット（--eqの値）。A2・A3の値は本アプリのプリセット（Params.hのkEqPresets）。Sonarはユーザーの現在のSonarのEQを5バンドで近似した値（比較用。出力ゲインなし）。
 enum class EqPreset { Off, On, A2, A3, Sonar };
 
+// T-018（プリセット強化の試聴サンプル作成）で足した項目は、すべて既定で従来どおり（ノーマル・ゲイン0・ピッチ0・リバーブ0・上書きなし）。
+// 製品のプリセット表・ピッチ範囲は変えない。範囲外の移調と実験用のキャリアは、このツールの中だけで許す（試聴の候補探索用）。
+// 通称（コマンドの値）と内部識別子: follow = TalkboxCarrier::Follow / fixed = TalkboxCarrier::Fixed。
+enum class TalkboxCarrier { Follow, Fixed }; // Follow = 検出したf0に追従（製品と同じ）/ Fixed = 固定の高さ（平坦なロボット声）
+
 struct ProcessSettings
 {
     bool nrEnabled = true;
@@ -140,7 +146,28 @@ struct ProcessSettings
     bool eqEnabled = false;
     std::array<EqBandSettings, kEqBands> eqBands = kEqDefaults;
     float eqOutputGainDb = kEqOutputGainDefaultDb;
+
+    // 層1・層2（--preset・--gain・--pitch・--reverb）。pitchは層1ピッチ（半音、整数）。製品の±12を超えてよい（kMaxToolPitch）。
+    Preset preset = Preset::Normal;
+    float gainDb = 0.0f;
+    int pitch = 0;
+    float reverb = 0.0f;
+
+    // プリセットの移調量（半音）・フォルマント係数の上書き（--semitones・--formant）。片方だけでもよい（もう片方はプリセット表の値）。
+    std::optional<float> semitonesOverride;
+    std::optional<float> formantOverride;
+
+    // トークボックスの実験（--talkbox-carrier・--talkbox-hz・--talkbox-chord）。キャリアはf0（またはfixedHz）× 2^(chord[i]/12)の和（各1/sqrt(個数)）。
+    TalkboxCarrier talkboxCarrier = TalkboxCarrier::Follow;
+    float talkboxFixedHz = 110.0f;
+    std::vector<float> talkboxChord { 0.0f };
+    float talkboxVoicingFloor = 0.0f; // キャリアの有声度（鋸波の割合）の下限。製品は検出器の値そのまま（0 = 下限なし）。低い声で検出器が無声寄りに判定するときの確認用
 };
+
+// このツールが受け付ける移調量とフォルマント係数の範囲（製品の範囲ではない）。
+constexpr int kMaxToolPitch = 36;
+constexpr float kMaxToolSemitones = 48.0f;
+constexpr float kMinToolFormant = 0.25f, kMaxToolFormant = 4.0f;
 
 // プリセットを適用（OffはEQをOFFにするだけ。On以外のA2・A3・Sonarはバンドと出力ゲインを置き換えてEQをON）。
 void applyEqPreset (ProcessSettings& settings, EqPreset preset);
@@ -157,12 +184,15 @@ struct ProcessResult
 {
     std::vector<float> output;     // 入力と同じ長さ。遅延（latencySamples）を取り除いて入力に位置を合わせてある
     int latencySamples = 0;        // ノイズ除去の遅延（OFFなら0）
+    int shifterLatencySamples = 0; // 終了時にピッチシフターが稼働していたときの遅延（出力から取り除いてある。休止中は0）
     std::uint32_t errorFlags = 0;
     int underflowCount = 0;
     std::vector<GateBlockStat> blocks;
 };
 
-// Engine（プリセット ノーマル、ゲイン0）に通す。ブロック長は10ms。出力は遅延を補正して入力と同じ長さにする。
+// Engine（設定のプリセット・層1。既定はノーマル、ゲイン0）に通す。ブロック長は10ms。出力は遅延を補正して入力と同じ長さにする。
+// 移調量・フォルマントの上書きとトークボックスの実験があるときは、Engineを「マイク処理」と「層1」の2つに分け、間にPitchShifter・
+// PitchDetector・Talkboxを直接置いた試聴用の経路を通す（Engineのプリセット表に依らないため。製品のEngineは変えない）。
 ProcessResult processAudio (const std::vector<float>& input, double sampleRate, const ProcessSettings& settings);
 
 // ===== SECTION: コマンド =====
