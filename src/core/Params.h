@@ -66,8 +66,8 @@ constexpr std::array<PresetSpec, 8> kPresets { {
 } };
 
 // マイク処理（ノイズ除去）の背景ノイズの初期値。AtomicParamsの初期値と、Engineが非有限値を読んだときの代替値。
-constexpr float kNrBackgroundDefault = 0.7f;
-constexpr float kNrImpactDefault = 0.0f;
+constexpr float kNrBackgroundDefault = 0.65f;
+constexpr float kNrImpactDefault = 0.15f;
 
 // ===== SECTION: EQ（T-012） =====
 // マイク処理のEQ（5バンド）。docs/spec.md「マイク処理: EQ」、docs/decisions.md D-024、docs/plan.md 8.2節参照。

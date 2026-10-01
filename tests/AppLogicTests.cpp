@@ -259,13 +259,13 @@ private:
             expect (vc::loadSettings (props).eqBands[0].type == vc::EqType::Peak, "キーはあるが不明なタイプ名はpeak（初期値のlowshelfではない）");
         }
 
-        beginTest ("MicSettings: キーがない場合は初期値（ノイズ除去OFF・EQ OFF・背景70%・インパクト0%・kEqDefaults）");
+        beginTest ("MicSettings: キーがない場合は初期値（ノイズ除去OFF・EQ OFF・背景65%・インパクト15%・kEqDefaults）");
         {
             const juce::PropertySet empty;
             const auto s = vc::loadSettings (empty);
             expect (! s.nrEnabled);
-            expectEquals (s.nrBackground, 0.7f);
-            expectEquals (s.nrImpact, 0.0f);
+            expectEquals (s.nrBackground, 0.65f);
+            expectEquals (s.nrImpact, 0.15f);
             expect (! s.eqEnabled);
 
             for (size_t i = 0; i < vc::kEqDefaults.size(); ++i)

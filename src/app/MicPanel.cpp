@@ -18,8 +18,8 @@ using L = AppLookAndFeel;
 // 10.3節のツールチップ（スクリーンリーダーの説明にも同じ文を使う）。
 const char* const kNrSwitchTip = "エフェクト全体をOFFにしても、ノイズ除去はかかったままです。ONにすると声の遅れが約30 ms増えます";
 const char* const kEqSwitchTip = "エフェクト全体をOFFにしても、EQはかかったままです";
-const char* const kBackgroundTip = "空調やファンなど続く雑音を抑える強さ。50 %を超えると、話していない間の音も下げます。ダブルクリックで初期値（70 %）に戻します";
-const char* const kImpactTip = "キーボードやクリックなど短い音を抑える強さ。0 %では働きません。話し声と重なった音は残ります。ダブルクリックで初期値（0 %）に戻します";
+const char* const kBackgroundTip = "空調やファンなど続く雑音を抑える強さ。50 %を超えると、話していない間の音も下げます。ダブルクリックで初期値（65 %）に戻します";
+const char* const kImpactTip = "キーボードやクリックなど短い音を抑える強さ。0 %では働きません。話し声と重なった音は残ります。ダブルクリックで初期値（15 %）に戻します";
 const char* const kTypeTip = "フィルターの種類。ローカットは低い音を削り（ハイパス）、ハイカットは高い音を削ります（ローパス）";
 const char* const kHzTip = "20〜20000 Hz。クリックして入力（1.2k のようにkも使えます）。ホイールと↑↓で1/12オクターブずつ";
 const char* const kGainTip = "-18.0〜+18.0 dB。クリックして入力。ホイールと↑↓で0.5 dBずつ";
