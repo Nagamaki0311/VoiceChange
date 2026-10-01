@@ -27,9 +27,10 @@
 | T-010 | NoiseReducer本体（フレーミング・48kHz変換・RNNoise・原音混合・状態遷移・遅延報告）とEngine組み込み | 高 | 完了 | developer | マイク処理はバイパス対象外（D-020） |
 | T-011 | VAD連動ゲートとインパクト抑制、合成信号での客観指標 | 高 | 完了 | developer | 閾値は暫定。N5b対策としてホールド3ms・閉じる余裕+8dBに調整済み（README・progress.md） |
 | T-012 | EQ（5バンド、ArrayCoefficients）とEngine組み込み、LongRun拡張 | 高 | 完了 | developer | 実測値はREADME・progress.md。CPUの目標は3.5%へ緩和済み（D-025、ユーザー承認）。ミニオン+3.2〜+3.5で境界 |
-| T-013 | 設定の保存・マイク処理ボタンとマイク処理ウィンドウ・内訳表示・統計ログ | 中 | レビュー中 | designer / developer | design.md 10章（Designer確定済み） |
-| T-014 | 実録音比較のオフライン処理ツール（--process-wav・--compare）と手順 | 中 | 未着手 | developer | READMEに録音と比較の手順 |
+| T-013 | 設定の保存・マイク処理ボタンとマイク処理ウィンドウ・内訳表示・統計ログ | 中 | 完了 | designer / developer | design.md 10章（Designer確定済み） |
+| T-014 | 実録音比較のオフライン処理ツール（--process-wav・--compare）と手順 | 中 | レビュー中 | developer | READMEに録音と比較の手順。初回の実録音評価（T-015の一部）はprogress.md |
 | T-015 | Sonarの設定を初期値に反映し、実録音で評価 | 中 | 未着手 | developer | ユーザーのスクリーンショットと同時録音WAVを待つ |
+| T-016 | マイクEQのプリセット切替（EQなし／A2／A3。A2=自然なクリアさ、A3=声の輪郭がはっきり。kEqDefaultsをA2へ） | 中 | 未着手 | designer / developer | ユーザー要望（2026-09-30）。設計はDesigner確定後にdesign.mdへ反映して実装 |
 
 ## バックログ（未着手・優先度未確定）
 

@@ -431,7 +431,7 @@ tests/MicTests.cpp              カテゴリ Mic（N0〜N12、EQ1〜EQ9、M1）
 - `add_library(vc_rnnoise STATIC …)`: 8.1-2のソース（x86/以下を除く）と`${rnnoise_model_SOURCE_DIR}/src/rnnoise_data.c`。includeは`${rnnoise_SOURCE_DIR}/include`（PUBLIC、SYSTEM）と、`${rnnoise_SOURCE_DIR}/src`・`${rnnoise_model_SOURCE_DIR}/src`（PRIVATE）。UNIXでは`m`をリンク。必要なコンパイル定義（`_USE_MATH_DEFINES`等）はT-009で決める。rnnoiseのソースは改変しない（必要になったら報告する）。
 - JUCEを含まないCのライブラリなので、STATICでもD-005の懸念（JUCEソースの二重コンパイル）はない。`vc_core`のINTERFACEに`vc_rnnoise`を加える。`CMAKE_MSVC_RUNTIME_LIBRARY`はadd_libraryより前に設定済みのため、`/MT`が適用される。
 - ローカル検証: `-DFETCHCONTENT_SOURCE_DIR_RNNOISE=<scratchpad>/rnnoise -DFETCHCONTENT_SOURCE_DIR_RNNOISE_MODEL=<scratchpad>/rnnoise_model`（モデルはscratchpadにtar.gzを展開したディレクトリ）。
-- `VoiceChangeTests`にだけ`juce::juce_audio_formats`をリンクする（T-014のWAV入出力用）。新規パッケージではない。
+- `VoiceChangeTests`に`juce::juce_audio_formats`を直接リンクする（T-014のWAV入出力用。`tests/RecordingTool.cpp`が直接使う）。アプリ本体にはjuce_dsp経由で元からリンクされている（機能追加なし）。新規パッケージではない。
 - ctest: `vc_add_test(mic Mic)`（quick）。
 - CI: モデルのtar.gzを`actions/cache`（キーはファイル名）で保存し、CMakeのURLに「ローカルのキャッシュ → media.xiph.org」の順で渡す（ハッシュ検査は両方に効く）。方式の細部はT-009で決める。
 
@@ -574,15 +574,15 @@ public:
 
 #### T-014: 実録音比較のオフライン処理ツールと手順
 
-- 変更対象: `tests/TestMain.cpp`（`--process-wav`・`--compare`モード）、`tests/MicTests.cpp`（M1）、`CMakeLists.txt`（juce_audio_formats）、`README.md`（手順）。
-- `VoiceChangeTests --process-wav <in.wav> <out.wav> [--settings <VoiceChange.settingsのパス>] [--bg 0.7 --impact 0.3 --eq on]`: WAVを読み、出力レート＝WAVのレートでEngine（プリセットはノーマル、ゲイン0）に通して書き出し、遅延を表示する。
-- `VoiceChangeTests --compare <raw.wav> <sonar.wav> <ours.wav> [--segments <区間ファイル>]`: 区間（無音・発話・打鍵のみ・発話＋打鍵）ごとに次を表で出す。区間は台本の時刻ファイルで指定し、省略時は生音声のエネルギーで自動判定する。遅延は相互相関で揃える。
-  - 無声区間の残留雑音RMS [dBFS] と1/3オクターブスペクトル
-  - 発話区間のレベル
-  - 発話と残留雑音の比（レベルに依存しない比較量）
-  - 打鍵区間のピークとRMS
-  - 発話区間の長時間平均スペクトルの比（sonar/raw＝Sonarの実効的なEQ、ours/raw）の差（63Hz〜8kHz、1/3オクターブ）
-- M1: 既知の合成WAV（雑音床と発話レベルが既知）で、ツールの指標が期待値と0.5dB以内。
+- 変更対象（実装後の実際）: `tests/RecordingTool.h/.cpp`（ツール本体。ファイルを増やしたのは、TestMain.cppがアロケーション検出フックで大きく、指標・区間判定・WAV入出力が数百行になるため）、`tests/TestMain.cpp`（`--process-wav`・`--compare`への振り分けだけ。引数なしの動作は従来どおり）、`tests/MicTests.cpp`（M1a〜M1g）、`CMakeLists.txt`（`VoiceChangeTests`に`juce_audio_formats`を直接リンク。本体にはjuce_dsp経由で元からリンク済み）、`README.md`（手順）。
+- `VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.7 --impact 0.3 --nr on|off --eq on|off|a2|a3|sonar --settings <VoiceChange.settingsのパス> --segments <区間ファイル> --trace <csv> --float]`: WAVを読み、出力レート＝WAVのレートでEngine（プリセットはノーマル、ゲイン0）に通して書き出す。遅延（ノイズ除去の1440サンプル@48kHz）を取り除いて入力と同じ位置・長さにし、遅延を表示する。既定は16bit PCM。`--float`は32bit float（`--compare`用。16bitは約-90dBFSの量子化雑音があり、それ以下の残留雑音は測れない）。区間ごとのゲート開放割合・インパクト抑制の作動割合を表示（`--trace`は10msごとのCSV）。設定は 既定 → `--settings` → オプション の順。`--eq`のa2・a3・sonarはツール内の定数（T-016でParams.hへ）。
+- `VoiceChangeTests --compare <raw.wav> <sonar.wav> <ours.wav> [--segments <区間ファイル>] [--sonar-segments <区間ファイル>]`: 区間（silence・speech・impact・speech+impact）ごとに次を表で出す。区間は台本の時刻ファイルで指定し、省略時は生音声のエネルギーで自動判定する。遅延は相互相関で揃える（相関0.3以上。別テイクなら揃えず、sonarは自身の区間）。
+  - 無声区間の残留雑音RMS [dBFS]（10msフレームの中央値、-100dBFS未満の割合を併記）と1/3オクターブスペクトル
+  - 発話区間のレベル（RMS）と、K特性（BS.1770、ゲートなしの簡易版）の重み付けパワー。生に対する差が声量の主指標（暫定基準: ノイズ除去を通してK特性の差が-0.5dB以上。追加要件）
+  - 発話と残留雑音の比
+  - 打鍵区間のピークとRMS（oursとrawのピーク差＝減衰量）
+  - 発話区間の長時間平均スペクトルの比（sonar/raw＝Sonarの実効的なEQ、ours/raw）の差（63Hz〜8kHz、1/3オクターブ。絶対差と、平均を引いた「形」）
+- M1: 既知の合成WAV（雑音床・発話レベル・打撃音のピーク・EQの形が構成から決まる）で、ツールの指標が期待値と0.5dB以内（M1a: 区間ファイル、M1b: 自動判定、M1c: K特性の利得、M1d: 別テイク・デジタル無音、M1e: 区間ファイルの解析、M1f: WAVの往復、M1g: processAudioの遅延補正）。
 - T-011から引き継ぐ評価項目（D-022・D-023）: 打鍵・クリックの区間でゲートが開放状態だった割合（VADがクリックに反応するか）と、開放中に減衰が半分になったクリックの統計、緩和策（VAD先行分だけ遅らせたゲート履歴の参照、検出比による半減の連続化など。ただし破裂音のN5bと衝突しうる）の効果。ホールド3msの再調整（アタック20ms以上の立ち上がり・小声・ささやきでの母音の減衰）。デジタル無音明けの雑音床の回復（ゲートが閉じるまでの時間）。
 - READMEの録音手順（要点。詳細はT-014で書く）: OBSで物理マイクとSonarの仮想マイクを別トラックで同時に録音する。台本は約90秒（無音10秒 → 普通に話す30秒 → 話さずに打鍵10秒 → 話しながら打鍵20秒 → 無音10秒 → 小声と語尾を伸ばす発話10秒。空調・PCファンは普段どおり）。48kHzのWAVでraw.wavとsonar.wavを書き出し、区間の時刻を書いたメモを添える。Developerが`--process-wav`と`--compare`で比較表を作り、発話レベルを揃えたraw・sonar・oursの3本をユーザーへ渡す。ユーザーが聴き比べて採否と調整値を返す。
 - 完了条件: M1が通り、READMEに録音と比較の手順がある。
@@ -592,6 +592,7 @@ public:
 - 前提: ユーザーからSonarのスクリーンショット（EQと、Noise Reductionのスライダー値）と、同時録音のWAV 2種を受け取っていること。スクリーンショットには、使っているバンド数（5を超えるなら実装のバンド数を増やす）、各バンドのフィルタタイプと周波数・ゲイン・Q、ローカット等の傾きが写っていること。
 - 変更対象: `src/core/Params.h`（kEqDefaults、背景ノイズ・インパクトの初期値）、`docs/spec.md`（初期値の表）、`tests/MicTests.cpp`（EQ8）、`README.md`（評価結果）。
 - EQ8: kEqDefaultsの周波数特性が、スクリーンショットから読み取った曲線上の点と±1dB以内で一致する。Sonarとフィルタの定義が違う場合は換算の根拠をdecisions.mdに記録する。
+- 初回の評価（ユーザーのOBS録画［別テイク。生・Sonar適用後、EQなし］で、T-014の実装後に実施した分）はprogress.mdのT-014エントリ。Sonarの設定のスクリーンショットと同時録音を受け取ったあとの評価は、この項の本来の内容。
 - 評価（T-014から引き継ぐT-011の項目を含む）: 上記T-014の「T-011から引き継ぐ評価項目」について、実録音での値を報告する。
 - 評価: T-014のツールで比較表を作り、目標（本アプリの「発話と残留雑音の比」がSonar比で−3dB以内、打鍵区間でSonar比+3dB以内、80〜300Hzの長時間スペクトル差±2dB以内）と照らして報告する。目標は判断材料で、合否はユーザーの聴感で決める。
 - 完了条件: 比較表と3ファイル（raw・sonar・ours、発話レベルを揃えたもの）をユーザーへ渡し、ユーザーの聴感の結果（採否・調整値）をprogress.mdとspec.mdに反映した。

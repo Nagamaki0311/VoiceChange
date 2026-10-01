@@ -171,8 +171,10 @@ target_include_directories(VoiceChangeTests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tests
 )
 
+# juce_audio_formats: tests/RecordingTool.cppが直接使うWAV入出力（T-014）。アプリ本体にはjuce_dsp経由で元からリンクされている（機能追加なし）。
 target_link_libraries(VoiceChangeTests PRIVATE
     vc_core
+    juce::juce_audio_formats
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags
 )
