@@ -3607,7 +3607,6 @@ public:
         const auto ours = build (1.0, 1.0, 1.0, 0.5, -60.0 + 20.0 * std::log10 (0.5), 1, kOursLag); // 雑音も発話も-6.02dB、遅れ1440サンプル（ノイズ除去の遅延と同じ）
 
         const auto rawSpeechOnly = vc::test::rms (sum.data() + speechStart, speechLen) * norm;
-        expectWithinAbsoluteError (20.0 * std::log10 (rawSpeechOnly), -20.0, 0.001);
 
         // 期待値。雑音床とピークは構成から、発話レベルは各正弦の和の実際のRMS（雑音は無視できる大きさ）から求める。
         std::vector<float> sonarSpeech ((size_t) n, 0.0f);
@@ -3631,6 +3630,9 @@ public:
         {
             const juce::String label = mode == 0 ? "M1 (segments given): " : "M1 (auto segments): ";
             beginTest (mode == 0 ? "M1a: known synthetic recording, metrics within 0.5 dB (segments given)" : "M1b: known synthetic recording, metrics within 0.5 dB (auto segments)");
+
+            if (mode == 0) // 構成の確認（期待値の前提。beginTestの後ろに置く）
+                expectWithinAbsoluteError (20.0 * std::log10 (rawSpeechOnly), -20.0, 0.001);
 
             const auto r = vc::rectool::compareRecordings (raw.first, sonar.first, ours.first, fs, mode == 0 ? &script : nullptr);
             const auto& fr = r.files[0];
@@ -3700,17 +3702,78 @@ public:
             expect (! vc::rectool::formatReport (r).isEmpty(), "report is empty");
         }
 
-        beginTest ("M1c: K-weighting matches the BS.1770 gain (100 Hz -1.13 dB, 1 kHz +0.70 dB, 10 kHz +4.04 dB at 48 kHz)");
+        beginTest ("M1c: K-weighting matches the BS.1770 gain (100 Hz -1.13 dB, 1 kHz +0.70 dB, 10 kHz +4.04 dB) at 48 kHz, 44.1 kHz and 96 kHz");
         {
             const double gains[3][2] = { { 100.0, -1.1335 }, { 1000.0, 0.6977 }, { 10000.0, 4.0419 } };
 
-            for (auto& g : gains)
+            for (const double rate : { 48000.0, 44100.0, 96000.0 })
+                for (auto& g : gains)
+                {
+                    const int len = (int) rate, skip = (int) (rate * 0.1);
+                    const auto sine = vc::test::makeSine (g[0], rate, len, 0.5f);
+                    const double rmsDb = 20.0 * std::log10 (vc::test::rms (sine.data() + skip, len - skip));
+                    std::vector<float> settled (sine.begin() + skip, sine.end()); // フィルタの過渡（先頭0.1秒）を除く
+                    const double measured = vc::rectool::kWeightedLevelDb (settled, rate) - rmsDb;
+                    logMessage (juce::String (rate, 0) + " Hz, " + juce::String (g[0], 0) + " Hz: " + juce::String (measured - g[1], 4) + " dB from the 48 kHz value");
+                    expectWithinAbsoluteError (measured, g[1], 0.1, juce::String (rate, 0) + " Hz, " + juce::String (g[0], 0) + " Hz");
+                }
+        }
+
+        beginTest ("M1h: alignment finds lags that are not multiples of 4 (1, 3, 97, 1441) and negative lags");
+        {
+            for (const int lag : { 1, 3, 97, 1441, -1, -3, -97, -1441 })
             {
-                const auto sine = vc::test::makeSine (g[0], fs, 48000, 0.5f);
-                const double rmsDb = 20.0 * std::log10 (vc::test::rms (sine.data() + 4800, 48000 - 4800));
-                std::vector<float> settled (sine.begin() + 4800, sine.end()); // フィルタの過渡（先頭0.1秒）を除く
-                expectWithinAbsoluteError (vc::rectool::kWeightedLevelDb (settled, fs) - rmsDb, g[1], 0.05, juce::String (g[0], 0) + " Hz");
+                std::vector<float> shifted = raw.first; // test[n + lag] = ref[n]
+
+                if (lag > 0)
+                    shifted.insert (shifted.begin(), (size_t) lag, 0.0f);
+                else
+                    shifted.erase (shifted.begin(), shifted.begin() + (-lag));
+
+                shifted.resize ((size_t) n, 0.0f);
+                const auto al = vc::rectool::measureAlignment (raw.first, shifted, fs);
+                expectEquals (al.lagSamples, lag, "lag " + juce::String (lag));
+                expect (al.confident, "lag " + juce::String (lag) + " not confident");
             }
+        }
+
+        beginTest ("M1i: the loudness verdict in the report: K-weighted difference -0.4 dB passes, -0.6 dB falls below");
+        {
+            for (const double diffDb : { -0.4, -0.6 })
+            {
+                std::vector<float> scaled = raw.first;
+                const float g = (float) std::pow (10.0, diffDb / 20.0);
+
+                for (auto& v : scaled)
+                    v *= g;
+
+                const auto r = vc::rectool::compareRecordings (raw.first, sonar.first, scaled, fs, &script);
+                expectWithinAbsoluteError (r.files[2].speechKDb - r.files[0].speechKDb, diffDb, 0.01);
+                const auto report = vc::rectool::formatReport (r);
+                const bool pass = diffDb > -0.5;
+                // juce::String::containsは、この日本語の部分文字列を含まないレポートでも真を返した（「以下」「下限」の「下」との誤一致）。バイト列で検索する。
+                const auto bytes = report.toStdString();
+                expect ((bytes.find (juce::String::fromUTF8 ("合格").toStdString()) != std::string::npos) == pass, "pass text at " + juce::String (diffDb, 1) + " dB");
+                expect ((bytes.find (juce::String::fromUTF8 ("下回る").toStdString()) != std::string::npos) == ! pass, "below text at " + juce::String (diffDb, 1) + " dB");
+            }
+        }
+
+        beginTest ("M1j: the silence median of 10 ms frames differs from the mean when part of the noise is louder");
+        {
+            // 無声区間（0〜3秒と6〜8秒の計5秒）のうち、1.8〜3.0秒（24%）だけ雑音を-40dBFSぶん足す。中央値は小さい方（-60dBFS）、平均パワーは大きい方に引かれる。
+            std::vector<float> uneven = raw.first;
+            auto loud = makeWhiteNoise (n, 1.0f, 9);
+            vc::test::normalizeRms (loud, (float) std::pow (10.0, -40.0 / 20.0));
+
+            for (int i = (int) (1.8 * fs); i < 3 * 48000; ++i)
+                uneven[(size_t) i] += loud[(size_t) i];
+
+            const auto r = vc::rectool::compareRecordings (uneven, uneven, uneven, fs, &script);
+            const auto& f = r.files[0];
+            const double expectedMean = 10.0 * std::log10 (0.76 * 1.0e-6 + 0.24 * (1.0e-6 + 1.0e-4)); // 無声区間5秒のうち1.2秒（24%）が-40dBFSの雑音を足した区間
+            expectWithinAbsoluteError (f.silenceMedianFrameDb, -60.0, 0.5);
+            expectWithinAbsoluteError (f.silenceRmsDb, expectedMean, 0.5);
+            expect (f.silenceRmsDb - f.silenceMedianFrameDb > 10.0, "mean " + juce::String (f.silenceRmsDb, 1) + " dB vs median " + juce::String (f.silenceMedianFrameDb, 1) + " dB");
         }
 
         beginTest ("M1d: an unrelated take is not aligned and gets its own segments; a digital-silence take is reported as such");
@@ -3810,6 +3873,49 @@ public:
                 worst = std::max (worst, (double) std::abs (r0.output[(size_t) i] - speech[(size_t) i]));
 
             expect (worst < 1.0e-6, "noise reduction and EQ off changed the signal by " + juce::String (worst, 8));
+
+            // 設定の反映（背景）: 0%は入力のまま、100%は雑音だけの入力を大きく減らす。
+            {
+                const auto noiseOnly = vc::test::makePinkNoise (len, 0.003f, 6);
+                vc::rectool::ProcessSettings bg;
+                bg.nrImpact = 0.0f;
+                bg.nrBackground = 0.0f;
+                const auto zero = vc::rectool::processAudio (noiseOnly, fs, bg);
+                double diff = 0.0;
+
+                for (int i = 24000; i < len; ++i) // 開始直後（Priming・フェードイン）を除く
+                    diff = std::max (diff, (double) std::abs (zero.output[(size_t) i] - noiseOnly[(size_t) i]));
+
+                expect (diff < 1.0e-6, "background 0% changed the signal by " + juce::String (diff, 8));
+
+                bg.nrBackground = 1.0f;
+                const auto full = vc::rectool::processAudio (noiseOnly, fs, bg);
+                const int tail = len / 2;
+                const double reductionDb = 20.0 * std::log10 (vc::test::rms (noiseOnly.data() + tail, len - tail) / vc::test::rms (full.output.data() + tail, len - tail));
+                logMessage ("background 100%: noise reduced by " + juce::String (reductionDb, 1) + " dB");
+                expect (reductionDb > 10.0, "background 100% reduced the noise by only " + juce::String (reductionDb, 1) + " dB");
+            }
+
+            // 設定の反映（EQ）: a3を渡すと、帯域ごとの利得が曲線（eqCurveDb）どおりに出る。
+            {
+                vc::rectool::ProcessSettings a3;
+                a3.nrEnabled = false;
+                vc::rectool::applyEqPreset (a3, vc::rectool::EqPreset::A3);
+                double changed = 0.0;
+
+                for (const double hz : { 400.0, 1000.0, 3000.0, 8000.0 })
+                {
+                    const auto sine = vc::test::makeSine (hz, fs, len, 0.1f);
+                    const auto out = vc::rectool::processAudio (sine, fs, a3);
+                    const int skip = 48000;
+                    const double measured = 20.0 * std::log10 (vc::test::rms (out.output.data() + skip, len - skip) / vc::test::rms (sine.data() + skip, len - skip));
+                    const double expected = vc::eqCurveDb (a3.eqBands, fs, hz);
+                    expectWithinAbsoluteError (measured, expected, 0.2, juce::String (hz, 0) + " Hz");
+                    changed = std::max (changed, std::abs (expected));
+                }
+
+                expect (changed > 3.0, "the a3 preset changes some band by only " + juce::String (changed, 2) + " dB");
+            }
 
             // EQのプリセット: a2・a3は5バンドを置き換えてONにする。
             vc::rectool::ProcessSettings eq;
