@@ -2442,7 +2442,7 @@ private:
 
             for (const auto& bands : { makeFlatEq(), makeSingleBandEq (2, vc::EqType::Peak, 500.0f, 12.0f, 1.0f) })
             {
-                const bool flat = bands[2].gainDb == 0.0f;
+                const bool flat = std::abs (bands[2].gainDb) < 1.0e-6f;
                 const auto in = vc::test::makeSine (500.0, fs, n, 0.05f);
 
                 for (const float gain : { -12.0f, -6.0f, 0.0f, 2.0f, 6.0f, 12.0f })

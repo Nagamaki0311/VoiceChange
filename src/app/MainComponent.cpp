@@ -160,22 +160,35 @@ void AppLookAndFeel::drawPopupMenuItem (juce::Graphics& g, const juce::Rectangle
     g.drawText (text, r, juce::Justification::centredLeft, true);
 }
 
+// 選択中のボタンをミントで塗るか。既定はメインのプリセットボタン（ノーマル以外、全体バイパスでない）。マイク処理ウィンドウのEQプリセットボタンは
+// 全体バイパスと関係なく決めるため、ボタンごとのプロパティ"liveState"があればそれを優先する（スライダーと同じ。design.md 10.7節）。
+bool AppLookAndFeel::isLiveButton (const juce::Button& button, int presetIdx) const noexcept
+{
+    if (button.getProperties().contains ("liveState"))
+        return (bool) button.getProperties()["liveState"];
+
+    return presetIdx != (int) Preset::Normal && isChainEnabled();
+}
+
 void AppLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& button, const juce::Colour&,
                                             bool isHighlighted, bool isDown)
 {
     const auto bounds = button.getLocalBounds().toFloat();
     const bool selected = button.getToggleState();
     const int presetIdx = (int) button.getProperties().getWithDefault ("presetIndex", -1);
-    const bool isNormal = presetIdx == (int) Preset::Normal;
-    const bool bypassed = ! isChainEnabled();
-    const bool liveStyle = selected && ! isNormal && ! bypassed;
+    const bool liveStyle = selected && isLiveButton (button, presetIdx);
 
     juce::Colour bg (surface);
     juce::Colour border (lineBorder);
     float borderWidth = 1.0f;
     bool noBorder = false;
 
-    if (liveStyle)
+    if (! button.isEnabled())
+    {
+        // 無効（「元に戻す」で取り消せる操作がないとき）: 背景surface、枠1px line.divider。ホバー・押下で変えない（design.md 10.3節）。
+        border = juce::Colour (lineDivider);
+    }
+    else if (liveStyle)
     {
         bg = juce::Colour (live);
         noBorder = true;
@@ -216,11 +229,9 @@ void AppLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& button
 {
     const bool selected = button.getToggleState();
     const int presetIdx = (int) button.getProperties().getWithDefault ("presetIndex", -1);
-    const bool isNormal = presetIdx == (int) Preset::Normal;
-    const bool bypassed = ! isChainEnabled();
-    const bool liveStyle = selected && ! isNormal && ! bypassed;
+    const bool liveStyle = selected && isLiveButton (button, presetIdx);
 
-    g.setColour (juce::Colour (liveStyle ? liveInk : textPrimary));
+    g.setColour (juce::Colour (! button.isEnabled() ? textDisabled : (liveStyle ? liveInk : textPrimary)));
     g.setFont (uiFont (14.0f, selected));
 
     g.drawFittedText (button.getButtonText(), button.getLocalBounds().reduced (4, 0),
@@ -899,23 +910,23 @@ void MainComponent::refreshEnabledAppearance()
     toggleButton.setDescription (toggleButton.getDisplayedSubText()); // 表示中の副文（design.md 5章）
 }
 
-void MainComponent::refreshMicAppearance (bool nrOn, bool eqOn)
+void MainComponent::refreshMicAppearance (bool nrOn, EqPresetId eqPreset)
 {
-    if (micStateKnown && nrOn == shownNrOn && eqOn == shownEqOn)
+    if (micStateKnown && nrOn == shownNrOn && eqPreset == shownEqPreset)
         return;
 
     micStateKnown = true;
     shownNrOn = nrOn;
-    shownEqOn = eqOn;
+    shownEqPreset = eqPreset;
 
-    const juce::String state = juce::String::fromUTF8 (nrOn ? "ノイズ除去 ON" : "ノイズ除去 OFF")
-                               + juce::String::fromUTF8 (eqOn ? "、EQ ON" : "、EQ OFF");
+    // EQの部分は「EQ OFF / EQ A2 / EQ A3 / EQ カスタム」（eqStatusText。EQがOFFなら表示中のプリセットはEQなし = EQ OFF）。
+    const bool eqOn = eqPreset != EqPresetId::None;
+    const juce::String nrText = juce::String::fromUTF8 (nrOn ? "ノイズ除去 ON" : "ノイズ除去 OFF");
 
     micButton.setLampOn (nrOn || eqOn);
-    micButton.setDescription (state);
-    micButton.setTooltip (juce::String::fromUTF8 ("ノイズ除去とEQの設定を開きます（")
-                          + juce::String::fromUTF8 (nrOn ? "ノイズ除去 ON" : "ノイズ除去 OFF")
-                          + juce::String::fromUTF8 (eqOn ? "・EQ ON）" : "・EQ OFF）"));
+    micButton.setDescription (nrText + juce::String::fromUTF8 ("、") + eqStatusText (eqPreset));
+    micButton.setTooltip (juce::String::fromUTF8 ("ノイズ除去とEQの設定を開きます（") + nrText
+                          + juce::String::fromUTF8 ("・") + eqStatusText (eqPreset) + juce::String::fromUTF8 ("）"));
 
     // 全体トグルの副文（OFF時）: マイク処理がすべてOFFなら原音、どちらかがONなら「マイク処理のみ適用中」（D-020）。
     toggleButton.setOffSubText (nrOn || eqOn ? juce::String::fromUTF8 ("マイク処理のみ適用中（バイパス）")
@@ -1251,8 +1262,9 @@ void MainComponent::updateStatus (bool /*slowUpdate*/)
 
     // マイク処理（ノイズ除去・EQ）は全体バイパスの対象外（D-020）。ボタンのランプ・全体トグルの副文・バイパス中の文言に反映する。
     const bool nrOn = audioIO.engineParams().nrEnabled.load (std::memory_order_relaxed);
-    const bool eqOn = audioIO.engineParams().eqEnabled.load (std::memory_order_relaxed);
-    refreshMicAppearance (nrOn, eqOn);
+    const auto eqState = audioIO.engineParams().loadEq();
+    const bool eqOn = eqState.on;
+    refreshMicAppearance (nrOn, deriveEqPreset (eqState));
 
     // トレイのメニューからON/OFFを切り替えた場合、このウィンドウ側の表示にも反映する(T-007)。
     // クリック起点の変更はapplyToggle()がその場で反映するため、ここでは食い違いのときだけ追従する。

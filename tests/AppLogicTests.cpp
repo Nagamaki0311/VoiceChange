@@ -17,6 +17,12 @@
 namespace
 {
 
+// -Wfloat-equal: 丸めた値や定数どうしの完全一致を確かめる比較（意図した完全一致）。
+bool same (float a, float b) noexcept
+{
+    return juce::exactlyEqual (a, b);
+}
+
 class AppLogicTests final : public juce::UnitTest
 {
 public:
@@ -514,7 +520,7 @@ private:
         const auto sameBands = [] (const std::array<vc::EqBandSettings, vc::kEqBands>& x, const std::array<vc::EqBandSettings, vc::kEqBands>& y)
         {
             for (size_t i = 0; i < x.size(); ++i)
-                if (x[i].on != y[i].on || x[i].type != y[i].type || x[i].hz != y[i].hz || x[i].gainDb != y[i].gainDb || x[i].q != y[i].q)
+                if (x[i].on != y[i].on || x[i].type != y[i].type || ! same (x[i].hz, y[i].hz) || ! same (x[i].gainDb, y[i].gainDb) || ! same (x[i].q, y[i].q))
                     return false;
 
             return true;
@@ -542,14 +548,14 @@ private:
                 {
                     const auto& b = preset.bands[i];
                     const auto sanitized = vc::sanitizeEqBand (b, vc::kEqDefaults[i]);
-                    expect (sanitized.hz == b.hz && sanitized.gainDb == b.gainDb && sanitized.q == b.q, juce::String (preset.name) + " band" + juce::String ((int) i + 1) + " sanitize");
-                    expect (vc::roundEqValue (vc::EqField::Hz, b.hz) == b.hz, juce::String (preset.name) + " hzの丸め");
-                    expect (vc::roundEqValue (vc::EqField::GainDb, b.gainDb) == b.gainDb, juce::String (preset.name) + " gainの丸め");
-                    expect (vc::roundEqValue (vc::EqField::Q, b.q) == b.q, juce::String (preset.name) + " Qの丸め");
+                    expect (same (sanitized.hz, b.hz) && same (sanitized.gainDb, b.gainDb) && same (sanitized.q, b.q), juce::String (preset.name) + " band" + juce::String ((int) i + 1) + " sanitize");
+                    expect (same (vc::roundEqValue (vc::EqField::Hz, b.hz), b.hz), juce::String (preset.name) + " hzの丸め");
+                    expect (same (vc::roundEqValue (vc::EqField::GainDb, b.gainDb), b.gainDb), juce::String (preset.name) + " gainの丸め");
+                    expect (same (vc::roundEqValue (vc::EqField::Q, b.q), b.q), juce::String (preset.name) + " Qの丸め");
                     expect (b.on, "5バンドとも有効");
                 }
 
-                expect (vc::roundEqValue (vc::EqField::OutputGainDb, preset.outputGainDb) == preset.outputGainDb, juce::String (preset.name) + " 出力ゲインは0.1 dB刻みで範囲内");
+                expect (same (vc::roundEqValue (vc::EqField::OutputGainDb, preset.outputGainDb), preset.outputGainDb), juce::String (preset.name) + " 出力ゲインは0.1 dB刻みで範囲内");
             }
 
             expect (! sameBands (vc::kEqPresets[0].bands, vc::kEqPresets[1].bands), "A2とA3のバンドは違う");
@@ -660,14 +666,14 @@ private:
             auto custom = stateOf (true, a3Bands, 5.5f);
             const auto none = vc::eqStateAfterPreset (EqPresetId::None, custom);
             expect (none.has_value() && ! none->on, "EQなしでOFFになる");
-            expect (none.has_value() && sameBands (none->bands, a3Bands) && none->outputGainDb == 5.5f, "EQなしは値を変えない");
+            expect (none.has_value() && sameBands (none->bands, a3Bands) && same (none->outputGainDb, 5.5f), "EQなしは値を変えない");
             expect (! vc::eqStateAfterPreset (EqPresetId::None, stateOf (false, a2Bands, a2Gain)).has_value(), "すでにOFFなら何もしない");
 
             // A2: 書き換えてON。
             const auto a2 = vc::eqStateAfterPreset (EqPresetId::A2, stateOf (false, a3Bands, 0.0f));
-            expect (a2.has_value() && a2->on && sameBands (a2->bands, a2Bands) && a2->outputGainDb == a2Gain, "A2に書き換えてON");
+            expect (a2.has_value() && a2->on && sameBands (a2->bands, a2Bands) && same (a2->outputGainDb, a2Gain), "A2に書き換えてON");
             const auto a3 = vc::eqStateAfterPreset (EqPresetId::A3, stateOf (true, a2Bands, a2Gain));
-            expect (a3.has_value() && a3->on && sameBands (a3->bands, a3Bands) && a3->outputGainDb == a3Gain, "A3に書き換えてON");
+            expect (a3.has_value() && a3->on && sameBands (a3->bands, a3Bands) && same (a3->outputGainDb, a3Gain), "A3に書き換えてON");
             expect (! vc::eqStateAfterPreset (EqPresetId::A2, stateOf (true, a2Bands, a2Gain)).has_value(), "ONでA2と一致していれば何もしない");
 
             // OFFでA2の値のとき、A2を押すとONにするだけ（値は同じ）。
@@ -676,7 +682,7 @@ private:
 
             // 出力ゲインだけ違う（カスタム）ときにA2を押すと、出力ゲインが書き換わる。
             const auto fixGain = vc::eqStateAfterPreset (EqPresetId::A2, stateOf (true, a2Bands, 7.0f));
-            expect (fixGain.has_value() && fixGain->outputGainDb == a2Gain, "出力ゲインもA2の値になる");
+            expect (fixGain.has_value() && same (fixGain->outputGainDb, a2Gain), "出力ゲインもA2の値になる");
             expect (! vc::eqStateAfterPreset (EqPresetId::Custom, custom).has_value(), "カスタムは押せない");
         }
 
@@ -709,7 +715,7 @@ private:
 
             const auto restored = undo.undo();
             expect (restored.has_value() && restored->on == original.on && sameBands (restored->bands, original.bands)
-                        && restored->outputGainDb == original.outputGainDb, "最初のカスタムへ戻る（5バンド・出力ゲイン・ON/OFF）");
+                        && same (restored->outputGainDb, original.outputGainDb), "最初のカスタムへ戻る（5バンド・出力ゲイン・ON/OFF）");
             expect (! undo.isAvailable(), "戻したら無効");
             expect (! undo.undo().has_value(), "2回目は何も返さない");
 
@@ -722,7 +728,7 @@ private:
             const auto second = stateOf (false, a2Bands, 0.0f);
             expect (undo.press (EqPresetId::A3, second).has_value(), "clear後の押下");
             const auto back = undo.undo();
-            expect (back.has_value() && ! back->on && back->outputGainDb == 0.0f, "clear後は新しい記録へ戻る");
+            expect (back.has_value() && ! back->on && same (back->outputGainDb, 0.0f), "clear後は新しい記録へ戻る");
         }
     }
 

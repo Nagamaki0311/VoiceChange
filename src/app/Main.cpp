@@ -406,6 +406,7 @@ public:
         params.nrBackground.store (saved.nrBackground, std::memory_order_relaxed);
         params.nrImpact.store (saved.nrImpact, std::memory_order_relaxed);
         params.eqEnabled.store (saved.eqEnabled, std::memory_order_relaxed);
+        params.eqOutputGainDb.store (saved.eqOutputGainDb, std::memory_order_relaxed);
 
         for (size_t i = 0; i < saved.eqBands.size(); ++i)
             params.eqBands[i].store (saved.eqBands[i]);

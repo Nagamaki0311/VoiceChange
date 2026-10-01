@@ -25,8 +25,10 @@ const char* const kHzTip = "20〜20000 Hz。クリックして入力（1.2k の�
 const char* const kGainTip = "-18.0〜+18.0 dB。クリックして入力。ホイールと↑↓で0.5 dBずつ";
 const char* const kQTip = "0.10〜10.00。大きいほど狭い範囲にかかります。ホイールと↑↓で約6 %ずつ";
 const char* const kGainUnusedTip = "このタイプではゲインを使いません";
-const char* const kResetTip = "5つのバンドの値を初期値に戻します。ノイズ除去とEQのON/OFFは変わりません";
-const char* const kUndoTip = "初期値に戻す前の値に戻します";
+const char* const kOutputGainTip = "EQの後で声の音量を上げ下げします。-12.0〜+12.0 dB。クリックして入力。ホイールと↑↓で0.5 dBずつ。EQがOFFのときはかかりません";
+const char* const kPresetApplyTip = "。押すと5つのバンドと出力ゲインをこの設定に書き換えて、EQをONにします";
+const char* const kUndoTip = "プリセットを選ぶ前の設定（5つのバンドの値・出力ゲイン・EQのON/OFF）に戻します";
+const char* const kUndoDisabledTip = "プリセットを選んだ直後に使えます";
 
 juce::String utf8 (const char* text)
 {
@@ -383,14 +385,12 @@ std::unique_ptr<juce::AccessibilityHandler> EqGraph::createAccessibilityHandler(
 void EqGraph::paint (juce::Graphics& g)
 {
     const auto& params = audioIO.engineParams();
-    const bool eqOn = params.eqEnabled.load (std::memory_order_relaxed);
     const double rate = audioIO.getOutputInfo().rate;
     const double fs = rate > 0.0 ? rate : 48000.0; // デバイス停止中は48000 Hz
 
-    std::array<EqBandSettings, kEqBands> bands;
-
-    for (size_t i = 0; i < bands.size(); ++i)
-        bands[i] = params.eqBands[i].load (kEqDefaults[i]);
+    const auto eq = params.loadEq();
+    const auto& bands = eq.bands;
+    const double outputGainDb = (double) eq.outputGainDb; // 曲線は「5バンドの和 + 出力ゲイン」（表示と音をずらさない。design.md 10.3節）
 
     g.setColour (juce::Colour (L::bgInset));
     g.fillRoundedRectangle (getLocalBounds().toFloat(), 4.0f);
@@ -435,8 +435,8 @@ void EqGraph::paint (juce::Graphics& g)
     for (const auto& [hz, text] : hzLabels)
         g.drawText (text, (int) std::lround (hzToX (hz)) - 16, 106, 32, 14, juce::Justification::centred, false);
 
-    // ----- 曲線: 有効なバンドの振幅[dB]の和を横1pxごとに計算し、2pxの線で描く。EQがOFFでも設定中の特性を見せる -----
-    const juce::Colour curveColour (eqOn ? L::live : L::idleFill);
+    // ----- 曲線: 有効なバンドの振幅[dB]の和に出力ゲインを足した値を横1pxごとに計算し、2pxの線で描く。EQがOFFでも設定中の特性を見せる -----
+    const juce::Colour curveColour (eq.on ? L::live : L::idleFill);
 
     juce::Path curve;
 
@@ -444,7 +444,7 @@ void EqGraph::paint (juce::Graphics& g)
     {
         const double hz = 20.0 * std::pow (10.0, 3.0 * (double) px / (double) plotW);
         const float x = kPlotX + (float) px;
-        const float y = dbToY (eqCurveDb (bands, fs, hz));
+        const float y = dbToY (eqCurveDb (bands, fs, hz) + outputGainDb);
 
         if (px == 0)
             curve.startNewSubPath (x, y);
@@ -467,7 +467,7 @@ void EqGraph::paint (juce::Graphics& g)
 
         const double hz = juce::jlimit ((double) kEqMinHz, (double) kEqMaxHz, std::min ((double) bands[i].hz, 0.45 * fs));
         const float cx = hzToX (hz);
-        const float cy = juce::jlimit (kPlotY, kPlotY + kPlotH, dbToY (eqCurveDb (bands, fs, hz)));
+        const float cy = juce::jlimit (kPlotY, kPlotY + kPlotH, dbToY (eqCurveDb (bands, fs, hz) + outputGainDb));
 
         g.setColour (juce::Colour (L::bgInset));
         g.fillEllipse (cx - 4.0f, cy - 4.0f, 8.0f, 8.0f);
@@ -490,7 +490,8 @@ void EqGraph::paint (juce::Graphics& g)
 namespace
 {
 
-constexpr int kBandRowY0 = 356, kBandRowPitch = 36;
+constexpr int kBandRowY0 = 396, kBandRowPitch = 32;
+constexpr int kPresetRadioGroup = 1; // EQプリセットボタンのラジオグループ（ウィンドウ内で共通）
 
 } // namespace
 
@@ -556,16 +557,45 @@ MicPanel::MicPanel (AudioIO& audioIOIn, juce::PropertiesFile& settingsIn)
     eqSwitch.onClick = [this] { setEqEnabled (eqSwitch.getToggleState()); };
     addAndMakeVisible (eqSwitch);
 
+    // ----- EQプリセット（EQなし / A2 / A3）と元に戻す。Tab順は5〜7、8 -----
+    setupLabel (presetLabel, "プリセット");
+
+    for (int k = 0; k < (int) presetButtons.size(); ++k)
+    {
+        auto& button = presetButtons[(size_t) k];
+        const auto id = static_cast<EqPresetId> (k);
+        const bool isNone = id == EqPresetId::None;
+        const auto& spec = kEqPresets[isNone ? 0 : (size_t) k - 1];
+        const juce::String name = utf8 (isNone ? kEqNoneName : spec.name);
+        const juce::String tip = utf8 (isNone ? kEqNoneDescription : spec.description) + (isNone ? juce::String() : utf8 (kPresetApplyTip));
+
+        button.setButtonText (name);
+        button.setClickingTogglesState (true);
+        button.setRadioGroupId (kPresetRadioGroup); // UIAにラジオボタンとして公開され、選択状態が伝わる
+        button.setTitle (utf8 ("EQプリセット ") + name);
+        button.setTooltip (tip);
+        button.setDescription (tip);
+        button.setExplicitFocusOrder (5 + k);
+        button.onClick = [this, id] { pressPreset (id); };
+        addAndMakeVisible (button);
+    }
+
+    undoButton.setButtonText (utf8 ("元に戻す"));
+    undoButton.setTitle (utf8 ("EQプリセットの選択を元に戻す"));
+    undoButton.setExplicitFocusOrder (8);
+    undoButton.onClick = [this] { undoPreset(); };
+    addAndMakeVisible (undoButton);
+
     graph.setTitle (utf8 ("EQの周波数特性"));
     graph.setDescription (utf8 ("グラフです。数値は各バンドの欄で確認できます"));
     addAndMakeVisible (graph);
 
-    // Tab順: バンド1（有効 → タイプ → 周波数 → ゲイン → Q）→ … → バンド5 → 初期値に戻すボタン（5〜29、30）。
+    // Tab順: バンド1（有効 → タイプ → 周波数 → ゲイン → Q）→ … → バンド5 → 出力ゲイン（9〜33、34）。
     for (int i = 0; i < kEqBands; ++i)
     {
         auto& b = bands[(size_t) i];
         const juce::String bandName = utf8 ("バンド") + juce::String (i + 1) + " ";
-        const int order = 5 + i * 5;
+        const int order = 9 + i * 5;
 
         b.check.setTitle (bandName + utf8 ("有効"));
         b.check.setTooltip (utf8 ("このバンドを使う"));
@@ -619,9 +649,17 @@ MicPanel::MicPanel (AudioIO& audioIOIn, juce::PropertiesFile& settingsIn)
         b.q = makeField (EqField::Q, "Q", kQTip, order + 4, [] (EqBandSettings& s, float v) { s.q = v; });
     }
 
-    resetButton.setExplicitFocusOrder (30);
-    resetButton.onClick = [this] { resetOrUndoEq(); };
-    addAndMakeVisible (resetButton);
+    // ----- EQ出力ゲイン（5バンドの下の1行。数値欄は各バンドのゲイン欄と同じ列） -----
+    setupLabel (outputGainLabel, "出力ゲイン");
+    outputGainLabel.setJustificationType (juce::Justification::centredRight);
+
+    outputGain = std::make_unique<NumberField> (EqField::OutputGainDb);
+    outputGain->setTitle (utf8 ("EQの出力ゲイン"));
+    outputGain->setTooltip (utf8 (kOutputGainTip));
+    outputGain->setDescription (utf8 (kOutputGainTip));
+    outputGain->setExplicitFocusOrder (34);
+    outputGain->onUserChange = [this] (float v) { outputGainChangedByUser (v); };
+    addAndMakeVisible (*outputGain);
 
     refreshAll();
     setSize (460, 600); // resized()が全部品を使うため、最後に設定する
@@ -652,10 +690,10 @@ void MicPanel::saveSettings()
     s.nrEnabled = p.nrEnabled.load (std::memory_order_relaxed);
     s.nrBackground = p.nrBackground.load (std::memory_order_relaxed);
     s.nrImpact = p.nrImpact.load (std::memory_order_relaxed);
-    s.eqEnabled = p.eqEnabled.load (std::memory_order_relaxed);
-
-    for (int i = 0; i < kEqBands; ++i)
-        s.eqBands[(size_t) i] = readBand (i);
+    const auto eq = p.loadEq();
+    s.eqEnabled = eq.on;
+    s.eqBands = eq.bands;
+    s.eqOutputGainDb = eq.outputGainDb;
 
     storeMicSettings (settings, s);
 }
@@ -687,55 +725,114 @@ void MicPanel::bandChangedByUser (int index, const EqBandSettings& s)
     clearUndo(); // EQのバンドの値を変えたら、「元に戻す」は使えなくなる
     saveSettings();
     refreshBandAppearance (index);
+    refreshPresetAppearance();
     graph.repaint();
 }
 
-void MicPanel::resetOrUndoEq()
+void MicPanel::outputGainChangedByUser (float gainDb)
 {
-    if (undoAvailable)
-    {
-        for (int i = 0; i < kEqBands; ++i)
-            writeBand (i, undoBands[(size_t) i]);
+    audioIO.engineParams().eqOutputGainDb.store (gainDb, std::memory_order_relaxed);
+    clearUndo(); // 出力ゲインもバンドの値と同じ扱い
+    saveSettings();
+    refreshOutputGainAppearance();
+    refreshPresetAppearance();
+    graph.repaint();
+}
 
-        undoAvailable = false;
-        juce::AccessibilityHandler::postAnnouncement (utf8 ("EQを元の値に戻しました"),
-                                                      juce::AccessibilityHandler::AnnouncementPriority::medium);
-    }
-    else
-    {
-        // ノイズ除去とEQのON/OFFは変えない。5バンドの有効/無効・タイプ・周波数・ゲイン・Qを初期値（kEqDefaults）へ。
-        for (int i = 0; i < kEqBands; ++i)
-        {
-            undoBands[(size_t) i] = readBand (i);
-            writeBand (i, kEqDefaults[(size_t) i]);
-        }
+// プリセットボタン。押した結果が今の表示と同じなら何もしない（取り消しの記録も読み上げもしない）。
+void MicPanel::pressPreset (EqPresetId id)
+{
+    auto& params = audioIO.engineParams();
+    const auto next = undo.press (id, params.loadEq());
 
-        undoAvailable = true;
-        juce::AccessibilityHandler::postAnnouncement (utf8 ("EQを初期値に戻しました。「元に戻す」で取り消せます"),
-                                                      juce::AccessibilityHandler::AnnouncementPriority::medium);
+    if (! next.has_value())
+    {
+        refreshPresetAppearance(); // JUCEが切り替えたボタンの選択表示を、導出した表示へ戻す
+        return;
     }
 
+    params.storeEq (*next);
     saveSettings();
     refreshEqAppearance();
-    refreshResetButton();
+    refreshUndoButton();
+
+    const juce::String name = utf8 (id == EqPresetId::None ? kEqNoneName : kEqPresets[(size_t) id - 1].name);
+    juce::AccessibilityHandler::postAnnouncement (id == EqPresetId::None ? utf8 ("EQをOFFにしました。「元に戻す」で取り消せます")
+                                                                         : utf8 ("EQを「") + name + utf8 ("」にしました。「元に戻す」で取り消せます"),
+                                                  juce::AccessibilityHandler::AnnouncementPriority::medium);
+}
+
+// 「元に戻す」: プリセットを選び始める前の状態（5バンド・出力ゲイン・EQのON/OFF）へ。
+void MicPanel::undoPreset()
+{
+    const bool hadFocus = undoButton.hasKeyboardFocus (true);
+    const auto restored = undo.undo();
+
+    if (! restored.has_value())
+        return;
+
+    auto& params = audioIO.engineParams();
+    params.storeEq (*restored);
+    saveSettings();
+    refreshEqAppearance();
+
+    // 無効にする部品はJUCEがフォーカスを親へ手放すため、先に表示中のプリセットのボタン（カスタムなら「EQなし」）へ移す。
+    if (hadFocus)
+    {
+        const auto shown = deriveEqPreset (*restored);
+        presetButtons[shown == EqPresetId::Custom ? 0 : (size_t) shown].grabKeyboardFocus();
+    }
+
+    refreshUndoButton();
+    juce::AccessibilityHandler::postAnnouncement (utf8 ("プリセットを選ぶ前の設定に戻しました"),
+                                                  juce::AccessibilityHandler::AnnouncementPriority::medium);
 }
 
 void MicPanel::clearUndo()
 {
-    if (undoAvailable)
+    if (undo.isAvailable())
     {
-        undoAvailable = false;
-        refreshResetButton();
+        undo.clear();
+        refreshUndoButton();
     }
 }
 
-void MicPanel::refreshResetButton()
+void MicPanel::refreshUndoButton()
 {
-    const juce::String tip = utf8 (undoAvailable ? kUndoTip : kResetTip);
+    const bool available = undo.isAvailable();
+    const juce::String tip = utf8 (available ? kUndoTip : kUndoDisabledTip);
 
-    resetButton.setButtonText (utf8 (undoAvailable ? "元に戻す" : "EQを初期値に戻す"));
-    resetButton.setTooltip (tip);
-    resetButton.setDescription (tip);
+    undoButton.setEnabled (available);
+    undoButton.setTooltip (tip);
+    undoButton.setDescription (tip);
+}
+
+// 表示中のプリセットを、EQのON/OFFと値から導出する（保存しない。design.md 10.3節）。ボタンの選択表示とEQスイッチの副文に反映する。
+void MicPanel::refreshPresetAppearance()
+{
+    const auto eq = audioIO.engineParams().loadEq();
+    const auto shown = deriveEqPreset (eq);
+
+    for (size_t k = 0; k < presetButtons.size(); ++k)
+    {
+        auto& button = presetButtons[k];
+        button.setToggleState (k == (size_t) shown, juce::dontSendNotification); // カスタムのときはどれも非選択
+        button.getProperties().set ("liveState", k != 0 && eq.on); // A2・A3はミント（EQがONのときだけ選択になる）、EQなしは中立
+        button.repaint();
+    }
+
+    // EQスイッチのON時の副文: A2・A3は「{名前}で…」、カスタムは「カスタム設定で…」。説明には表示中の副文を入れる。
+    const juce::String onSub = shown == EqPresetId::A2 || shown == EqPresetId::A3
+                                   ? utf8 (kEqPresets[(size_t) shown - 1].name) + utf8 ("で音質を調整しています")
+                                   : (shown == EqPresetId::Custom ? utf8 ("カスタム設定で音質を調整しています") : utf8 ("音質を調整しています"));
+
+    if (onSub != shownEqOnSub)
+    {
+        shownEqOnSub = onSub;
+        eqSwitch.setTexts (utf8 ("EQ"), onSub, utf8 ("音質は変えていません"));
+    }
+
+    eqSwitch.setDescription (eqSwitch.getDisplayedSubText() + utf8 ("。") + utf8 (kEqSwitchTip));
 }
 
 void MicPanel::refreshNrAppearance()
@@ -764,7 +861,20 @@ void MicPanel::refreshEqAppearance()
     for (int i = 0; i < kEqBands; ++i)
         refreshBandAppearance (i);
 
+    refreshOutputGainAppearance();
+    refreshPresetAppearance();
     graph.repaint();
+}
+
+void MicPanel::refreshOutputGainAppearance()
+{
+    const auto eq = audioIO.engineParams().loadEq();
+
+    // 値の文字色は有効なバンドのゲインと同じ規則: 0.0ならtext.primary、0以外でEQがONならlive、OFFならtext.secondary。
+    const bool isZero = std::abs (eq.outputGainDb) < 0.05f;
+
+    outputGain->setValue (eq.outputGainDb);
+    outputGain->setValueColour (juce::Colour (isZero ? L::textPrimary : (eq.on ? L::live : L::textSecondary)));
 }
 
 void MicPanel::refreshBandAppearance (int index)
@@ -807,7 +917,7 @@ void MicPanel::refreshAll()
 {
     refreshNrAppearance();
     refreshEqAppearance();
-    refreshResetButton();
+    refreshUndoButton();
 }
 
 void MicPanel::updateShowingState()
@@ -824,6 +934,7 @@ void MicPanel::updateShowingState()
             b.q->commitEdit();
         }
 
+        outputGain->commitEdit();
         clearUndo();
     }
 
@@ -855,7 +966,13 @@ void MicPanel::resized()
     impactSlider.setBounds (108, 96, 332, 32);
 
     eqSwitch.setBounds (20, 152, 420, 40);
-    graph.setBounds (20, 200, 420, 124);
+    presetLabel.setBounds (20, 200, 84, 32);
+
+    for (size_t k = 0; k < presetButtons.size(); ++k)
+        presetButtons[k].setBounds (108 + 80 * (int) k, 200, 72, 32);
+
+    undoButton.setBounds (360, 200, 80, 32);
+    graph.setBounds (20, 240, 420, 124);
 
     for (int i = 0; i < kEqBands; ++i)
     {
@@ -869,7 +986,8 @@ void MicPanel::resized()
         b.q->setBounds (388, y + 2, 52, 28);
     }
 
-    resetButton.setBounds (300, 556, 140, 32);
+    outputGainLabel.setBounds (72, 556, 224, 32);
+    outputGain->setBounds (304, 558, 76, 28);
 }
 
 void MicPanel::paint (juce::Graphics& g)
@@ -878,26 +996,22 @@ void MicPanel::paint (juce::Graphics& g)
 
     g.setColour (juce::Colour (L::lineDivider));
     g.fillRect (20, 140, 420, 1);
-    g.fillRect (20, 544, 420, 1);
+    g.fillRect (20, 555, 420, 1); // 5つのバンドと出力ゲインの行を分ける（6本目のバンドに見せない）
 
-    // 列見出し（12pt text.secondary。y332・高さ20）。
+    // 列見出し（12pt text.secondary。y372・高さ20）。
     g.setColour (juce::Colour (L::textSecondary));
     g.setFont (L::uiFont (12.0f));
-    g.drawText (utf8 ("有効"), 36, 332, 32, 20, juce::Justification::centred, false);
-    g.drawText (utf8 ("タイプ"), 78, 332, 120, 20, juce::Justification::centredLeft, false);
-    g.drawText (utf8 ("周波数"), 212, 332, 76, 20, juce::Justification::centredRight, false);
-    g.drawText (utf8 ("ゲイン"), 304, 332, 68, 20, juce::Justification::centredRight, false);
-    g.drawText ("Q", 388, 332, 44, 20, juce::Justification::centredRight, false);
+    g.drawText (utf8 ("有効"), 36, 372, 32, 20, juce::Justification::centred, false);
+    g.drawText (utf8 ("タイプ"), 78, 372, 120, 20, juce::Justification::centredLeft, false);
+    g.drawText (utf8 ("周波数"), 212, 372, 76, 20, juce::Justification::centredRight, false);
+    g.drawText (utf8 ("ゲイン"), 304, 372, 68, 20, juce::Justification::centredRight, false);
+    g.drawText ("Q", 388, 372, 44, 20, juce::Justification::centredRight, false);
 
     // バンドの番号（13pt text.secondary、部品x20・幅16、左寄せ・上下中央）。
     g.setFont (L::uiFont (13.0f));
 
     for (int i = 0; i < kEqBands; ++i)
         g.drawText (juce::String (i + 1), 20, kBandRowY0 + kBandRowPitch * i, 16, 32, juce::Justification::centredLeft, false);
-
-    // 操作のヒント（12pt text.secondary。操作できない静的な文字）。
-    g.setFont (L::uiFont (12.0f));
-    g.drawText (utf8 ("欄をクリックで入力、ホイールで微調整"), 20, 556, 268, 32, juce::Justification::centredLeft, false);
 }
 
 // ===== SECTION: MicWindow =====
