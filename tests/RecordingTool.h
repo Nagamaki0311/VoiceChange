@@ -26,7 +26,12 @@ struct Audio
 
 bool readWav (const juce::File& file, Audio& out, juce::String& error);
 // 16bit PCM（float32だと再生できないプレーヤーがあるため）。範囲外は±1へ丸める。既存ファイルは上書きする。
-bool writeWav16 (const juce::File& file, const std::vector<float>& samples, double sampleRate, juce::String& error);
+// float32（floatFormat）は--compareで測る用（16bitの量子化雑音は約-90dBFSで、それ以下の残留雑音は測れない）。
+bool writeWav (const juce::File& file, const std::vector<float>& samples, double sampleRate, bool floatFormat, juce::String& error);
+inline bool writeWav16 (const juce::File& file, const std::vector<float>& samples, double sampleRate, juce::String& error)
+{
+    return writeWav (file, samples, sampleRate, false, error);
+}
 
 // ===== SECTION: 区間 =====
 enum class SegKind
@@ -112,6 +117,7 @@ struct CompareResult
     double sampleRate = 0.0;
     std::array<FileStats, 3> files; // raw, sonar, ours
     bool segmentsFromFile = false;
+    bool sonarSegmentsFromFile = false;
 };
 
 // segmentsがnullptrなら自動判定。oursはrawから作った音声として、rawの区間を共有する。sonarは相互相関で位置合わせでき

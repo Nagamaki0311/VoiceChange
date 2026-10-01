@@ -3765,6 +3765,13 @@ public:
             expect (worst <= 1.0 / 32768.0, "round trip error " + juce::String (worst * 32768.0, 3) + " LSB");
             expect (back.samples.size() > 11 && back.samples[10] > 0.9999f && back.samples[10] <= 1.0f && back.samples[11] < -0.9999f && back.samples[11] >= -1.0f, "clipping");
 
+            // float32: 測定用。値が完全に一致し、16bitの量子化雑音を持たない（-120dBFSの信号が残る）。
+            std::vector<float> tiny (480, 1.0e-6f);
+            expect (vc::rectool::writeWav (file, tiny, 48000.0, true, error), error);
+            vc::rectool::Audio tinyBack;
+            expect (vc::rectool::readWav (file, tinyBack, error), error);
+            expect (tinyBack.samples.size() == tiny.size() && std::abs (tinyBack.samples[100] - 1.0e-6f) < 1.0e-9f, "float32 WAV round trip");
+
             // 上書き: 短いデータで書き直すと、古い内容が残らない。
             expect (vc::rectool::writeWav16 (file, std::vector<float> (100, 0.25f), 48000.0, error), error);
             vc::rectool::Audio shorter;

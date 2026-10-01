@@ -132,7 +132,7 @@ bool readWav (const juce::File& file, Audio& out, juce::String& error)
     return true;
 }
 
-bool writeWav16 (const juce::File& file, const std::vector<float>& samples, double sampleRate, juce::String& error)
+bool writeWav (const juce::File& file, const std::vector<float>& samples, double sampleRate, bool floatFormat, juce::String& error)
 {
     auto stream = file.createOutputStream();
 
@@ -151,7 +151,12 @@ bool writeWav16 (const juce::File& file, const std::vector<float>& samples, doub
 
     std::unique_ptr<juce::OutputStream> os (std::move (stream));
     juce::WavAudioFormat wav;
-    auto writer = wav.createWriterFor (os, juce::AudioFormatWriterOptions {}.withSampleRate (sampleRate).withNumChannels (1).withBitsPerSample (16));
+    auto writer = wav.createWriterFor (os, juce::AudioFormatWriterOptions {}
+                                         .withSampleRate (sampleRate)
+                                         .withNumChannels (1)
+                                         .withBitsPerSample (floatFormat ? 32 : 16)
+                                         .withSampleFormat (floatFormat ? juce::AudioFormatWriterOptions::SampleFormat::floatingPoint
+                                                                        : juce::AudioFormatWriterOptions::SampleFormat::integral));
 
     if (writer == nullptr)
     {
@@ -706,6 +711,7 @@ CompareResult compareRecordings (const std::vector<float>& raw, const std::vecto
     CompareResult result;
     result.sampleRate = fs;
     result.segmentsFromFile = segments != nullptr;
+    result.sonarSegmentsFromFile = sonarSegments != nullptr;
 
     const auto rawSegments = segments != nullptr ? *segments : detectSegments (raw, fs);
 
@@ -793,13 +799,19 @@ juce::String formatReport (const CompareResult& r)
     out << juce::String::fromUTF8 ("## 位置合わせ（相互相関、rawに対する遅れ。0.3以上で同じ信号とみなす）\n");
 
     for (auto* f : { &sonar, &ours })
+    {
+        const bool isOurs = f == &ours;
         out << "  " << f->name.paddedRight (' ', 6) << " lag " << juce::String (f->alignment.lagSamples).paddedLeft (' ', 6) << " samples ("
             << juce::String (1000.0 * f->alignment.lagSamples / r.sampleRate, 2) << " ms)  correlation " << juce::String (f->alignment.correlation, 3)
-            << (f->alignment.confident ? juce::String::fromUTF8 ("  → 補正して比較") : juce::String::fromUTF8 ("  → 同じ信号ではない（別テイク）。補正せず、lag 0として扱う"))
+            << (f->alignment.confident ? juce::String::fromUTF8 ("  → 補正して比較")
+                : isOurs ? juce::String::fromUTF8 ("  → 相関が低い（ノイズ除去が強く効いた無発話などでは正常）。rawから作った音声なのでlag 0（処理側で遅延補正済み）として扱う")
+                         : juce::String::fromUTF8 ("  → 同じ信号ではない（別テイク）。補正せず、lag 0として扱う"))
             << "\n";
+    }
 
     if (! sonar.sharesSegments)
-        out << juce::String::fromUTF8 ("  sonarは別テイクとみなし、sonar自身のエネルギーで区間を自動判定した（時刻はraw・oursと対応しない）。\n");
+        out << juce::String::fromUTF8 (r.sonarSegmentsFromFile ? "  sonarは別テイクとして、sonar用の区間ファイルの区間（sonar自身の時間軸）を使った。\n"
+                                                              : "  sonarは別テイクとみなし、sonar自身のエネルギーで区間を自動判定した（時刻はraw・oursと対応しない）。\n");
 
     out << "\n";
 
@@ -1054,7 +1066,7 @@ struct ParsedArgs
     juce::String error;
 };
 
-ParsedArgs parseArgs (const juce::StringArray& args, const juce::StringArray& valueOptions)
+ParsedArgs parseArgs (const juce::StringArray& args, const juce::StringArray& valueOptions, const juce::StringArray& flagOptions = {})
 {
     ParsedArgs parsed;
 
@@ -1062,6 +1074,8 @@ ParsedArgs parseArgs (const juce::StringArray& args, const juce::StringArray& va
     {
         if (! args[i].startsWith ("--"))
             parsed.positional.add (args[i]);
+        else if (flagOptions.contains (args[i]))
+            parsed.options.set (args[i], "1");
         else if (valueOptions.contains (args[i]) && i + 1 < args.size())
         {
             parsed.options.set (args[i], args[i + 1]);
@@ -1115,9 +1129,9 @@ double rmsOf (const std::vector<float>& x, long a, long b)
 
 int runProcessWav (const juce::StringArray& args)
 {
-    const auto parsed = parseArgs (args, { "--bg", "--impact", "--eq", "--nr", "--settings", "--segments", "--trace" });
+    const auto parsed = parseArgs (args, { "--bg", "--impact", "--eq", "--nr", "--settings", "--segments", "--trace" }, { "--float" });
     const char* usage = "usage: VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.65] [--impact 0.15] [--nr on|off] [--eq on|off|a2|a3|sonar]\n"
-                        "                                     [--settings <VoiceChange.settings>] [--segments <file>] [--trace <csv>]\n";
+                        "                                     [--settings <VoiceChange.settings>] [--segments <file>] [--trace <csv>] [--float]\n";
 
     if (! parsed.error.isEmpty() || parsed.positional.size() != 2)
     {
@@ -1200,7 +1214,9 @@ int runProcessWav (const juce::StringArray& args)
 
     const auto result = processAudio (in.samples, in.sampleRate, settings);
 
-    if (! writeWav16 (outFile, result.output, in.sampleRate, error))
+    const bool floatOut = parsed.options.containsKey ("--float");
+
+    if (! writeWav (outFile, result.output, in.sampleRate, floatOut, error))
     {
         std::fprintf (stderr, "%s\n", error.toRawUTF8());
         return 2;
@@ -1209,7 +1225,7 @@ int runProcessWav (const juce::StringArray& args)
     juce::String out;
     out << "in:  " << inFile.getFullPathName() << " (" << juce::String ((double) in.samples.size() / in.sampleRate, 2) << " s, "
         << juce::String (in.sampleRate, 0) << " Hz" << (in.numChannels > 1 ? ", channel 1 of " + juce::String (in.numChannels) : juce::String()) << ")\n";
-    out << "out: " << outFile.getFullPathName() << " (16-bit PCM)\n";
+    out << "out: " << outFile.getFullPathName() << (floatOut ? " (32-bit float, for --compare)" : " (16-bit PCM)") << "\n";
     out << "settings: noise reduction " << (settings.nrEnabled ? "ON" : "OFF") << ", background " << juce::String (settings.nrBackground, 2) << ", impact "
         << juce::String (settings.nrImpact, 2) << ", EQ " << (settings.eqEnabled ? "ON" : "OFF");
 
