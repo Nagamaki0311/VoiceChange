@@ -65,14 +65,29 @@ private:
             expectEquals (vc::sanitize (s).gainDb, -20.0f);
         }
 
-        beginTest ("sanitize: ピッチ±50は±12半音へ丸められ、整数のまま");
+        // 層1ピッチの範囲は±24半音（D-027。以前は±12）。値は定数ではなく数字で書く（定数の取り違えを検出するため）。
+        beginTest ("sanitize: ピッチ±50は±24半音へ丸められ、整数のまま。±24以内（±12超を含む）はそのまま");
         {
             vc::SavedSettings s;
             s.pitch = 50;
-            expectEquals (vc::sanitize (s).pitch, 12);
+            expectEquals (vc::sanitize (s).pitch, 24);
 
             s.pitch = -50;
-            expectEquals (vc::sanitize (s).pitch, -12);
+            expectEquals (vc::sanitize (s).pitch, -24);
+
+            s.pitch = 25;
+            expectEquals (vc::sanitize (s).pitch, 24);
+
+            s.pitch = -25;
+            expectEquals (vc::sanitize (s).pitch, -24);
+
+            for (const int keep : { 24, 13, 12, 0, -12, -13, -24 })
+            {
+                s.pitch = keep;
+                expectEquals (vc::sanitize (s).pitch, keep);
+            }
+
+            expectEquals (vc::kMaxLayer1PitchSemitones, 24);
         }
 
         beginTest ("sanitize: リバーブ2.0/-1は0〜1の端へ丸められる");

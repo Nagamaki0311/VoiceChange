@@ -595,8 +595,8 @@ private:
     void runF()
     {
         struct Case { const char* name; vc::Preset preset; double semis; double s; };
-        const std::array<Case, 3> cases { { { "F1 ヘリウム", vc::Preset::Helium, 0.0, 1.6 },
-                                             { "F2 ミニオン", vc::Preset::Minion, 8.0, 1.4 },
+        const std::array<Case, 3> cases { { { "F1 ヘリウム", vc::Preset::Helium, 9.0, 1.6 },
+                                             { "F2 ミニオン", vc::Preset::Minion, 12.0, 1.6 },
                                              { "F3 ジャイアント", vc::Preset::Giant, -6.0, 0.75 } } };
 
         // f0=150Hz: 合格基準（f0比±1%、s=期待値±10%）。

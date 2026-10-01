@@ -730,7 +730,7 @@ MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settings
         [] (double v) { return (v > 0.0 ? juce::String ("+") : juce::String()) + juce::String ((int) v) + " dB"; },
         juce::String::fromUTF8 ("ダブルクリックで初期値（0 dB）に戻します"));
 
-    setupSlider (pitchSlider, -12.0, 12.0, true, juce::String::fromUTF8 ("ピッチ（音程）"),
+    setupSlider (pitchSlider, -(double) kMaxLayer1PitchSemitones, (double) kMaxLayer1PitchSemitones, true, juce::String::fromUTF8 ("ピッチ（音程）"),
         [] (double v) { return (v > 0.0 ? juce::String ("+") : juce::String()) + juce::String ((int) v) + juce::String::fromUTF8 (" 半音"); },
         juce::String::fromUTF8 ("ダブルクリックで初期値（0 半音）に戻します"));
 
@@ -794,7 +794,7 @@ void MainComponent::createPresetButtons()
     // ツールチップと共有)。ここではその並び順とツールチップの説明文だけを持つ。
     static const PresetUiInfo kOrder[8] = {
         { Preset::Normal,   "特殊効果なし（音響卓の設定だけを反映）" },
-        { Preset::Helium,   "音程はそのままで、声質だけを細く軽くする" },
+        { Preset::Helium,   "声を高く細く軽くして、ヘリウムを吸ったような声にする" },
         { Preset::Minion,   "声を高くして、小さなキャラクター風にする" },
         { Preset::Giant,    "声を低くして、大柄なキャラクター風にする" },
         { Preset::Echo,     "やまびこのように声が繰り返し響く" },

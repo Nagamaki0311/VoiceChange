@@ -4212,13 +4212,15 @@ public:
                     "defaults changed");
 
             // プリセット表の値を上書きで同じにすると、プリセットを選んだ場合（Engine）と同じ音になる（試聴用の経路がEngineの層1・シフターと同じ並びであることの確認）。
+            // 声量の補正ゲイン（D-027）は、上書きしても表の値のまま掛かる（上書き側のプリセットをヘリウムにして同じ補正を足す）。
             {
+                const auto& helium = vc::kPresets[(size_t) vc::Preset::Helium];
                 auto viaPreset = base;
                 viaPreset.preset = vc::Preset::Helium;
                 auto viaOverride = base;
-                viaOverride.preset = vc::Preset::Normal;
-                viaOverride.semitonesOverride = 0.0f;
-                viaOverride.formantOverride = 1.6f;
+                viaOverride.preset = vc::Preset::Helium;
+                viaOverride.semitonesOverride = helium.semitones;
+                viaOverride.formantOverride = helium.formant;
                 const auto a = vc::rectool::processAudio (in150, fs, viaPreset);
                 const auto b = vc::rectool::processAudio (in150, fs, viaOverride);
                 expectEquals (a.shifterLatencySamples, (int) std::lround (0.12 * fs));
@@ -4233,7 +4235,7 @@ public:
                 expect (vc::test::peakAbs (a.output.data(), len) > 0.05, "helium output is silent");
             }
 
-            // 層1のゲイン・ピッチ・リバーブ: ゲイン+6dBでRMSが約2倍。層1ピッチは製品の範囲（±12）を超えてよい（+24で220Hz → 880Hz）。
+            // 層1のゲイン・ピッチ・リバーブ: ゲイン+6dBでRMSが約2倍。層1ピッチは+24で220Hz → 880Hz（製品の範囲の端。ツールは±36まで受け付ける）。
             {
                 auto g = base;
                 g.gainDb = 6.0f;
@@ -4258,7 +4260,7 @@ public:
                 expect (diff > 0.005, "reverb 100% did not change the signal");
             }
 
-            // 移調量の上書き（製品の範囲外の+24も可）。formantだけの上書きではプリセット表の移調量（ミニオンの+8）を使う。
+            // 移調量の上書き（製品の範囲外の+24も可）。formantだけの上書きではプリセット表の移調量（ミニオンの+12）を使う。
             {
                 auto o = base;
                 o.preset = vc::Preset::Minion;
@@ -4270,9 +4272,9 @@ public:
 
                 auto f = base;
                 f.preset = vc::Preset::Minion;
-                f.formantOverride = 1.0f; // 移調は表の+8のまま
-                const double hz8 = vc::test::findFftPeakHz (vc::rectool::processAudio (sine, fs, f).output.data() + len / 2, len / 2, fs);
-                expect (std::abs (hz8 - 220.0 * std::pow (2.0, 8.0 / 12.0)) / hz8 < 0.02, "formant-only override changed the preset's semitones: " + juce::String (hz8, 1) + " Hz");
+                f.formantOverride = 1.0f; // 移調は表の+12のまま
+                const double hz12 = vc::test::findFftPeakHz (vc::rectool::processAudio (sine, fs, f).output.data() + len / 2, len / 2, fs);
+                expect (std::abs (hz12 - 440.0) / 440.0 < 0.02, "formant-only override changed the preset's semitones: " + juce::String (hz12, 1) + " Hz");
             }
 
             // トークボックスの実験: 製品（follow）はキャリアが検出したf0に追従して出力の基本周波数が入力と同じになる。fixedは入力のf0によらず固定の高さになる。

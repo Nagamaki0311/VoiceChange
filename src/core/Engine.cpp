@@ -70,6 +70,9 @@ void Engine::prepare (const EngineConfig& config)
     gainSmoothed.reset (sampleRate, kGainRampSeconds);
     gainSmoothed.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (atomicParams.gainDb.load (std::memory_order_relaxed)));
 
+    presetGainSmoothed.reset (sampleRate, kEffectCrossfadeSeconds);
+    presetGainSmoothed.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (kPresets[(size_t) presetIdx].gainDb));
+
     chainGain = atomicParams.enabled.load (std::memory_order_relaxed) ? 1.0 : 0.0;
 
     inputPeak.store (0.0f, std::memory_order_relaxed);
@@ -288,6 +291,12 @@ void Engine::processChain (float* buf, int n, int presetIdx, int pitchSemis, flo
 
     gainSmoothed.setTargetValue (juce::Decibels::decibelsToGain (gainDb));
     gainSmoothed.applyGain (buf, n);
+
+    // プリセットの声量補正（spec.gainDb、D-027）。層2・リバーブ・層1のゲインの後、リミッターの前。層1のゲイン（UIのゲインスライダー）とは別の補間器で、
+    // 値は変えない。切替時の変化は、声質の切替（層2・シフターのクロスフェード）と同じ20msで補間する（クリックが出ず、切替の最中に補正が
+    // 古い値のまま残って過渡のピークを持ち上げることもない。層1と共通の50msでは、ミニオン→トークボックスがN9bの限界1.5を超えた）。
+    presetGainSmoothed.setTargetValue (juce::Decibels::decibelsToGain (spec.gainDb));
+    presetGainSmoothed.applyGain (buf, n);
 
     if (! allFinite (buf, n))
     {
