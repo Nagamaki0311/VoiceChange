@@ -258,13 +258,24 @@ int posix_memalign (void** out, std::size_t alignment, std::size_t size) noexcep
 // juce::UnitTestランナー。`--category <名前>`で対象カテゴリを絞ってctestに複数登録する。
 // `--process-wav` / `--compare`は実録音比較のオフラインツール（tests/RecordingTool.cpp、T-014）。テストは走らせない。
 
+// 引数はUTF-8として取り込む（Linux/macOSの日本語のファイル名用）。Windowsのargvは既定ではANSIコードページなので、非ASCIIの名前は未検証（READMEで案内）。
+static juce::StringArray toolArgs (int argc, char* argv[])
+{
+    juce::StringArray args;
+
+    for (int i = 2; i < argc; ++i)
+        args.add (juce::String::fromUTF8 (argv[i]));
+
+    return args;
+}
+
 int main (int argc, char* argv[])
 {
     if (argc >= 2 && juce::String (argv[1]) == "--process-wav")
-        return vc::rectool::runProcessWav (juce::StringArray (argv + 2, argc - 2));
+        return vc::rectool::runProcessWav (toolArgs (argc, argv));
 
     if (argc >= 2 && juce::String (argv[1]) == "--compare")
-        return vc::rectool::runCompare (juce::StringArray (argv + 2, argc - 2));
+        return vc::rectool::runCompare (toolArgs (argc, argv));
 
     juce::String category;
 

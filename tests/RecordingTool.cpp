@@ -107,8 +107,16 @@ bool readWav (const juce::File& file, Audio& out, juce::String& error)
         return false;
     }
 
+    auto stream = file.createInputStream();
+
+    if (stream == nullptr)
+    {
+        error = "cannot open file: " + file.getFullPathName();
+        return false;
+    }
+
     juce::WavAudioFormat wav;
-    std::unique_ptr<juce::AudioFormatReader> reader (wav.createReaderFor (file.createInputStream().release(), true));
+    std::unique_ptr<juce::AudioFormatReader> reader (wav.createReaderFor (stream.release(), true));
 
     if (reader == nullptr || reader->lengthInSamples <= 0 || reader->sampleRate <= 0.0)
     {
@@ -1097,6 +1105,42 @@ void print (const juce::String& s)
     std::fflush (stdout);
 }
 
+// エラーメッセージ（末尾に改行を付ける）と、必要なら使い方を標準エラーへ出す。
+void printError (const juce::String& message, const char* usage = nullptr)
+{
+    if (message.isNotEmpty())
+        std::fprintf (stderr, "%s\n", message.toRawUTF8());
+
+    if (usage != nullptr)
+        std::fputs (usage, stderr);
+}
+
+// 0〜1の数値だけを受け付ける（数値でない・範囲外はfalse）。
+bool parseUnit (const juce::String& text, float& out)
+{
+    const auto utf8 = text.trim().toStdString();
+    char* end = nullptr;
+    const double v = std::strtod (utf8.c_str(), &end);
+
+    if (utf8.empty() || end == utf8.c_str() || *end != '\0' || ! (v >= 0.0 && v <= 1.0))
+        return false;
+
+    out = (float) v;
+    return true;
+}
+
+// 区間ファイルの時刻が音声の長さを超えていたら警告する（処理は続ける。台本と別の録音を指定した取り違えの検出用）。
+void warnSegmentsBeyond (const std::vector<Segment>& segs, double durationSec, const char* label)
+{
+    for (const auto& s : segs)
+        if (s.endSec > durationSec + 0.01)
+        {
+            printError (juce::String ("warning: ") + label + " has a segment ending at " + juce::String (s.endSec, 2) + " s, beyond the audio length ("
+                        + juce::String (durationSec, 2) + " s). Is it the right file?");
+            return;
+        }
+}
+
 bool loadSegmentsFile (const juce::String& path, std::vector<Segment>& segs, juce::String& error)
 {
     const juce::File file (juce::File::getCurrentWorkingDirectory().getChildFile (path));
@@ -1135,7 +1179,7 @@ int runProcessWav (const juce::StringArray& args)
 
     if (! parsed.error.isEmpty() || parsed.positional.size() != 2)
     {
-        std::fprintf (stderr, "%s%s\n", parsed.error.toRawUTF8(), usage);
+        printError (parsed.error, usage);
         return 2;
     }
 
@@ -1143,6 +1187,13 @@ int runProcessWav (const juce::StringArray& args)
     const auto inFile = cwd.getChildFile (parsed.positional[0]);
     const auto outFile = cwd.getChildFile (parsed.positional[1]);
     juce::String error;
+
+    // 入力を上書きしない（writeWavは既存ファイルを上書きする）。シンボリックリンク経由も同一とみなす。
+    if (inFile == outFile || inFile.getLinkedTarget() == outFile.getLinkedTarget())
+    {
+        printError ("input and output are the same file: " + inFile.getFullPathName());
+        return 2;
+    }
 
     // 設定: 既定（ノイズ除去ON、背景・インパクトは本アプリの初期値、EQ OFF）→ 設定ファイル → オプション、の順に上書きする。
     ProcessSettings settings;
@@ -1153,7 +1204,7 @@ int runProcessWav (const juce::StringArray& args)
 
         if (! settingsFile.existsAsFile())
         {
-            std::fprintf (stderr, "settings file not found: %s\n", settingsFile.getFullPathName().toRawUTF8());
+            printError ("settings file not found: " + settingsFile.getFullPathName());
             return 2;
         }
 
@@ -1162,7 +1213,7 @@ int runProcessWav (const juce::StringArray& args)
 
         if (xml == nullptr || ! xml->hasTagName ("PROPERTIES"))
         {
-            std::fprintf (stderr, "cannot parse settings file: %s\n", settingsFile.getFullPathName().toRawUTF8());
+            printError ("cannot parse settings file: " + settingsFile.getFullPathName());
             return 2;
         }
 
@@ -1178,15 +1229,28 @@ int runProcessWav (const juce::StringArray& args)
 
     auto readUnit = [&] (const char* key, float& target)
     {
-        if (parsed.options.containsKey (key))
-            target = juce::jlimit (0.0f, 1.0f, parsed.options[key].getFloatValue());
+        if (! parsed.options.containsKey (key) || parseUnit (parsed.options[key], target))
+            return true;
+
+        printError (juce::String (key) + " must be a number from 0 to 1: " + parsed.options[key]);
+        return false;
     };
 
-    readUnit ("--bg", settings.nrBackground);
-    readUnit ("--impact", settings.nrImpact);
+    if (! readUnit ("--bg", settings.nrBackground) || ! readUnit ("--impact", settings.nrImpact))
+        return 2;
 
     if (parsed.options.containsKey ("--nr"))
-        settings.nrEnabled = parsed.options["--nr"].equalsIgnoreCase ("on");
+    {
+        const auto v = parsed.options["--nr"].toLowerCase();
+
+        if (v != "on" && v != "off")
+        {
+            printError ("--nr must be on or off");
+            return 2;
+        }
+
+        settings.nrEnabled = v == "on";
+    }
 
     if (parsed.options.containsKey ("--eq"))
     {
@@ -1199,7 +1263,7 @@ int runProcessWav (const juce::StringArray& args)
         else if (v == "sonar") applyEqPreset (settings, EqPreset::Sonar);
         else
         {
-            std::fprintf (stderr, "--eq must be on, off, a2, a3 or sonar\n");
+            printError ("--eq must be on, off, a2, a3 or sonar");
             return 2;
         }
     }
@@ -1249,6 +1313,8 @@ int runProcessWav (const juce::StringArray& args)
             std::fprintf (stderr, "%s\n", error.toRawUTF8());
             return 2;
         }
+
+        warnSegmentsBeyond (segs, (double) in.samples.size() / in.sampleRate, "--segments");
     }
     else
         segs = detectSegments (in.samples, in.sampleRate);
@@ -1314,7 +1380,7 @@ int runCompare (const juce::StringArray& args)
 
     if (! parsed.error.isEmpty() || parsed.positional.size() != 3)
     {
-        std::fprintf (stderr, "%s%s\n", parsed.error.toRawUTF8(), usage);
+        printError (parsed.error, usage);
         return 2;
     }
 
@@ -1344,6 +1410,8 @@ int runCompare (const juce::StringArray& args)
         return 2;
     }
 
+    warnSegmentsBeyond (segs, (double) audio[0].samples.size() / audio[0].sampleRate, "--segments");
+
     std::vector<Segment> sonarSegs;
 
     if (parsed.options.containsKey ("--sonar-segments") && ! loadSegmentsFile (parsed.options["--sonar-segments"], sonarSegs, error))
@@ -1351,6 +1419,8 @@ int runCompare (const juce::StringArray& args)
         std::fprintf (stderr, "%s\n", error.toRawUTF8());
         return 2;
     }
+
+    warnSegmentsBeyond (sonarSegs, (double) audio[1].samples.size() / audio[1].sampleRate, "--sonar-segments");
 
     const auto result = compareRecordings (audio[0].samples, audio[1].samples, audio[2].samples, audio[0].sampleRate,
                                            parsed.options.containsKey ("--segments") ? &segs : nullptr,
