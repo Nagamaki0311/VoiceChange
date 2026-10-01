@@ -19,11 +19,32 @@
 
 ---
 
+## 2026-10-01 T-014 レビュー指摘の修正（PR #16）
+
+### 実施内容
+- コミット: ac39c67（引数検証・同一パス拒否・UTF-8引数・区間ファイルの範囲外警告）、02e3f86（M1強化）、799542e（README・CMake・plan・.gitignore）。本エントリのdocs/progress.md自体は次のコミット。`src/core`は変更していない。
+- Medium-2: M1aの`beginTest`前にあった`expectWithinAbsoluteError`を`beginTest`の後ろへ移動。M1のみを単独で動かしても落ちない（一時的にカテゴリ名を変えて`--category`で確認。変更は戻した）。
+- Medium-1（最小限）: M1c（K特性）を48k/44.1k/96kへ拡張、M1h（位置合わせ: 1・3・97・1441と負のlag）、M1i（判定文言: K特性差-0.4dBは合格、-0.6dBは下回る）、M1j（無声区間の10msフレーム中央値と平均の差）、M1g（processAudioの背景0%／100%、EQ a3の帯域ごとの利得が`eqCurveDb`と一致）を追加。K特性は44.1k・96kでも48kの値との差が最大0.034dB（許容0.1dB。tan予歪みで各レートの係数を計算しているため）。M1jは「半分」でなく無声区間5秒のうち24%（1.2秒）を-40dBFS分大きくして、中央値の曖昧さを避けた。
+- 変異試験（変異を1つずつ入れてM1のみ実行、いずれもコミットしていない）: 位置合わせの精密化の削除（8件失敗）、K特性のレート固定48k（AプリフィルタのみとRLBのみの両方。各2件失敗）、合否閾値-0.5→-50（2件失敗）、背景設定の無視（1件）・EQバンドの無視（4件）・EQ有効の無視（4件）、中央値→平均（2件）。すべてM1が落ちた。
+- 発見: `juce::String::contains`は、日本語の部分文字列（「下回る」）を含まないレポートでも真を返した（「以下」「下限」の「下」と誤一致する挙動を観測）。M1iはバイト列（`std::string::find`）で検索する。
+- Medium-3: 引数を`juce::String::fromUTF8`で取り込む（`tests/TestMain.cpp`）。Windowsのコマンドライン引数の扱いは未検証のため、READMEに「ファイル・フォルダ名はASCIIにする」と明記。
+- Medium-4: CMakeLists.txt・README・plan.md・progress.mdの`juce_audio_formats`の記述を「RecordingTool.cppが直接使う。本体にはjuce_dsp経由で元からリンクされている（機能追加なし）」へ訂正（READMEには該当記述がなく、冒頭の「Windowsでも使える」を「Windowsでの実行は未検証」に直した）。
+- L-1: 入力と出力が同一パス（シンボリックリンク解決後）なら終了コード2。L-2/L-4: `--nr`（on|off）・`--eq`（既知値）・`--bg`/`--impact`（0〜1の数値）を検証し、エラーメッセージの末尾に改行（parseArgsのエラー出力も）。L-5: `readWav`で`createInputStream()`のnullを先に検査。L-3: 区間ファイルの終了時刻が音声の長さを超えたら警告（処理は続行）。L-8: .gitignoreに`*.wav`・`*.mp4`・`*.mkv`。L-6/L-7/L-9: READMEに`chcp 65001`、`speech+impact`区間は声量の指標に含まれないこと、Windowsの`--settings`パス。
+- 既知の限界（READMEに1行記載、対象外とした項目）: 帯域端の按分、`detectSegments`の閾値、`writeWav`の切り詰めの成否確認。
+
+### 結果
+- `cmake --build build --parallel && ctest --test-dir build --output-on-failure`: 9件すべて成功（ctestの合計 336.94秒［mic 170.25秒、long_run 109.38秒、engine 19.68秒］）。
+- 手動確認（Linux）: 不正な`--nr`・`--eq`・`--bg`（abc・1.5）・`--impact`（-0.1）・同一パス（`./sub/../`経由を含む）・引数不足・存在しない入力は終了コード2。日本語のファイル名で正常に処理できた。
+- Windowsは未検証。
+
+### 次回開始位置
+- PR #16のレビュー再確認（Manager）。
+
 ## 2026-10-01 T-014 実録音比較のオフライン処理ツール（--process-wav・--compare）と初回の実録音評価（T-015の一部）
 
 ### 実施内容
-- `tests/RecordingTool.h/.cpp`（新規。plan.mdの「TestMain.cppに実装」から変更。TestMain.cppは確保検出フックで大きく、指標・区間判定・WAV入出力で数百行になるため）: WAV入出力（`juce_audio_formats`は`VoiceChangeTests`だけにリンク。既定16bit PCM、`--float`で32bit float）、区間（`parseSegments`、エネルギーによる自動判定`detectSegments`）、相互相関による位置合わせ（FFT、4サンプル間引きで粗く探して元のレートで±4サンプル精密化。相関0.3以上で採用）、指標（RMS・ピーク・10msフレームの中央値・デジタル無音割合・1/3オクターブ［Hann 8192点、63Hz〜8kHzの22帯域］・K特性重み付けパワー）、レポート、`processAudio`（Engine［ノーマル、ゲイン0］、10msブロック、遅延を除去して入力と同じ位置・長さ、ゲート・インパクト抑制の10msごとの統計）。
-- `tests/TestMain.cpp`: `--process-wav`・`--compare`への振り分けだけ。`--category`の動作は従来どおり（引数なしは従来どおり使い方を表示して終了コード1。「引数なしで全テスト」にはなっていない［元からそうだった］）。`CMakeLists.txt`: `VoiceChangeTests`に`juce::juce_audio_formats`。`src/core`は変更していない。
+- `tests/RecordingTool.h/.cpp`（新規。plan.mdの「TestMain.cppに実装」から変更。TestMain.cppは確保検出フックで大きく、指標・区間判定・WAV入出力で数百行になるため）: WAV入出力（`juce_audio_formats`は`RecordingTool.cpp`が直接使う。本体にはjuce_dsp経由で元からリンクされている［機能追加なし］。既定16bit PCM、`--float`で32bit float）、区間（`parseSegments`、エネルギーによる自動判定`detectSegments`）、相互相関による位置合わせ（FFT、4サンプル間引きで粗く探して元のレートで±4サンプル精密化。相関0.3以上で採用）、指標（RMS・ピーク・10msフレームの中央値・デジタル無音割合・1/3オクターブ［Hann 8192点、63Hz〜8kHzの22帯域］・K特性重み付けパワー）、レポート、`processAudio`（Engine［ノーマル、ゲイン0］、10msブロック、遅延を除去して入力と同じ位置・長さ、ゲート・インパクト抑制の10msごとの統計）。
+- `tests/TestMain.cpp`: `--process-wav`・`--compare`への振り分けだけ。`--category`の動作は従来どおり（引数なしは従来どおり使い方を表示して終了コード1。「引数なしで全テスト」にはなっていない［元からそうだった］）。`CMakeLists.txt`: `VoiceChangeTests`に`juce::juce_audio_formats`（直接リンク）。`src/core`は変更していない。
 - コマンド: `--process-wav <in> <out> [--bg --impact --nr on|off --eq on|off|a2|a3|sonar --settings <path> --segments <file> --trace <csv> --float]`、`--compare <raw> <sonar> <ours> [--segments <file>] [--sonar-segments <file>]`。`--eq sonar`は追加要件（Sonar近似の5バンド）。`--sonar-segments`は別テイクのsonarに時刻を与えるための追加。
 - 追加要件（声量）: 発話区間のK特性（BS.1770、ゲートなし）重み付けパワーと、RMS・K特性それぞれの生との差を出し、暫定基準（ノイズ除去を通したK特性の差が-0.5dB以上）の合否を表示。K特性の係数は任意のレートで計算（48kHzで規格の係数と一致）。
 - README: 「実録音と比較する手順（T-014）」（OBSの録り方、台本、WAV変換、`--process-wav`・`--compare`の使い方、指標の読み方）。録音ファイルの置き場所は書いていない。「雑音床の回復が遅い」に実録音の値を追記。docs/plan.md T-014を実装に合わせて更新。
