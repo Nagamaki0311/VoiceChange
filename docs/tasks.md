@@ -28,9 +28,10 @@
 | T-011 | VAD連動ゲートとインパクト抑制、合成信号での客観指標 | 高 | 完了 | developer | 閾値は暫定。N5b対策としてホールド3ms・閉じる余裕+8dBに調整済み（README・progress.md） |
 | T-012 | EQ（5バンド、ArrayCoefficients）とEngine組み込み、LongRun拡張 | 高 | 完了 | developer | 実測値はREADME・progress.md。CPUの目標は3.5%へ緩和済み（D-025、ユーザー承認）。ミニオン+3.2〜+3.5で境界 |
 | T-013 | 設定の保存・マイク処理ボタンとマイク処理ウィンドウ・内訳表示・統計ログ | 中 | 完了 | designer / developer | design.md 10章（Designer確定済み） |
-| T-014 | 実録音比較のオフライン処理ツール（--process-wav・--compare）と手順 | 中 | レビュー中 | developer | READMEに録音と比較の手順。初回の実録音評価（T-015の一部）はprogress.md |
+| T-014 | 実録音比較のオフライン処理ツール（--process-wav・--compare）と手順 | 中 | 完了（PR #16） | developer | READMEに録音と比較の手順。初回の実録音評価（T-015の一部）はprogress.md |
 | T-015 | Sonarの設定を初期値に反映し、実録音で評価 | 中 | 未着手 | developer | ユーザーのスクリーンショットと同時録音WAVを待つ |
-| T-016 | マイクEQのプリセット切替（EQなし／A2／A3。A2=自然なクリアさ、A3=声の輪郭がはっきり。kEqDefaultsをA2へ） | 中 | 未着手 | designer / developer | ユーザー要望（2026-09-30）。設計はDesigner確定後にdesign.mdへ反映して実装 |
+| T-016 | マイクEQのプリセット切替（EQなし／A2／A3。kEqDefaultsをA2へ）とEQ出力ゲイン（声量を下げない。A2/A3は約+2dB） | 高 | 未着手 | developer | ユーザー要望（2026-09-30）。声量はこもり軽減より優先（2026-10-01）。設計: scratchpadのDesigner成果物 |
+| T-017 | 雑音床の回復（デジタル無音の間は雑音床を更新せず直近値を保持） | 低 | 未着手（完成後） | developer | ユーザー承認（2026-10-01）。完成・動作確認後にまとめて進める |
 
 ## バックログ（未着手・優先度未確定）
 
