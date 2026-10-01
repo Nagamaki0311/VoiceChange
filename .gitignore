@@ -10,6 +10,9 @@ CMakeUserPresets.json
 *.obj
 *.exe
 *.pdb
+*.wav
+*.mp4
+*.mkv
 *.ilk
 .DS_Store
 

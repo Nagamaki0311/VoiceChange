@@ -431,7 +431,7 @@ tests/MicTests.cpp              カテゴリ Mic（N0〜N12、EQ1〜EQ9、M1）
 - `add_library(vc_rnnoise STATIC …)`: 8.1-2のソース（x86/以下を除く）と`${rnnoise_model_SOURCE_DIR}/src/rnnoise_data.c`。includeは`${rnnoise_SOURCE_DIR}/include`（PUBLIC、SYSTEM）と、`${rnnoise_SOURCE_DIR}/src`・`${rnnoise_model_SOURCE_DIR}/src`（PRIVATE）。UNIXでは`m`をリンク。必要なコンパイル定義（`_USE_MATH_DEFINES`等）はT-009で決める。rnnoiseのソースは改変しない（必要になったら報告する）。
 - JUCEを含まないCのライブラリなので、STATICでもD-005の懸念（JUCEソースの二重コンパイル）はない。`vc_core`のINTERFACEに`vc_rnnoise`を加える。`CMAKE_MSVC_RUNTIME_LIBRARY`はadd_libraryより前に設定済みのため、`/MT`が適用される。
 - ローカル検証: `-DFETCHCONTENT_SOURCE_DIR_RNNOISE=<scratchpad>/rnnoise -DFETCHCONTENT_SOURCE_DIR_RNNOISE_MODEL=<scratchpad>/rnnoise_model`（モデルはscratchpadにtar.gzを展開したディレクトリ）。
-- `VoiceChangeTests`にだけ`juce::juce_audio_formats`をリンクする（T-014のWAV入出力用）。新規パッケージではない。
+- `VoiceChangeTests`に`juce::juce_audio_formats`を直接リンクする（T-014のWAV入出力用。`tests/RecordingTool.cpp`が直接使う）。アプリ本体にはjuce_dsp経由で元からリンクされている（機能追加なし）。新規パッケージではない。
 - ctest: `vc_add_test(mic Mic)`（quick）。
 - CI: モデルのtar.gzを`actions/cache`（キーはファイル名）で保存し、CMakeのURLに「ローカルのキャッシュ → media.xiph.org」の順で渡す（ハッシュ検査は両方に効く）。方式の細部はT-009で決める。
 
@@ -574,7 +574,7 @@ public:
 
 #### T-014: 実録音比較のオフライン処理ツールと手順
 
-- 変更対象（実装後の実際）: `tests/RecordingTool.h/.cpp`（ツール本体。ファイルを増やしたのは、TestMain.cppがアロケーション検出フックで大きく、指標・区間判定・WAV入出力が数百行になるため）、`tests/TestMain.cpp`（`--process-wav`・`--compare`への振り分けだけ。引数なしの動作は従来どおり）、`tests/MicTests.cpp`（M1a〜M1g）、`CMakeLists.txt`（`VoiceChangeTests`だけに`juce_audio_formats`）、`README.md`（手順）。
+- 変更対象（実装後の実際）: `tests/RecordingTool.h/.cpp`（ツール本体。ファイルを増やしたのは、TestMain.cppがアロケーション検出フックで大きく、指標・区間判定・WAV入出力が数百行になるため）、`tests/TestMain.cpp`（`--process-wav`・`--compare`への振り分けだけ。引数なしの動作は従来どおり）、`tests/MicTests.cpp`（M1a〜M1g）、`CMakeLists.txt`（`VoiceChangeTests`に`juce_audio_formats`を直接リンク。本体にはjuce_dsp経由で元からリンク済み）、`README.md`（手順）。
 - `VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.7 --impact 0.3 --nr on|off --eq on|off|a2|a3|sonar --settings <VoiceChange.settingsのパス> --segments <区間ファイル> --trace <csv> --float]`: WAVを読み、出力レート＝WAVのレートでEngine（プリセットはノーマル、ゲイン0）に通して書き出す。遅延（ノイズ除去の1440サンプル@48kHz）を取り除いて入力と同じ位置・長さにし、遅延を表示する。既定は16bit PCM。`--float`は32bit float（`--compare`用。16bitは約-90dBFSの量子化雑音があり、それ以下の残留雑音は測れない）。区間ごとのゲート開放割合・インパクト抑制の作動割合を表示（`--trace`は10msごとのCSV）。設定は 既定 → `--settings` → オプション の順。`--eq`のa2・a3・sonarはツール内の定数（T-016でParams.hへ）。
 - `VoiceChangeTests --compare <raw.wav> <sonar.wav> <ours.wav> [--segments <区間ファイル>] [--sonar-segments <区間ファイル>]`: 区間（silence・speech・impact・speech+impact）ごとに次を表で出す。区間は台本の時刻ファイルで指定し、省略時は生音声のエネルギーで自動判定する。遅延は相互相関で揃える（相関0.3以上。別テイクなら揃えず、sonarは自身の区間）。
   - 無声区間の残留雑音RMS [dBFS]（10msフレームの中央値、-100dBFS未満の割合を併記）と1/3オクターブスペクトル
