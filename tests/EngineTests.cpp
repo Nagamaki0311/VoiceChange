@@ -776,7 +776,7 @@ private:
             const std::array<Expect, 8> expected { { { "normal", 0.0f, 1.0f, 0.0f },   { "echo", 0.0f, 1.0f, 0.0f },
                                                      { "helium", 9.0f, 1.6f, 0.5f },   { "minion", 12.0f, 1.6f, 3.0f },
                                                      { "giant", -6.0f, 0.75f, 1.0f },  { "kerokero", 0.0f, 1.0f, 0.0f },
-                                                     { "robot", 0.0f, 1.0f, 0.0f },    { "talkbox", 0.0f, 1.0f, 0.0f } } };
+                                                     { "robot", 0.0f, 1.0f, 3.0f },    { "talkbox", 0.0f, 1.0f, 0.0f } } };
 
             for (size_t i = 0; i < expected.size(); ++i)
             {
@@ -788,7 +788,7 @@ private:
             }
         }
 
-        beginTest ("E11b: 出力の声量 = シフター単体の出力 + プリセットの補正ゲイン。層1のゲインとは独立に足し算になる");
+        beginTest ("E11b: 出力の声量 = 補正なしの出力（シフター単体・リングモジュレーター単体）+ プリセットの補正ゲイン。層1のゲインとは独立に足し算になる");
         {
             constexpr int total = (int) kFs * 3;
             constexpr int tail = (int) kFs; // 補間（50ms）とシフターの立ち上がりが済んだ後の1秒を測る
@@ -807,12 +807,21 @@ private:
                 return vc::test::rms (out.data() + (total - tail), tail);
             };
 
-            // 基準: 補正のないシフター単体の出力（Engineと同じ準備・同じブロック長）。ピッチ以外の効果がなく、検出器を使わないプリセットだけ。
+            // 基準: 補正のない出力（Engineと同じ準備・同じブロック長）。シフター単体（ヘリウム・ミニオン・ジャイアント）、素通し（ノーマル）、
+            // リングモジュレーター単体（ロボット）。検出器を使わないプリセットだけ。
             auto shifterOnly = [&] (const vc::PresetSpec& spec)
             {
                 std::vector<float> out (voice);
 
-                if (spec.semitones != 0.0f || spec.formant != 1.0f)
+                if (spec.effect == vc::Effect::Robot)
+                {
+                    vc::RingModulator ringMod;
+                    ringMod.prepare (kFs, kMaxBlock);
+
+                    for (int pos = 0; pos < total; pos += kMaxBlock)
+                        ringMod.process (out.data() + pos, out.data() + pos, std::min (kMaxBlock, total - pos));
+                }
+                else if (spec.semitones != 0.0f || spec.formant != 1.0f)
                 {
                     vc::PitchShifter shifter;
                     shifter.prepare (kFs, kMaxBlock);
@@ -825,7 +834,7 @@ private:
                 return vc::test::rms (out.data() + (total - tail), tail);
             };
 
-            for (const auto preset : { vc::Preset::Normal, vc::Preset::Helium, vc::Preset::Minion, vc::Preset::Giant })
+            for (const auto preset : { vc::Preset::Normal, vc::Preset::Helium, vc::Preset::Minion, vc::Preset::Giant, vc::Preset::Robot })
             {
                 const auto& spec = vc::kPresets[(size_t) preset];
                 const double reference = shifterOnly (spec);

@@ -62,7 +62,7 @@ constexpr std::array<PresetSpec, 8> kPresets { {
     { "minion",  12.0f, 1.60f, Effect::None,    false, 3.0f },
     { "giant",   -6.0f, 0.75f, Effect::None,    false, 1.0f },
     { "kerokero", 0.0f, 1.00f, Effect::None,    true,  0.0f },
-    { "robot",    0.0f, 1.00f, Effect::Robot,   false, 0.0f },
+    { "robot",    0.0f, 1.00f, Effect::Robot,   false, 3.0f },
     { "talkbox",  0.0f, 1.00f, Effect::Talkbox, true,  0.0f },
 } };
 
