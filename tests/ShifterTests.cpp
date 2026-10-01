@@ -475,6 +475,17 @@ private:
     }
 
     // ----- P3: 移調精度 -----
+    // 合格基準は、期待周波数が100Hz以上なら期待値の±1%（従来どおり）。100Hz未満（層1ピッチを-18以下へ広げたとき、D-027）は±2.0Hz。
+    // 根拠（実測）: 出力が低いと、期待値に対する相対誤差が1%を超える。220Hz正弦の-30〜-1半音を1半音刻みで測ると（Signalsmith Stretch、
+    // STFTの1ビン = 48000/5760 = 8.33Hz）、誤差の最大は1.7Hz（出力が50〜150Hzのとき。例: -18で+1.06Hz = +1.36%、-25で-1.70Hz）で、
+    // 上げ方向は+36まで±0.6%以内。誤差はHzで見るとほぼ一定（1ビンの約1/5）で、周波数が低いほど相対値が大きくなる量子化誤差である。
+    // 2.0Hzはこの最大値（1.7Hz）に約15%の余裕を足した値（1ビンの1/4）。1%を超える誤差が出るのは出力が約150Hz以下で、
+    // 100Hz以上の従来のケース（-12・-6など）には適用しない（緩めていない）。
+    static double p3ToleranceHz (double expectedHz)
+    {
+        return expectedHz >= 100.0 ? 0.01 * expectedHz : 2.0;
+    }
+
     void runP3()
     {
         constexpr double fs = 48000.0;
@@ -483,7 +494,7 @@ private:
         constexpr int steadyLen = (int) fs; // 1秒
         constexpr int guard = 4000;
 
-        const float semitoneSet[] = { 12.0f, -12.0f, 5.0f, -5.0f, 8.0f, -6.0f };
+        const float semitoneSet[] = { 12.0f, -12.0f, 5.0f, -5.0f, 8.0f, -6.0f, 24.0f, -24.0f, -18.0f, -30.0f, 36.0f }; // 層1±24 + プリセット（合計-30〜+36）
 
         for (const float semis : semitoneSet)
         {
@@ -511,9 +522,10 @@ private:
 
             const double measuredHz = vc::test::findFftPeakHz (out.data() + (finalTarget - steadyLen), steadyLen, fs);
             const double expectedHz = toneFreq * std::pow (2.0, (double) semis / 12.0);
-            const double relError = std::abs (measuredHz - expectedHz) / expectedHz;
+            logMessage ("P3 " + juce::String (semis) + "st: " + juce::String (measuredHz, 2) + "Hz, expected " + juce::String (expectedHz, 2) + "Hz, error "
+                        + juce::String (measuredHz - expectedHz, 2) + "Hz (" + juce::String (100.0 * (measuredHz - expectedHz) / expectedHz, 2) + "%)");
 
-            expect (relError <= 0.01,
+            expect (std::abs (measuredHz - expectedHz) <= p3ToleranceHz (expectedHz),
                     "measured " + juce::String (measuredHz) + "Hz, expected " + juce::String (expectedHz) + "Hz");
         }
     }
@@ -524,14 +536,14 @@ private:
     // （独立の再現コードで確認済み、ユーザー判断によりSignalsmith Stretchを継続する）。
     // P4a（f0=150Hz）を仕様どおりの合格基準、P4b（f0=100Hz、低い声の特性確認）は
     // この残存特性が悪化していないかを確認する回帰検出とし、閾値は緩めない。
-    void runFormantPreservationCase (const juce::String& label, double f0, double f0TolRatio, double sTolRatio)
+    struct P4Case { float semis; double f0TolRatio; double sTolRatio; };
+
+    void runFormantPreservationCase (const juce::String& label, double f0, const std::vector<P4Case>& cases)
     {
         constexpr double fs = 48000.0;
         constexpr int maxBlock = 480;
         constexpr int analysisLen = (int) (fs * 1.5); // 1.5秒（1秒以上）
         constexpr int guard = 4000;
-
-        const float semitoneSet[] = { 5.0f, -5.0f };
 
         // 入力側の包絡・f0は移調によらず共通(定常な合成音のため、どの区間を切り出しても同じ)。
         auto rawVowel = vc::test::makeSyntheticVowel (f0, fs, analysisLen, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.3f);
@@ -539,8 +551,11 @@ private:
         const double f0In = vc::test::measureFundamentalHz (rawVowel.data(), (int) rawVowel.size(), fs, f0);
         const auto envIn = vc::test::measureFormantEnvelope (rawVowel.data(), (int) rawVowel.size(), fs, f0In);
 
-        for (const float semis : semitoneSet)
+        for (const auto& c : cases)
         {
+            const float semis = c.semis;
+            const double f0TolRatio = c.f0TolRatio;
+            const double sTolRatio = c.sTolRatio;
             beginTest (label + ": フォルマント保持 f0=" + juce::String (f0, 0) + "Hz " + juce::String (semis) + "半音");
 
             vc::PitchShifter shifter;
@@ -586,12 +601,17 @@ private:
 
     void runP4()
     {
+        // 層1ピッチを±24へ広げたときの扱い（D-027）。+24は従来の合格基準のまま（P4a: f0比0.36%・s=0.95、P4b: 0.47%・s=0.99）。
+        // -24は出力の基本周波数が40Hz未満（150Hz→37.5Hz、100Hz→25Hz）になり、P3と同じ量子化誤差（約2Hz）が相対値で効く。実測はP4a f0比0.2354（期待0.2500、-5.8%）・s=1.715、
+        // P4b 0.2308（-7.7%）・s=1.15。sの測定は出力のf0を基準に倍音の位置を取るため、f0の数Hzのずれが高次の倍音の位置を狂わせる（測定の限界）。
+        // 実音声（録音）で測った包絡の移動量は、層1ピッチ-36〜+36の全域で中央値0.99〜1.05だった（T-018の調査、progress.md）。
+        // このため-24は合格基準ではなく、実測値の悪化を検出する回帰の上限（実測 + 約0.1〜0.15の余裕）とする。基準を緩めた値ではない（従来の±5は変えていない）。
         // P4a: 仕様の合格基準（f0=150Hz、f0比±1%、s=1.0±10%）。
-        runFormantPreservationCase ("P4a", 150.0, 0.01, 0.1);
+        runFormantPreservationCase ("P4a", 150.0, { { 5.0f, 0.01, 0.1 }, { -5.0f, 0.01, 0.1 }, { 24.0f, 0.01, 0.1 }, { -24.0f, 0.08, 0.8 } });
 
         // P4b: 低い声の特性確認（f0=100Hz、D-015）。f0比±2%、s=1.0±25%。
-        // 実測基準値: f0誤差最大+1.4%、s=0.795(-5半音)/1.165(+5半音)。これより悪化したら回帰。
-        runFormantPreservationCase ("P4b", 100.0, 0.02, 0.25);
+        // 実測基準値: f0誤差最大+1.4%、s=0.795(-5半音)/1.165(+5半音)。これより悪化したら回帰。-24は上記の回帰の上限（f0比-7.7%・s=1.15の実測に対して±10%・0.25）。
+        runFormantPreservationCase ("P4b", 100.0, { { 5.0f, 0.02, 0.25 }, { -5.0f, 0.02, 0.25 }, { 24.0f, 0.02, 0.25 }, { -24.0f, 0.10, 0.25 } });
     }
 
     // ----- P5: ブロック長（D-014。120ms固定、48k/44.1k/96kHzで確認） -----

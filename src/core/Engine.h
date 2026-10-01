@@ -88,6 +88,7 @@ private:
     juce::dsp::Compressor<float> compressor;
 
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> gainSmoothed;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> presetGainSmoothed; // プリセットの声量補正（D-027）。層1のゲインとは別
     juce::SmoothedValue<float> reverbGainSmoothed;
     bool reverbActive = false;
     bool reverbParamsStale = true; // 補間中と、prepare/reset後の最初の1回だけreverb.setParametersを呼ぶ

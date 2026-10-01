@@ -12,7 +12,7 @@
 #include <vector>
 
 // ===== SECTION: EngineTests =====
-// E1〜E10（カテゴリEngine、quick）。docs/plan.md 3章T-004参照。
+// E1〜E11（カテゴリEngine、quick）。docs/plan.md 3章T-004参照。
 
 namespace
 {
@@ -38,6 +38,7 @@ public:
         runE8();
         runE9();
         runE10();
+        runE11();
     }
 
 private:
@@ -493,7 +494,7 @@ private:
         {
             engine.params().preset.store (p);
 
-            for (const int pitch : { -12, 0, 5, 12 })
+            for (const int pitch : { -24, -12, 0, 5, 12, 24 })
             {
                 engine.params().pitch.store (pitch);
                 buf = signal;
@@ -520,7 +521,7 @@ private:
             {
                 engine.params().preset.store (p);
 
-                for (const int pitch : { -12, 0, 5, 12 })
+                for (const int pitch : { -24, -12, 0, 5, 12, 24 })
                 {
                     engine.params().pitch.store (pitch);
                     engine.process (buf.data(), (int) buf.size());
@@ -574,21 +575,34 @@ private:
             signal.insert (signal.end(), part.begin(), part.end());
         }
 
+        // 全プリセット（層1ピッチ0か-5）に加えて、層1ピッチの端（±24。D-027）とプリセットの移調の合計が最大になる組み合わせ
+        // （ミニオン+24 = +36、ジャイアント-24 = -30、ヘリウム+24 = +33、ミニオン-24 = -12）。Engineは合計移調に制限を持たない。
+        struct Run { int preset; int pitch; };
+        std::vector<Run> runs;
+
         for (int p = 0; p < (int) vc::kPresets.size(); ++p)
+            runs.push_back ({ p, p % 2 == 0 ? 0 : -5 });
+
+        for (const auto& extra : { Run { (int) vc::Preset::Minion, 24 }, Run { (int) vc::Preset::Giant, -24 }, Run { (int) vc::Preset::Helium, 24 },
+                                   Run { (int) vc::Preset::Minion, -24 } })
+            runs.push_back (extra);
+
+        for (const auto& r : runs)
         {
+            const auto name = juce::String (presetName (r.preset)) + " pitch " + juce::String (r.pitch);
             vc::Engine engine;
             prepareEngine (engine);
-            engine.params().preset.store (p);
-            engine.params().pitch.store (p % 2 == 0 ? 0 : -5);
+            engine.params().preset.store (r.preset);
+            engine.params().pitch.store (r.pitch);
             engine.params().gainDb.store (10.0f);
             engine.params().reverb.store (0.3f);
 
             std::vector<float> out (signal);
             engine.process (out.data(), (int) out.size());
 
-            expect (vc::test::allFinite (out.data(), (int) out.size()), juce::String (presetName (p)) + ": non-finite output");
-            expect (vc::test::peakAbs (out.data(), (int) out.size()) <= 1.0, juce::String (presetName (p)) + ": peak exceeds 1.0");
-            expect (engine.getErrorFlags() == 0, juce::String (presetName (p)) + ": error flags set");
+            expect (vc::test::allFinite (out.data(), (int) out.size()), name + ": non-finite output");
+            expect (vc::test::peakAbs (out.data(), (int) out.size()) <= 1.0, name + ": peak exceeds 1.0");
+            expect (engine.getErrorFlags() == 0, name + ": error flags set");
         }
     }
 
@@ -717,11 +731,23 @@ private:
 
         juce::String table = "E10 CPU (processing time / audio time):";
 
+        // 全プリセットに加えて、層1ピッチの端（±24）との合計移調が大きい組み合わせ（D-027。CPUは移調量に依存しない）。
+        struct Run { int preset; int pitch; };
+        std::vector<Run> runs;
+
         for (int p = 0; p < (int) vc::kPresets.size(); ++p)
+            runs.push_back ({ p, 0 });
+
+        runs.push_back ({ (int) vc::Preset::Minion, 24 });
+        runs.push_back ({ (int) vc::Preset::Giant, -24 });
+
+        for (const auto& r : runs)
         {
+            const int p = r.preset;
             vc::Engine engine;
             engine.prepare ({ kFs, block });
             engine.params().preset.store (p);
+            engine.params().pitch.store (r.pitch);
             std::vector<float> buf (voice);
 
             const auto t0 = juce::Time::getHighResolutionTicks();
@@ -731,10 +757,86 @@ private:
 
             const double seconds = juce::Time::highResolutionTicksToSeconds (t1 - t0);
             const double percent = 100.0 * seconds / 10.0;
-            table << "\n  " << juce::String (presetName (p)).paddedRight (' ', 9) << juce::String (percent, 2) << "%";
+            table << "\n  " << (juce::String (presetName (p)) + (r.pitch != 0 ? " pitch " + juce::String (r.pitch) : juce::String())).paddedRight (' ', 17)
+                  << juce::String (percent, 2) << "%";
         }
 
         logMessage (table);
+    }
+
+    // ----- E11: プリセットの声量補正ゲイン（D-027） -----
+    // 補正は層2・リバーブの後、リミッターの前で、層1のゲインに足して掛ける。表の値（意図した移調・フォルマント・補正）をここに固定し、
+    // プリセットを選んだだけで出力がその分大きくなること、層1のゲインと独立に足し算になることを測る。
+    void runE11()
+    {
+        beginTest ("E11a: プリセット表の値（移調・フォルマント・補正ゲイン）");
+        {
+            struct Expect { const char* id; float semitones; float formant; float gainDb; };
+            // ヘリウム+9/1.6・ミニオン+12/1.6・ジャイアント-6/0.75はユーザー試聴の決定（D-027）。補正ゲインは実録音のK特性ラウドネスで決めた（docs/progress.md）。
+            const std::array<Expect, 8> expected { { { "normal", 0.0f, 1.0f, 0.0f },   { "echo", 0.0f, 1.0f, 0.0f },
+                                                     { "helium", 9.0f, 1.6f, 0.5f },   { "minion", 12.0f, 1.6f, 3.0f },
+                                                     { "giant", -6.0f, 0.75f, 1.0f },  { "kerokero", 0.0f, 1.0f, 0.0f },
+                                                     { "robot", 0.0f, 1.0f, 0.0f },    { "talkbox", 0.0f, 1.0f, 0.0f } } };
+
+            for (size_t i = 0; i < expected.size(); ++i)
+            {
+                const auto& spec = vc::kPresets[i];
+                expectEquals (juce::String (spec.id), juce::String (expected[i].id));
+                expectEquals (spec.semitones, expected[i].semitones, juce::String (spec.id) + ": semitones");
+                expectEquals (spec.formant, expected[i].formant, juce::String (spec.id) + ": formant");
+                expectEquals (spec.gainDb, expected[i].gainDb, juce::String (spec.id) + ": gainDb");
+            }
+        }
+
+        beginTest ("E11b: 出力の声量 = シフター単体の出力 + プリセットの補正ゲイン。層1のゲインとは独立に足し算になる");
+        {
+            constexpr int total = (int) kFs * 3;
+            constexpr int tail = (int) kFs; // 補間（50ms）とシフターの立ち上がりが済んだ後の1秒を測る
+            auto voice = vc::test::makeSyntheticVowel (150.0, kFs, total, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.05f);
+            vc::test::addNoiseFloor (voice, -60.0f, 555);
+
+            // 出力のRMS（-20〜-26dBFS台でリミッターの閾値-1dBに届かない）。
+            auto render = [&] (int preset, float layer1GainDb)
+            {
+                vc::Engine engine;
+                prepareEngine (engine);
+                engine.params().preset.store (preset);
+                engine.params().gainDb.store (layer1GainDb);
+                std::vector<float> out (voice);
+                engine.process (out.data(), total);
+                return vc::test::rms (out.data() + (total - tail), tail);
+            };
+
+            // 基準: 補正のないシフター単体の出力（Engineと同じ準備・同じブロック長）。ピッチ以外の効果がなく、検出器を使わないプリセットだけ。
+            auto shifterOnly = [&] (const vc::PresetSpec& spec)
+            {
+                std::vector<float> out (voice);
+
+                if (spec.semitones != 0.0f || spec.formant != 1.0f)
+                {
+                    vc::PitchShifter shifter;
+                    shifter.prepare (kFs, kMaxBlock);
+                    shifter.setTarget (true, spec.semitones, spec.formant);
+
+                    for (int pos = 0; pos < total; pos += kMaxBlock)
+                        shifter.process (out.data() + pos, out.data() + pos, std::min (kMaxBlock, total - pos));
+                }
+
+                return vc::test::rms (out.data() + (total - tail), tail);
+            };
+
+            for (const auto preset : { vc::Preset::Normal, vc::Preset::Helium, vc::Preset::Minion, vc::Preset::Giant })
+            {
+                const auto& spec = vc::kPresets[(size_t) preset];
+                const double reference = shifterOnly (spec);
+                expect (reference > 1.0e-4, juce::String (spec.id) + ": silent");
+                expectWithinAbsoluteError (20.0 * std::log10 (render ((int) preset, 0.0f) / reference), (double) spec.gainDb, 0.05);
+            }
+
+            // 層1のゲイン+6dBは、プリセットによらず+6dB（補正とは別に足される）。
+            for (int p = 0; p < (int) vc::kPresets.size(); ++p)
+                expectWithinAbsoluteError (20.0 * std::log10 (render (p, 6.0f) / render (p, 0.0f)), 6.0, 0.05);
+        }
     }
 };
 

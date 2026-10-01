@@ -235,7 +235,7 @@ public:
             const int pitchSlot = (int) (pendingOut / 7.0);
             if (pitchSlot != lastPitchSlot)
             {
-                engine.params().pitch.store (pitchSlot == 0 ? 0 : pitchRng.nextInt (25) - 12);
+                engine.params().pitch.store (pitchSlot == 0 ? 0 : pitchRng.nextInt (2 * vc::kMaxLayer1PitchSemitones + 1) - vc::kMaxLayer1PitchSemitones);
                 lastPitchSlot = pitchSlot;
                 ++pitchChanges;
             }

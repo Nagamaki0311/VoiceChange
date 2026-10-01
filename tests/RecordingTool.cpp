@@ -1034,7 +1034,7 @@ public:
         auto& p = layer1->params();
         p.preset.store ((int) Preset::Normal);
         p.pitch.store (0);
-        p.gainDb.store (s.gainDb);
+        p.gainDb.store (s.gainDb + spec.gainDb); // プリセットの声量補正は、移調量を上書きしても表の値のまま足す（Engineは層1ゲインに足して掛ける）
         p.reverb.store (s.reverb);
         p.enabled.store (true);
         p.nrEnabled.store (false);
@@ -1416,7 +1416,7 @@ int runProcessWav (const juce::StringArray& args)
         settings.eqOutputGainDb = (float) v;
     }
 
-    // 層1・層2（試聴用）。--semitones・--formant・--pitchは製品の範囲（±12など）を超えてよい。ツールの範囲外は終了コード2。
+    // 層1・層2（試聴用）。--semitones・--formant・--pitchは製品の範囲（層1ピッチ±24など）を超えてよい。ツールの範囲外は終了コード2。
     if (parsed.options.containsKey ("--preset"))
     {
         const auto id = parsed.options["--preset"].trim();

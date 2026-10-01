@@ -40,8 +40,8 @@ void PitchShifter::warmUp()
     std::vector<float> noise ((size_t) maxBlockSamples, 0.0f);
     std::vector<float> scratchOut ((size_t) maxBlockSamples, 0.0f);
 
-    // Engineで実際に使う範囲(層1ピッチ-12〜+12 + プリセットの移調-6〜+8)を広めにカバーする。
-    constexpr float semitoneSet[] = { -18.0f, -12.0f, -6.0f, 0.0f, 6.0f, 12.0f, 20.0f };
+    // Engineで実際に使う範囲(層1ピッチ-24〜+24 + プリセットの移調-6〜+12 = 合計-30〜+36)を広めにカバーする。
+    constexpr float semitoneSet[] = { -30.0f, -24.0f, -18.0f, -12.0f, -6.0f, 0.0f, 6.0f, 12.0f, 20.0f, 24.0f, 36.0f };
     constexpr float formantSet[] = { 0.75f, 1.0f, 1.4f, 1.6f };
 
     for (const float semis : semitoneSet)

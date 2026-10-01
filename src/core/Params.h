@@ -51,19 +51,23 @@ struct PresetSpec
     float formant;
     Effect effect;
     bool needsDetector;
+    float gainDb; // 声量の補正ゲイン（dB）。層2・層1のゲインの後・リミッターの前で、層1のゲインとは別に掛ける（D-027）
 };
 
 // docs/spec.md「層2: 特殊効果プリセット」の表のとおり。
 constexpr std::array<PresetSpec, 8> kPresets { {
-    { "normal",   0.0f, 1.00f, Effect::None,    false },
-    { "echo",     0.0f, 1.00f, Effect::Echo,    false },
-    { "helium",   0.0f, 1.60f, Effect::None,    false },
-    { "minion",   8.0f, 1.40f, Effect::None,    false },
-    { "giant",   -6.0f, 0.75f, Effect::None,    false },
-    { "kerokero", 0.0f, 1.00f, Effect::None,    true  },
-    { "robot",    0.0f, 1.00f, Effect::Robot,   false },
-    { "talkbox",  0.0f, 1.00f, Effect::Talkbox, true  },
+    { "normal",   0.0f, 1.00f, Effect::None,    false, 0.0f },
+    { "echo",     0.0f, 1.00f, Effect::Echo,    false, 0.0f },
+    { "helium",   9.0f, 1.60f, Effect::None,    false, 0.5f },
+    { "minion",  12.0f, 1.60f, Effect::None,    false, 3.0f },
+    { "giant",   -6.0f, 0.75f, Effect::None,    false, 1.0f },
+    { "kerokero", 0.0f, 1.00f, Effect::None,    true,  0.0f },
+    { "robot",    0.0f, 1.00f, Effect::Robot,   false, 0.0f },
+    { "talkbox",  0.0f, 1.00f, Effect::Talkbox, true,  0.0f },
 } };
+
+// 層1ピッチの範囲（±半音、1半音刻み。D-027）。sanitizeとUIのスライダーが参照する。Engine・PitchShifterはこの範囲に縛られない。
+constexpr int kMaxLayer1PitchSemitones = 24;
 
 // マイク処理（ノイズ除去）の背景ノイズの初期値。AtomicParamsの初期値と、Engineが非有限値を読んだときの代替値。
 constexpr float kNrBackgroundDefault = 0.65f;
@@ -238,7 +242,7 @@ struct AtomicParams
 
     std::atomic<float> gainDb { 0.0f };  // -20〜+20dB
     std::atomic<float> reverb { 0.0f };  // 0〜1（0〜100%）
-    std::atomic<int> pitch { 0 };        // -12〜+12半音（層1ピッチ、1半音刻み）
+    std::atomic<int> pitch { 0 };        // ±kMaxLayer1PitchSemitones半音（層1ピッチ、1半音刻み）
     std::atomic<int> preset { 0 };       // Presetのint値
     std::atomic<bool> enabled { true };  // 全体ON/OFF（false = バイパス）
 
@@ -297,7 +301,7 @@ struct SavedSettings
     juce::String inputDevice;
     juce::String outputDevice;
     float gainDb = 0.0f;   // -20〜+20dB
-    int pitch = 0;         // -12〜+12半音
+    int pitch = 0;         // ±kMaxLayer1PitchSemitones半音
     float reverb = 0.0f;   // 0〜1（AtomicParams::reverbと同じ単位。0〜100%はUI表示のみの変換）
     Preset preset = Preset::Normal;
     bool enabled = true;
@@ -357,7 +361,7 @@ inline SavedSettings sanitize (SavedSettings s) noexcept
         s.reverb = 0.0f;
 
     s.gainDb = juce::jlimit (-20.0f, 20.0f, s.gainDb);
-    s.pitch = juce::jlimit (-12, 12, s.pitch);
+    s.pitch = juce::jlimit (-kMaxLayer1PitchSemitones, kMaxLayer1PitchSemitones, s.pitch);
     s.reverb = juce::jlimit (0.0f, 1.0f, s.reverb);
 
     if (! std::isfinite (s.nrBackground))
