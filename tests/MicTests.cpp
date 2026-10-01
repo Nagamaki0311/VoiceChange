@@ -4363,6 +4363,309 @@ public:
                 dir.deleteRecursively();
             }
         }
+
+        // T-018第2段: トークボックスのボコーダー実験（量子化追従・デチューン・オクターブ上・バンド数・高域強調・子音の雑音）。製品のTalkboxは変えず、ツール内のExperimentVocoderで行う。
+        beginTest ("M1l: talkbox vocoder audition (quantized carrier, detune, octave up, bands, air, consonant noise) and its validation");
+        {
+            const int len = 3 * 48000;
+            const int half = len / 2;
+            auto vowelN = [&] (double f0, int count)
+            {
+                auto v = vc::test::makeSyntheticVowel (f0, fs, count, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.1f);
+                vc::test::addNoiseFloor (v, -60.0f, 444);
+                return v;
+            };
+            auto vowel = [&] (double f0) { return vowelN (f0, len); };
+            auto talk = [] (vc::rectool::TalkboxCarrier carrier)
+            {
+                vc::rectool::ProcessSettings t;
+                t.nrEnabled = false;
+                t.preset = vc::Preset::Talkbox;
+                t.talkboxCarrier = carrier;
+                t.talkboxVoicingFloor = 0.8f;
+                return t;
+            };
+            auto outOf = [&] (const std::vector<float>& in, const vc::rectool::ProcessSettings& t)
+            {
+                const auto r = vc::rectool::processAudio (in, fs, t);
+                expectEquals ((int) r.errorFlags, 0);
+                expect (vc::test::allFinite (r.output.data(), (int) r.output.size()), "non-finite output");
+                return r.output;
+            };
+            auto hzAt = [&] (const std::vector<float>& out, int from, int count, double approx) { return vc::test::measureFundamentalHz (out.data() + from, count, fs, approx); };
+
+            const auto in150 = vowel (150.0);
+
+            // 既定の設定（20バンド・鋸波1本・強調なし）のExperimentVocoderは、製品のTalkboxと同じ出力になる（実験の土台が製品と同じであることの確認。kTalkboxGainの値の写しもここで検出する）。
+            {
+                vc::rectool::ProcessSettings product;
+                product.nrEnabled = false;
+                product.preset = vc::Preset::Talkbox;
+                auto viaVocoder = product;
+                viaVocoder.talkboxVocoder = true;
+                auto mixed = vowel (150.0);
+                vc::test::addNoiseBurst (mixed, 48000, fs, 120.0, 0.2f); // 無声の区間も通す（有声度による雑音混合の経路）
+                const auto a = vc::rectool::processAudio (mixed, fs, product).output;
+                const auto b = vc::rectool::processAudio (mixed, fs, viaVocoder).output;
+                double worst = 0.0;
+
+                for (size_t i = 0; i < a.size(); ++i)
+                    worst = std::max (worst, (double) std::abs (a[i] - b[i]));
+
+                expect (worst < 1.0e-5, "default vocoder differs from the product Talkbox by " + juce::String (worst, 8));
+                expect (vc::test::peakAbs (b.data(), (int) b.size()) > 0.05, "vocoder output is silent");
+            }
+
+            // 量子化追従: f0=150Hz（D3の146.83Hzより少し高い）の声は、キャリアが最寄りの半音の146.83Hzになる（製品のfollowは150Hzのまま）。
+            {
+                const auto quantized = outOf (in150, talk (vc::rectool::TalkboxCarrier::Quantized));
+                const double hz = hzAt (quantized, half, half, 146.83);
+                expect (std::abs (hz - 146.83) / 146.83 < 0.007, "quantized carrier: " + juce::String (hz, 2) + " Hz, expected 146.83");
+            }
+
+            // 音階: f0=236Hz（A#3の233.08Hzに近い。MIDIノート58.2）は、半音階ではA#3、Cメジャーでは音階内の最寄りのB3（246.94Hz）になる。
+            {
+                const auto in240 = vowel (236.0);
+                auto chromatic = talk (vc::rectool::TalkboxCarrier::Quantized);
+                auto major = chromatic;
+                major.talkboxScale = vc::rectool::TalkboxScale::Major;
+                major.talkboxKey = 0;
+                auto minor = major;
+                minor.talkboxScale = vc::rectool::TalkboxScale::Minor; // Cマイナー（C D Eb F G Ab Bb）: A#3 = Bbは音階内
+                const double hc = hzAt (outOf (in240, chromatic), half, half, 233.08);
+                const double hm = hzAt (outOf (in240, major), half, half, 246.94);
+                const double hn = hzAt (outOf (in240, minor), half, half, 233.08);
+                expect (std::abs (hc - 233.08) / 233.08 < 0.007, "chromatic: " + juce::String (hc, 2) + " Hz, expected 233.08");
+                expect (std::abs (hm - 246.94) / 246.94 < 0.007, "C major: " + juce::String (hm, 2) + " Hz, expected 246.94");
+                expect (std::abs (hn - 233.08) / 233.08 < 0.007, "C minor: " + juce::String (hn, 2) + " Hz, expected 233.08");
+            }
+
+            // 階段状: 130Hz → 200Hz の2つの母音をつなぐと、キャリアは声の高さの連続的な変化ではなく、それぞれ最寄りの半音（130.81Hz・196.00Hz）で保持される。
+            {
+                std::vector<float> two = vowelN (130.0, len);
+                const auto second = vowelN (200.0, len);
+                two.insert (two.end(), second.begin(), second.end());
+                const auto out = outOf (two, talk (vc::rectool::TalkboxCarrier::Quantized));
+                const double h1 = hzAt (out, len - half, half, 130.81);
+                const double h2 = hzAt (out, 2 * len - half, half, 196.0);
+                expect (std::abs (h1 - 130.81) / 130.81 < 0.007, "step 1: " + juce::String (h1, 2) + " Hz, expected 130.81");
+                expect (std::abs (h2 - 196.0) / 196.0 < 0.007, "step 2: " + juce::String (h2, 2) + " Hz, expected 196.00");
+            }
+
+            // 抑揚の拡大: 150Hzの声が168Hz（+2半音）へ上がったとき、拡大率3は拡大率1より高い音になる（中心の追従が遅いため、上がった分が約3倍になる）。
+            {
+                std::vector<float> rise = vowelN (150.0, 2 * 48000);
+                const auto up = vowelN (168.3, 2 * 48000);
+                rise.insert (rise.end(), up.begin(), up.end());
+                auto s1 = talk (vc::rectool::TalkboxCarrier::Quantized);
+                auto s3 = s1;
+                s3.talkboxSpread = 3.0f;
+                const auto o1 = outOf (rise, s1);
+                const auto o3 = outOf (rise, s3);
+                const double h1 = hzAt (o1, 4 * 48000 - 24000, 24000, 164.81);
+                const double h3 = hzAt (o3, 4 * 48000 - 24000, 24000, 196.0);
+                expect (h3 > h1 * std::pow (2.0, 3.0 / 12.0), "spread 3 did not widen the rise: " + juce::String (h3, 1) + " Hz vs " + juce::String (h1, 1) + " Hz");
+            }
+
+            // 和音（量子化したルートに長三和音）: ルート146.83Hz・長3度185.0Hz・完全5度220.0Hzのエネルギーが単音より増える。
+            {
+                auto single = talk (vc::rectool::TalkboxCarrier::Quantized);
+                auto chord = single;
+                chord.talkboxChord = { 0.0f, 4.0f, 7.0f };
+                const auto m1 = vc::test::averagedMagnitudeSpectrum (outOf (in150, single).data() + half, half);
+                const auto m3 = vc::test::averagedMagnitudeSpectrum (outOf (in150, chord).data() + half, half);
+                auto at = [&] (const std::vector<double>& m, double hz) { return vc::test::findPeakNear (m, fs, 1 << 14, hz, 0.02).magLinear; };
+                expect (at (m3, 185.0) > 3.0 * at (m1, 185.0) && at (m3, 220.0) > 3.0 * at (m1, 220.0), "chord partials missing: " + juce::String (at (m3, 185.0) / at (m1, 185.0), 2)
+                        + " / " + juce::String (at (m3, 220.0) / at (m1, 220.0), 2));
+            }
+
+            // デチューン: 2本（-10・+10セント）にすると単音と別の出力になり（スーパーソウの厚み）、音量は単音と±2dB以内。
+            {
+                auto single = talk (vc::rectool::TalkboxCarrier::Quantized);
+                auto detuned = single;
+                detuned.talkboxDetuneCents = { -10.0f, 10.0f };
+                const auto a = outOf (in150, single);
+                const auto b = outOf (in150, detuned);
+                double diff = 0.0;
+
+                for (size_t i = 0; i < a.size(); ++i)
+                    diff = std::max (diff, (double) std::abs (a[i] - b[i]));
+
+                const double dB = 20.0 * std::log10 (vc::test::rms (b.data() + half, half) / vc::test::rms (a.data() + half, half));
+                expect (diff > 0.02, "detune did not change the output (" + juce::String (diff, 4) + ")");
+                expect (std::abs (dB) < 2.0, "detune level change " + juce::String (dB, 2) + " dB");
+            }
+
+            // オクターブ上（-6dB）: 基本波に対する2倍音の比が増える（オクターブ上の鋸波が2倍音と重なる）。
+            {
+                auto base = talk (vc::rectool::TalkboxCarrier::Quantized);
+                auto oct = base;
+                oct.talkboxOctaveUpDb = -6.0f;
+                const auto m0 = vc::test::averagedMagnitudeSpectrum (outOf (in150, base).data() + half, half);
+                const auto m1 = vc::test::averagedMagnitudeSpectrum (outOf (in150, oct).data() + half, half);
+                auto ratio = [&] (const std::vector<double>& m) { return vc::test::findPeakNear (m, fs, 1 << 14, 293.66, 0.02).magLinear / vc::test::findPeakNear (m, fs, 1 << 14, 146.83, 0.02).magLinear; };
+                expect (ratio (m1) > 1.2 * ratio (m0), "octave up did not raise the 2nd harmonic: " + juce::String (ratio (m1), 3) + " vs " + juce::String (ratio (m0), 3));
+            }
+
+            // バンド数: 8〜48で有限、16以上は音量が入力の±3dB（X3aと同じ基準）。バンド数を変えると出力が変わる。
+            {
+                auto vocoder = talk (vc::rectool::TalkboxCarrier::Quantized);
+                std::vector<float> ref;
+
+                for (const int bands : { 20, 8, 28, 32, 48 })
+                {
+                    vocoder.talkboxBands = bands;
+                    vocoder.talkboxVocoder = true;
+                    const auto out = outOf (in150, vocoder);
+                    const double dB = 20.0 * std::log10 (vc::test::rms (out.data() + half, half) / vc::test::rms (in150.data() + half, half));
+
+                    if (bands >= 16) // 8バンドは帯域が広く重なって音量が上がる（+3dB強）。有限であることだけ確認する
+                        expect (std::abs (dB) < 3.0, juce::String (bands) + " bands: level " + juce::String (dB, 2) + " dB");
+
+                    if (bands == 20)
+                        ref = out;
+                    else
+                        expect (std::abs (out[(size_t) half + 1000] - ref[(size_t) half + 1000]) > 1.0e-6 || std::abs (out[(size_t) half + 5000] - ref[(size_t) half + 5000]) > 1.0e-6, "bands had no effect");
+                }
+            }
+
+            // 高域強調: 3〜8kHzの電力が、強調12dBで0dBより増える（高域に成分のある入力で）。
+            {
+                auto noisy = vowel (150.0);
+                vc::test::addNoiseFloor (noisy, -40.0f, 77);
+                auto flat = talk (vc::rectool::TalkboxCarrier::Quantized);
+                flat.talkboxVocoder = true;
+                flat.talkboxHighHz = 8000.0f;
+                auto air = flat;
+                air.talkboxAirDb = 12.0f;
+                auto highPower = [&] (const std::vector<float>& out)
+                {
+                    return vc::test::bandPowerDb (vc::test::averagedMagnitudeSpectrum (out.data() + half, half), fs, 1 << 14, 3000.0, 8000.0);
+                };
+                const double d = highPower (outOf (noisy, air)) - highPower (outOf (noisy, flat));
+                expect (d > 5.0, "air 12 dB raised 3-8 kHz by only " + juce::String (d, 2) + " dB");
+            }
+
+            // 子音の雑音: 雑音だけの入力（検出器は無声）で、有声度の下限0.8のとき高域（2.5kHz以上）のキャリアが鋸波（周期的）だが、consonant 1では雑音（非周期）になる。
+            // 3kHz以上の出力の自己相関（キャリアの周期110Hz付近）で見る。
+            {
+                const auto noise = makeWhiteNoise (len, 0.1f, 5);
+                auto off = talk (vc::rectool::TalkboxCarrier::Quantized);
+                off.talkboxVocoder = true;
+                auto on = off;
+                on.talkboxConsonant = 1.0f;
+                auto periodicity = [&] (const std::vector<float>& out)
+                {
+                    std::vector<float> hp (out.begin() + half, out.end());
+                    juce::dsp::IIR::Filter<float> f;
+                    f.coefficients = juce::dsp::IIR::Coefficients<float>::makeHighPass (fs, 3000.0f);
+
+                    for (auto& v : hp)
+                        v = f.processSample (v);
+
+                    // キャリア110Hzの周期（436.4サンプル）付近の正規化自己相関の最大値。
+                    double best = 0.0;
+                    double e0 = 0.0;
+
+                    for (size_t i = 0; i + 600 < hp.size(); ++i)
+                        e0 += (double) hp[i] * (double) hp[i];
+
+                    for (size_t lag = 434; lag <= 439; ++lag)
+                    {
+                        double c = 0.0;
+
+                        for (size_t i = 0; i + 600 < hp.size(); ++i)
+                            c += (double) hp[i] * (double) hp[i + lag];
+
+                        best = std::max (best, c / std::max (e0, 1.0e-30));
+                    }
+
+                    return best;
+                };
+                const double pOff = periodicity (outOf (noise, off));
+                const double pOn = periodicity (outOf (noise, on));
+                expect (pOff > 0.2 && pOn < 0.5 * pOff, "consonant noise: periodicity " + juce::String (pOff, 3) + " -> " + juce::String (pOn, 3));
+            }
+
+            // 極端な設定でも有限（無音・大きな雑音、6音の和音×4本×オクターブ上、48バンド）。
+            {
+                auto extreme = talk (vc::rectool::TalkboxCarrier::Quantized);
+                extreme.talkboxChord = { 0.0f, 4.0f, 7.0f, 12.0f, -12.0f, 19.0f };
+                extreme.talkboxDetuneCents = { -50.0f, -10.0f, 10.0f, 50.0f };
+                extreme.talkboxOctaveUpDb = 0.0f;
+                extreme.talkboxBands = 48;
+                extreme.talkboxHighHz = 12000.0f;
+                extreme.talkboxAirDb = 12.0f;
+                extreme.talkboxConsonant = 1.0f;
+                extreme.talkboxSpread = 4.0f;
+                extreme.talkboxVocoder = true;
+                outOf (std::vector<float> ((size_t) len, 0.0f), extreme);
+                outOf (makeWhiteNoise (len, 1.0f, 9), extreme);
+                outOf (in150, extreme);
+            }
+
+            // 引数の検証（不正値は終了コード2）。正常な指定は0で、出力は入力と同じ長さ。
+            {
+                const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("vc_m1l", "");
+                expect (dir.createDirectory().wasOk(), "temp dir");
+                const auto inFile = dir.getChildFile ("in.wav");
+                const auto outFile = dir.getChildFile ("out.wav");
+                juce::String error;
+                expect (vc::rectool::writeWav16 (inFile, std::vector<float> (in150.begin(), in150.begin() + 48000), fs, error), error);
+                const juce::StringArray io { inFile.getFullPathName(), outFile.getFullPathName(), "--nr", "off", "--preset", "talkbox" };
+
+                auto run = [&] (std::initializer_list<const char*> extra)
+                {
+                    juce::StringArray a (io);
+
+                    for (const auto* e : extra)
+                        a.add (e);
+
+                    return vc::rectool::runProcessWav (a);
+                };
+
+                expectEquals (run ({ "--talkbox-carrier", "quantized", "--talkbox-voicing-floor", "0.8", "--talkbox-scale", "minor", "--talkbox-key", "7", "--talkbox-spread", "3",
+                                     "--talkbox-chord", "0,3,7", "--talkbox-detune", "-10,0,10", "--talkbox-octave-up", "-6", "--talkbox-bands", "28", "--talkbox-high-hz", "8000",
+                                     "--talkbox-air-db", "6", "--talkbox-consonant", "0.6" }),
+                              0);
+                vc::rectool::Audio back;
+                expect (vc::rectool::readWav (outFile, back, error), error);
+                expectEquals ((int) back.samples.size(), 48000);
+                expectEquals (run ({ "--talkbox-carrier", "quantized" }), 0);
+                expectEquals (run ({ "--talkbox-bands", "20" }), 0);
+
+                const std::vector<std::vector<const char*>> bad {
+                    { "--talkbox-carrier", "quantised" }, { "--talkbox-carrier", "quantized", "--talkbox-scale", "dorian" }, { "--talkbox-carrier", "quantized", "--talkbox-key", "12" },
+                    { "--talkbox-carrier", "quantized", "--talkbox-key", "-1" }, { "--talkbox-carrier", "quantized", "--talkbox-key", "1.5" },
+                    { "--talkbox-carrier", "quantized", "--talkbox-spread", "0.4" }, { "--talkbox-carrier", "quantized", "--talkbox-spread", "4.5" },
+                    { "--talkbox-detune", "0,,5" }, { "--talkbox-detune", "0,60" }, { "--talkbox-detune", "-60" }, { "--talkbox-detune", "1,2,3,4,5" }, { "--talkbox-detune", "x" },
+                    { "--talkbox-octave-up", "1" }, { "--talkbox-octave-up", "-25" }, { "--talkbox-octave-up", "loud" }, { "--talkbox-bands", "7" }, { "--talkbox-bands", "49" },
+                    { "--talkbox-bands", "20.5" }, { "--talkbox-high-hz", "3999" }, { "--talkbox-high-hz", "12001" }, { "--talkbox-air-db", "13" }, { "--talkbox-air-db", "-1" },
+                    { "--talkbox-consonant", "1.1" }, { "--talkbox-consonant", "nan" },
+                    { "--talkbox-scale", "major" }, { "--talkbox-key", "7" }, { "--talkbox-spread", "2" }, // 量子化以外のキャリアでは意味を持たない（無視されて取り違えない）
+                    { "--talkbox-carrier", "fixed", "--talkbox-scale", "major" } };
+
+                for (const auto& b : bad)
+                {
+                    juce::StringArray a (io);
+
+                    for (const auto* e : b)
+                        a.add (e);
+
+                    expectEquals (vc::rectool::runProcessWav (a), 2, "should be rejected: " + a.joinIntoString (" "));
+                }
+
+                // talkbox以外のプリセットでは、新しい項目すべてを拒否する。
+                for (const auto* opt : { "--talkbox-bands", "--talkbox-air-db", "--talkbox-consonant", "--talkbox-detune", "--talkbox-octave-up", "--talkbox-high-hz" })
+                {
+                    const char* value = juce::String (opt) == "--talkbox-detune" ? "0" : juce::String (opt) == "--talkbox-octave-up" ? "-6" : juce::String (opt) == "--talkbox-high-hz" ? "8000" : "0.5";
+                    expectEquals (vc::rectool::runProcessWav (juce::StringArray { inFile.getFullPathName(), outFile.getFullPathName(), "--nr", "off", "--preset", "helium", opt, value }), 2,
+                                  juce::String ("should be rejected with helium: ") + opt);
+                }
+
+                dir.deleteRecursively();
+            }
+        }
     }
 };
 

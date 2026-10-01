@@ -3,6 +3,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 
 #include "core/Engine.h"
+#include "core/PitchDetector.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1010,11 +1011,237 @@ void applyEqPreset (ProcessSettings& s, EqPreset preset)
 
 namespace
 {
+// ExperimentVocoderを使うか。talkboxVocoderの明示か、製品のTalkboxでは表せない設定（デチューン・オクターブ上・バンド数・高域・強調・子音）があるとき。
+bool usesVocoder (const ProcessSettings& s) noexcept
+{
+    return s.talkboxVocoder || s.talkboxDetuneCents.size() != 1 || ! juce::approximatelyEqual (s.talkboxDetuneCents[0], 0.0f) || s.talkboxOctaveUpDb.has_value()
+           || s.talkboxBands != 20 || ! juce::approximatelyEqual (s.talkboxHighHz, 7000.0f) || s.talkboxAirDb > 0.0f || s.talkboxConsonant > 0.0f;
+}
+
 bool usesExperimentChain (const ProcessSettings& s) noexcept
 {
     return s.semitonesOverride.has_value() || s.formantOverride.has_value() || s.talkboxCarrier != TalkboxCarrier::Follow
-           || s.talkboxChord.size() != 1 || ! juce::approximatelyEqual (s.talkboxChord[0], 0.0f) || s.talkboxVoicingFloor > 0.0f;
+           || s.talkboxChord.size() != 1 || ! juce::approximatelyEqual (s.talkboxChord[0], 0.0f) || s.talkboxVoicingFloor > 0.0f || usesVocoder (s);
 }
+
+// ----- トークボックス実験その2（T-018第2段） -----
+// 製品のTalkbox（src/core/Effects.cpp）と同じ帯域構成（変調側・キャリア側とも2段のバンドパス、全波整流の包絡、キャリア包絡で正規化、kTalkboxGain）で、
+// 次の4点だけを変えられる試聴用のボコーダー。製品のTalkboxはバンド数が定数・キャリアが鋸波1本のため、実験は製品のクラスを変えずにここで行う。
+//   1. キャリア = 鋸波の複数本（和音の音 x デチューン x オクターブ上）の和 + 白色雑音（有声度で混合。製品と同じ式）
+//   2. バンド数（Qは間隔に合わせて(bands-1)/19倍）  3. 3〜8kHzの高域強調  4. 高域バンド（2.5kHz以上）だけ別の有声度（子音の摩擦音を雑音で鳴らす）
+// 検証: 既定の設定（20バンド・鋸波1本・強調なし）は製品のTalkboxと同じ出力になる（テストM1l）。
+struct VocoderConfig
+{
+    int bands = 20;
+    float highHz = 7000.0f;
+    float airDb = 0.0f;
+    float consonant = 0.0f;
+    std::vector<float> ratios { 1.0f }; // キャリアの鋸波ごとの周波数比
+    std::vector<float> gains { 1.0f };  // 同じく振幅
+};
+
+class ExperimentVocoder
+{
+public:
+    static constexpr double kLowHz = 120.0;
+    static constexpr float kSplitHz = 2500.0f;      // これ以上のバンドが子音用のキャリアを使う
+    static constexpr float kAirStartHz = 3000.0f, kAirFullHz = 8000.0f;
+
+    void prepare (double fs, int maxBlock, const VocoderConfig& cfg)
+    {
+        config = cfg;
+        sampleRate = fs;
+        carrierLow.assign ((size_t) maxBlock, 0.0f);
+        carrierHigh.assign ((size_t) maxBlock, 0.0f);
+        scratchMod.assign ((size_t) maxBlock, 0.0f);
+        phases.assign (cfg.ratios.size(), 0.0);
+        jassert (cfg.ratios.size() == cfg.gains.size() && ! cfg.ratios.empty());
+
+        double power = 0.0;
+        for (const auto g : cfg.gains)
+            power += (double) g * (double) g;
+        sumNorm = (float) (1.0 / std::sqrt (power));
+
+        const double high = std::min ((double) cfg.highHz, fs * 0.4);
+        const double ratio = std::pow (high / kLowHz, 1.0 / (double) (cfg.bands - 1));
+        const float qScale = (float) (cfg.bands - 1) / 19.0f;
+        bands = std::vector<Band> ((size_t) cfg.bands);
+
+        for (int b = 0; b < cfg.bands; ++b)
+        {
+            auto& band = bands[(size_t) b];
+            const double centre = kLowHz * std::pow (ratio, (double) b);
+
+            for (int stage = 0; stage < 2; ++stage)
+            {
+                band.mod[(size_t) stage].coefficients = juce::dsp::IIR::Coefficients<float>::makeBandPass (fs, (float) centre, 3.0f * qScale);
+                band.carrier[(size_t) stage].coefficients = juce::dsp::IIR::Coefficients<float>::makeBandPass (fs, (float) centre, 1.5f * qScale);
+            }
+
+            band.useHigh = cfg.consonant > 0.0f && centre >= (double) kSplitHz;
+            const double w = std::clamp (std::log (centre / (double) kAirStartHz) / std::log ((double) kAirFullHz / (double) kAirStartHz), 0.0, 1.0);
+            band.gain = std::pow (10.0f, cfg.airDb * (float) w / 20.0f);
+            band.carrierEnvelope = 0.1f;
+        }
+
+        attack = (float) std::exp (-1.0 / (0.005 * fs));
+        release = (float) std::exp (-1.0 / (0.020 * fs));
+        carrierFreq.reset (fs, 0.005);
+        carrierFreq.setCurrentAndTargetValue (110.0f);
+        vLow.reset (fs, 0.005);
+        vLow.setCurrentAndTargetValue (0.0f);
+        vHigh.reset (fs, 0.005);
+        vHigh.setCurrentAndTargetValue (0.0f);
+    }
+
+    // voicingFlooredは下限適用後（低域のキャリアと、consonant = 0 のときの高域）、voicingRawは検出器の値（consonant > 0 の高域へ混ぜる）。modulator == outでもよい。
+    void process (const float* modulator, float* out, int n, float carrierHz, float voicingFloored, float voicingRaw) noexcept
+    {
+        const float fMax = (float) (sampleRate * 0.25);
+        carrierFreq.setTargetValue (juce::jlimit (40.0f, fMax, carrierHz));
+        vLow.setTargetValue (juce::jlimit (0.0f, 1.0f, voicingFloored));
+        vHigh.setTargetValue (juce::jlimit (0.0f, 1.0f, voicingFloored + config.consonant * (voicingRaw - voicingFloored)));
+        const bool split = config.consonant > 0.0f;
+
+        for (int i = 0; i < n; ++i)
+        {
+            const float f = carrierFreq.getNextValue();
+            const float vl = vLow.getNextValue();
+            const float vh = vHigh.getNextValue();
+            float sum = 0.0f;
+
+            for (size_t k = 0; k < phases.size(); ++k)
+            {
+                const float dt = juce::jlimit (40.0f, fMax, f * config.ratios[k]) / (float) sampleRate;
+                const float t = (float) phases[k];
+                sum += config.gains[k] * (2.0f * t - 1.0f - polyBlep (t, dt));
+                phases[k] += (double) dt;
+                if (phases[k] >= 1.0)
+                    phases[k] -= 1.0;
+            }
+
+            sum *= sumNorm;
+            const float noise = rng.nextFloat() * 2.0f - 1.0f;
+            carrierLow[(size_t) i] = vl * sum + (1.0f - vl) * noise;
+            carrierHigh[(size_t) i] = split ? vh * sum + (1.0f - vh) * noise : carrierLow[(size_t) i];
+        }
+
+        std::copy (modulator, modulator + n, scratchMod.begin());
+        std::fill (out, out + n, 0.0f);
+
+        for (auto& band : bands)
+        {
+            const float* carrier = band.useHigh ? carrierHigh.data() : carrierLow.data();
+            float env = band.envelope, carrierEnv = band.carrierEnvelope;
+
+            for (int i = 0; i < n; ++i)
+            {
+                const float m = band.mod[1].processSample (band.mod[0].processSample (scratchMod[(size_t) i]));
+                const float rect = std::abs (m);
+                const float coeff = rect > env ? attack : release;
+                env = coeff * env + (1.0f - coeff) * rect;
+
+                const float c = band.carrier[1].processSample (band.carrier[0].processSample (carrier[i]));
+                const float cRect = std::abs (c);
+                const float cCoeff = cRect > carrierEnv ? attack : release;
+                carrierEnv = cCoeff * carrierEnv + (1.0f - cCoeff) * cRect;
+                out[i] += band.gain * env * c / std::max (carrierEnv, 1.0e-5f);
+            }
+
+            band.envelope = env;
+            band.carrierEnvelope = carrierEnv;
+        }
+
+        juce::FloatVectorOperations::multiply (out, 0.904f, n); // 製品のkTalkboxGainと同じ（Effects.cppの定数は非公開のため値を写している。M1lが一致を確認する）
+    }
+
+private:
+    struct Band
+    {
+        std::array<juce::dsp::IIR::Filter<float>, 2> mod, carrier;
+        float envelope = 0.0f, carrierEnvelope = 0.1f, gain = 1.0f;
+        bool useHigh = false;
+    };
+
+    static float polyBlep (float t, float dt) noexcept
+    {
+        if (t < dt)
+        {
+            t /= dt;
+            return t + t - t * t - 1.0f;
+        }
+
+        if (t > 1.0f - dt)
+        {
+            t = (t - 1.0f) / dt;
+            return t * t + t + t + 1.0f;
+        }
+
+        return 0.0f;
+    }
+
+    VocoderConfig config;
+    double sampleRate = 48000.0;
+    std::vector<Band> bands;
+    std::vector<double> phases;
+    std::vector<float> carrierLow, carrierHigh, scratchMod;
+    juce::SmoothedValue<float> carrierFreq, vLow, vHigh;
+    juce::Random rng { 0x5eed };
+    float sumNorm = 1.0f, attack = 0.0f, release = 0.0f;
+};
+
+// 検出f0を音階の最寄りの音へ量子化して保持する（補正時間ゼロ。ケロケロの補正と同じ考え方）。
+// 検出器は有声と判定したときだけf0を更新する（無声・無音区間は直前の値のまま）ので、そのまま「無声区間は直前の音程を保つ」になる。
+// 検出範囲外（誤検出の8倍音など）の値は無視する。音階の境目付近での往復は、kHysteresisSemitones超えて隣の音へ寄ったときだけ切り替えて抑える。
+class QuantizedPitch
+{
+public:
+    QuantizedPitch (TalkboxScale scale, int key, float spreadFactor) : root (key), spread (spreadFactor)
+    {
+        constexpr std::array<bool, 12> major { true, false, true, false, true, true, false, true, false, true, false, true };
+        constexpr std::array<bool, 12> minor { true, false, true, true, false, true, false, true, true, false, true, false };
+        allowed.fill (true);
+
+        if (scale == TalkboxScale::Major)
+            allowed = major;
+        else if (scale == TalkboxScale::Minor)
+            allowed = minor;
+    }
+
+    // 戻り値は量子化したキャリア周波数（Hz）。blockSecondsは前回の呼び出しからの時間（中心の追従用）。
+    float update (float detectedHz, float blockSeconds) noexcept
+    {
+        if (detectedHz >= kMinHz && detectedHz <= kMaxHz)
+        {
+            const float measured = 69.0f + 12.0f * std::log2 (detectedHz / 440.0f);
+            centre = note < 0 ? measured : centre + (1.0f - std::exp (-blockSeconds / kCentreSeconds)) * (measured - centre);
+            const float m = centre + spread * (measured - centre);
+            const int nearest = (int) std::lround (m);
+            int best = nearest;
+            float bestDist = 1.0e9f;
+
+            for (int cand = nearest - 2; cand <= nearest + 2; ++cand)
+                if (allowed[(size_t) (((cand - root) % 12 + 12) % 12)] && std::abs (m - (float) cand) < bestDist)
+                {
+                    best = cand;
+                    bestDist = std::abs (m - (float) cand);
+                }
+
+            if (note < 0 || (best != note && bestDist + kHysteresisSemitones < std::abs (m - (float) note)))
+                note = best;
+        }
+
+        return note < 0 ? kDefaultHz : 440.0f * std::exp2 (((float) note - 69.0f) / 12.0f);
+    }
+
+private:
+    static constexpr float kMinHz = 60.0f, kMaxHz = 500.0f, kDefaultHz = 110.0f, kHysteresisSemitones = 0.2f, kCentreSeconds = 3.0f;
+    std::array<bool, 12> allowed;
+    int root = 0;
+    float spread = 1.0f;
+    float centre = 0.0f; // 検出音高（MIDIノート番号）のゆっくり追従する中心
+    int note = -1;       // MIDIノート番号（未確定は-1）
+};
 
 // 試聴用の経路。Engineのプリセット表を通さずに、移調量・フォルマント係数・トークボックスのキャリアを自由に決める。
 // 並びは製品のEngineと同じ: マイク処理（Engine A） → ピッチ検出 → シフター → トークボックス → 層1（Engine B: リバーブ・ゲイン・リミッター）。
@@ -1022,12 +1249,13 @@ bool usesExperimentChain (const ProcessSettings& s) noexcept
 class ExperimentChain
 {
 public:
-    ExperimentChain (double fs, int block, const ProcessSettings& settings) : s (settings)
+    ExperimentChain (double fs, int block, const ProcessSettings& settings) : s (settings), sampleRateForQuantizer (fs)
     {
         const auto& spec = kPresets[(size_t) s.preset];
         semitones = (float) s.pitch + s.semitonesOverride.value_or (spec.semitones);
         formant = s.formantOverride.value_or (spec.formant);
         talk = s.preset == Preset::Talkbox;
+        vocoderOn = usesVocoder (s);
         run = ! juce::approximatelyEqual (semitones, 0.0f) || ! juce::approximatelyEqual (formant, 1.0f);
 
         layer1 = std::make_unique<Engine>();
@@ -1043,10 +1271,36 @@ public:
 
         shifter.prepare (fs, block);
         detector.prepare (fs, block);
-        talkbox.resize (talk ? s.talkboxChord.size() : 0);
+        talkbox.resize (talk && ! vocoderOn ? s.talkboxChord.size() : 0);
 
         for (auto& t : talkbox)
             t.prepare (fs, block);
+
+        if (talk && vocoderOn)
+        {
+            VocoderConfig cfg;
+            cfg.bands = s.talkboxBands;
+            cfg.highHz = s.talkboxHighHz;
+            cfg.airDb = s.talkboxAirDb;
+            cfg.consonant = s.talkboxConsonant;
+            cfg.ratios.clear();
+            cfg.gains.clear();
+
+            for (const auto chordSemis : s.talkboxChord)
+                for (const auto cents : s.talkboxDetuneCents)
+                {
+                    cfg.ratios.push_back (std::exp2 (chordSemis / 12.0f + cents / 1200.0f));
+                    cfg.gains.push_back (1.0f);
+
+                    if (s.talkboxOctaveUpDb.has_value())
+                    {
+                        cfg.ratios.push_back (2.0f * cfg.ratios.back());
+                        cfg.gains.push_back (juce::Decibels::decibelsToGain (*s.talkboxOctaveUpDb));
+                    }
+                }
+
+            vocoder.prepare (fs, block, cfg);
+        }
 
         mod.assign ((size_t) block, 0.0f);
         tmp.assign ((size_t) block, 0.0f);
@@ -1070,18 +1324,28 @@ public:
         if (talk)
         {
             // Engineと同じ既定値110Hz。Followのキャリア = 検出f0 × 2^(層1ピッチ/12)、Fixedは絶対値（層1ピッチを掛けない）。
-            const float base = s.talkboxCarrier == TalkboxCarrier::Fixed ? s.talkboxFixedHz
-                                                                           : (hz > 0.0f ? hz : 110.0f) * std::exp2 ((float) s.pitch / 12.0f);
-            const float scale = 1.0f / std::sqrt ((float) talkbox.size());
-            std::copy (buf, buf + n, mod.begin());
-            std::fill (buf, buf + n, 0.0f);
+            const float pitchRatio = std::exp2 ((float) s.pitch / 12.0f);
+            const float base = s.talkboxCarrier == TalkboxCarrier::Fixed       ? s.talkboxFixedHz
+                               : s.talkboxCarrier == TalkboxCarrier::Quantized ? quantizer.update (hz, (float) n / (float) sampleRateForQuantizer) * pitchRatio
+                                                                               : (hz > 0.0f ? hz : 110.0f) * pitchRatio;
 
-            for (size_t i = 0; i < talkbox.size(); ++i)
+            if (vocoderOn)
             {
-                talkbox[i].process (mod.data(), tmp.data(), n, base * std::exp2 (s.talkboxChord[i] / 12.0f), voicing);
+                vocoder.process (buf, buf, n, base, voicing, detector.getVoicing());
+            }
+            else
+            {
+                const float scale = 1.0f / std::sqrt ((float) talkbox.size());
+                std::copy (buf, buf + n, mod.begin());
+                std::fill (buf, buf + n, 0.0f);
 
-                for (int k = 0; k < n; ++k)
-                    buf[k] += scale * tmp[(size_t) k];
+                for (size_t i = 0; i < talkbox.size(); ++i)
+                {
+                    talkbox[i].process (mod.data(), tmp.data(), n, base * std::exp2 (s.talkboxChord[i] / 12.0f), voicing);
+
+                    for (int k = 0; k < n; ++k)
+                        buf[k] += scale * tmp[(size_t) k];
+                }
             }
         }
 
@@ -1094,11 +1358,14 @@ public:
 private:
     ProcessSettings s;
     float semitones = 0.0f, formant = 1.0f;
-    bool talk = false, run = false;
+    bool talk = false, run = false, vocoderOn = false;
     std::unique_ptr<Engine> layer1;
     PitchShifter shifter;
     PitchDetector detector;
     std::vector<Talkbox> talkbox;
+    ExperimentVocoder vocoder;
+    QuantizedPitch quantizer { s.talkboxScale, s.talkboxKey, s.talkboxSpread };
+    double sampleRateForQuantizer = 48000.0;
     std::vector<float> mod, tmp;
 };
 } // namespace
@@ -1300,13 +1567,18 @@ int runProcessWav (const juce::StringArray& args)
 {
     const auto parsed = parseArgs (args,
                                    { "--bg", "--impact", "--eq", "--eq-gain", "--nr", "--settings", "--segments", "--trace", "--preset", "--gain", "--pitch", "--reverb",
-                                     "--semitones", "--formant", "--talkbox-carrier", "--talkbox-hz", "--talkbox-chord", "--talkbox-voicing-floor" },
+                                     "--semitones", "--formant", "--talkbox-carrier", "--talkbox-hz", "--talkbox-chord", "--talkbox-voicing-floor",
+                                     "--talkbox-scale", "--talkbox-key", "--talkbox-spread", "--talkbox-detune", "--talkbox-octave-up", "--talkbox-bands", "--talkbox-high-hz",
+                                     "--talkbox-air-db", "--talkbox-consonant" },
                                    { "--float" });
     const char* usage = "usage: VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.65] [--impact 0.15] [--nr on|off] [--eq on|off|a2|a3|sonar] [--eq-gain -12..12]\n"
                         "                                     [--settings <VoiceChange.settings>] [--segments <file>] [--trace <csv>] [--float]\n"
                         "                                     [--preset normal|echo|helium|minion|giant|kerokero|robot|talkbox] [--gain -20..20] [--pitch -36..36] [--reverb 0..1]\n"
                         "                                     [--semitones -48..48] [--formant 0.25..4]   (audition: override the preset's values; normal/helium/minion/giant/talkbox)\n"
-                        "                                     [--talkbox-carrier follow|fixed] [--talkbox-hz 40..1000] [--talkbox-chord 0,4,7] [--talkbox-voicing-floor 0..1]   (audition: talkbox only)\n";
+                        "                                     [--talkbox-carrier follow|fixed|quantized] [--talkbox-hz 40..1000] [--talkbox-chord 0,4,7] [--talkbox-voicing-floor 0..1]   (audition: talkbox only)\n"
+                        "                                     [--talkbox-scale chromatic|major|minor] [--talkbox-key 0..11] [--talkbox-spread 0.5..4]   (quantized carrier only; key 0 = C)\n"
+                        "                                     [--talkbox-detune -12,0,12] [--talkbox-octave-up -24..0] [--talkbox-bands 8..48] [--talkbox-high-hz 4000..12000]\n"
+                        "                                     [--talkbox-air-db 0..12] [--talkbox-consonant 0..1]   (audition: talkbox vocoder experiments)\n";
 
     if (! parsed.error.isEmpty() || parsed.positional.size() != 2)
     {
@@ -1454,6 +1726,35 @@ int runProcessWav (const juce::StringArray& args)
             || ! readNumber ("--talkbox-hz", 40.0, 1000.0, fixedHz) || ! readNumber ("--talkbox-voicing-floor", 0.0, 1.0, voicingFloor))
             return 2;
 
+        // トークボックスの実験その2の数値。指定されたものだけ反映し、1つでも指定するとExperimentVocoderを使う。
+        double key = 0.0, spread = 1.0, octaveUp = 0.0, bands = settings.talkboxBands, highHz = settings.talkboxHighHz, airDb = 0.0, consonant = 0.0;
+
+        if (! readNumber ("--talkbox-key", 0.0, 11.0, key) || ! readNumber ("--talkbox-spread", 0.5, 4.0, spread) || ! readNumber ("--talkbox-octave-up", -24.0, 0.0, octaveUp) || ! readNumber ("--talkbox-bands", 8.0, 48.0, bands)
+            || ! readNumber ("--talkbox-high-hz", 4000.0, 12000.0, highHz) || ! readNumber ("--talkbox-air-db", 0.0, 12.0, airDb)
+            || ! readNumber ("--talkbox-consonant", 0.0, 1.0, consonant))
+            return 2;
+
+        if (! juce::approximatelyEqual (std::floor (key), key) || ! juce::approximatelyEqual (std::floor (bands), bands))
+        {
+            printError ("--talkbox-key and --talkbox-bands must be integers");
+            return 2;
+        }
+
+        settings.talkboxKey = (int) key;
+        settings.talkboxSpread = (float) spread;
+        settings.talkboxBands = (int) bands;
+        settings.talkboxHighHz = (float) highHz;
+        settings.talkboxAirDb = (float) airDb;
+        settings.talkboxConsonant = (float) consonant;
+
+        if (parsed.options.containsKey ("--talkbox-octave-up"))
+            settings.talkboxOctaveUpDb = (float) octaveUp;
+
+        for (const char* k : { "--talkbox-key", "--talkbox-spread", "--talkbox-bands", "--talkbox-high-hz", "--talkbox-air-db", "--talkbox-consonant", "--talkbox-octave-up", "--talkbox-detune",
+                               "--talkbox-scale" })
+            if (parsed.options.containsKey (k))
+                settings.talkboxVocoder = true;
+
         if (! juce::approximatelyEqual (std::floor (pitch), pitch))
         {
             printError ("--pitch must be an integer number of semitones: " + parsed.options["--pitch"]);
@@ -1477,13 +1778,55 @@ int runProcessWav (const juce::StringArray& args)
     {
         const auto v = parsed.options["--talkbox-carrier"].toLowerCase();
 
-        if (v != "follow" && v != "fixed")
+        if (v != "follow" && v != "fixed" && v != "quantized")
         {
-            printError ("--talkbox-carrier must be follow or fixed");
+            printError ("--talkbox-carrier must be follow, fixed or quantized");
             return 2;
         }
 
-        settings.talkboxCarrier = v == "fixed" ? TalkboxCarrier::Fixed : TalkboxCarrier::Follow;
+        settings.talkboxCarrier = v == "fixed" ? TalkboxCarrier::Fixed : v == "quantized" ? TalkboxCarrier::Quantized : TalkboxCarrier::Follow;
+    }
+
+    if (parsed.options.containsKey ("--talkbox-scale"))
+    {
+        const auto v = parsed.options["--talkbox-scale"].toLowerCase();
+
+        if (v != "chromatic" && v != "major" && v != "minor")
+        {
+            printError ("--talkbox-scale must be chromatic, major or minor");
+            return 2;
+        }
+
+        settings.talkboxScale = v == "major" ? TalkboxScale::Major : v == "minor" ? TalkboxScale::Minor : TalkboxScale::Chromatic;
+    }
+
+    if (parsed.options.containsKey ("--talkbox-detune"))
+    {
+        // セントのコンマ区切り（1〜4個、各-50〜50）。例: -12,0,12（3本のスーパーソウ）。
+        juce::StringArray items;
+        items.addTokens (parsed.options["--talkbox-detune"], ",", "");
+        std::vector<float> cents;
+
+        for (const auto& item : items)
+        {
+            double v = 0.0;
+
+            if (! parseRange (item, -50.0, 50.0, v))
+            {
+                cents.clear();
+                break;
+            }
+
+            cents.push_back ((float) v);
+        }
+
+        if (cents.empty() || cents.size() > 4)
+        {
+            printError ("--talkbox-detune must be 1 to 4 cent offsets from -50 to 50 separated by commas (e.g. -12,0,12): " + parsed.options["--talkbox-detune"]);
+            return 2;
+        }
+
+        settings.talkboxDetuneCents = cents;
     }
 
     if (parsed.options.containsKey ("--talkbox-chord"))
@@ -1526,11 +1869,21 @@ int runProcessWav (const juce::StringArray& args)
         return 2;
     }
 
-    if ((parsed.options.containsKey ("--talkbox-carrier") || parsed.options.containsKey ("--talkbox-hz") || parsed.options.containsKey ("--talkbox-chord")
-         || parsed.options.containsKey ("--talkbox-voicing-floor"))
-        && settings.preset != Preset::Talkbox)
+    bool talkboxOptionGiven = false;
+
+    for (const char* k : { "--talkbox-carrier", "--talkbox-hz", "--talkbox-chord", "--talkbox-voicing-floor", "--talkbox-scale", "--talkbox-key", "--talkbox-spread", "--talkbox-detune",
+                           "--talkbox-octave-up", "--talkbox-bands", "--talkbox-high-hz", "--talkbox-air-db", "--talkbox-consonant" })
+        talkboxOptionGiven = talkboxOptionGiven || parsed.options.containsKey (k);
+
+    if (talkboxOptionGiven && settings.preset != Preset::Talkbox)
     {
-        printError ("--talkbox-carrier, --talkbox-hz, --talkbox-chord and --talkbox-voicing-floor can be used with --preset talkbox only");
+        printError ("the --talkbox-* options can be used with --preset talkbox only");
+        return 2;
+    }
+
+    if ((parsed.options.containsKey ("--talkbox-scale") || parsed.options.containsKey ("--talkbox-key") || parsed.options.containsKey ("--talkbox-spread")) && settings.talkboxCarrier != TalkboxCarrier::Quantized)
+    {
+        printError ("--talkbox-scale, --talkbox-key and --talkbox-spread can be used with --talkbox-carrier quantized only");
         return 2;
     }
 
@@ -1576,16 +1929,34 @@ int runProcessWav (const juce::StringArray& args)
             << juce::String (settings.formantOverride.value_or (kPresets[(size_t) settings.preset].formant), 2);
 
     if (settings.preset == Preset::Talkbox
-        && (settings.talkboxCarrier == TalkboxCarrier::Fixed || settings.talkboxChord.size() != 1 || ! juce::approximatelyEqual (settings.talkboxChord[0], 0.0f)
+        && (settings.talkboxCarrier != TalkboxCarrier::Follow || usesVocoder (settings) || settings.talkboxChord.size() != 1 || ! juce::approximatelyEqual (settings.talkboxChord[0], 0.0f)
             || settings.talkboxVoicingFloor > 0.0f))
     {
-        out << ", talkbox carrier " << (settings.talkboxCarrier == TalkboxCarrier::Fixed ? "fixed " + juce::String (settings.talkboxFixedHz, 1) + " Hz" : juce::String ("follow f0"))
+        out << ", talkbox carrier "
+            << (settings.talkboxCarrier == TalkboxCarrier::Fixed       ? "fixed " + juce::String (settings.talkboxFixedHz, 1) + " Hz"
+                : settings.talkboxCarrier == TalkboxCarrier::Quantized ? "quantized f0 (" + juce::String (settings.talkboxScale == TalkboxScale::Major   ? "major"
+                                                                                                          : settings.talkboxScale == TalkboxScale::Minor ? "minor"
+                                                                                                                                                         : "chromatic")
+                                                                             + ", key " + juce::String (settings.talkboxKey) + ", spread " + juce::String (settings.talkboxSpread, 2) + ")"
+                                                                       : juce::String ("follow f0"))
             << " chord";
 
         for (const auto c : settings.talkboxChord)
             out << " " << juce::String (c, 1);
 
         out << ", voicing floor " << juce::String (settings.talkboxVoicingFloor, 2);
+
+        if (usesVocoder (settings))
+        {
+            out << ", experimental vocoder: " << settings.talkboxBands << " bands up to " << juce::String (settings.talkboxHighHz, 0) << " Hz, air " << juce::String (settings.talkboxAirDb, 1)
+                << " dB, consonant " << juce::String (settings.talkboxConsonant, 2) << ", detune cents";
+
+            for (const auto c : settings.talkboxDetuneCents)
+                out << " " << juce::String (c, 1);
+
+            if (settings.talkboxOctaveUpDb.has_value())
+                out << ", octave up " << juce::String (*settings.talkboxOctaveUpDb, 1) << " dB";
+        }
     }
 
     out << ", block " << juce::String (result.blocks.empty() ? 0 : result.blocks.front().blockSamples) << " samples\n";

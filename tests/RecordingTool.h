@@ -136,7 +136,9 @@ enum class EqPreset { Off, On, A2, A3, Sonar };
 // T-018（プリセット強化の試聴サンプル作成）で足した項目は、すべて既定で従来どおり（ノーマル・ゲイン0・ピッチ0・リバーブ0・上書きなし）。
 // 製品のプリセット表・ピッチ範囲は変えない。範囲外の移調と実験用のキャリアは、このツールの中だけで許す（試聴の候補探索用）。
 // 通称（コマンドの値）と内部識別子: follow = TalkboxCarrier::Follow / fixed = TalkboxCarrier::Fixed。
-enum class TalkboxCarrier { Follow, Fixed }; // Follow = 検出したf0に追従（製品と同じ）/ Fixed = 固定の高さ（平坦なロボット声）
+// quantized = TalkboxCarrier::Quantized（T-018第2段。検出f0を音階に量子化して補正時間ゼロの階段状に動かす）。
+enum class TalkboxCarrier { Follow, Fixed, Quantized }; // Follow = 検出したf0に追従（製品と同じ）/ Fixed = 固定の高さ（平坦なロボット声）
+enum class TalkboxScale { Chromatic, Major, Minor }; // 量子化の音階（chromatic = 半音、major/minor = 主音（talkboxKey）からの長音階・自然短音階）
 
 struct ProcessSettings
 {
@@ -162,6 +164,20 @@ struct ProcessSettings
     float talkboxFixedHz = 110.0f;
     std::vector<float> talkboxChord { 0.0f };
     float talkboxVoicingFloor = 0.0f; // キャリアの有声度（鋸波の割合）の下限。製品は検出器の値そのまま（0 = 下限なし）。低い声で検出器が無声寄りに判定するときの確認用
+
+    // トークボックスの実験その2（T-018第2段。--talkbox-scale・--talkbox-key・--talkbox-detune・--talkbox-octave-up・--talkbox-bands・--talkbox-high-hz・
+    // --talkbox-air-db・--talkbox-consonant）。製品のTalkboxで表せない設定（デチューン・オクターブ上・バンド数・高域・強調・子音）を指定するか、talkboxVocoder = true にすると、製品のTalkboxの代わりにこのツール内のExperimentVocoder
+    // （製品と同じ帯域構成で、キャリア合成・バンド数・高域強調だけを変えられる）を使う。キャリアは和音の音ごと×デチューンごとの鋸波の和（正規化は1/sqrt(本数)）。
+    bool talkboxVocoder = false;
+    TalkboxScale talkboxScale = TalkboxScale::Chromatic;
+    int talkboxKey = 0;                              // 主音のピッチクラス（0 = C … 11 = B）。major/minorのとき
+    float talkboxSpread = 1.0f;                      // 抑揚の拡大率。検出音高の、ゆっくり追従する中心（時定数3秒）からの差をこの倍率にしてから量子化する（1 = そのまま。話し声の音高の動きは小さく、そのままだと数音にしか動かないため）
+    std::vector<float> talkboxDetuneCents { 0.0f };  // 鋸波を重ねる本数と各本のデチューン（セント）
+    std::optional<float> talkboxOctaveUpDb;          // オクターブ上の重ねのレベル（dB。未指定 = 重ねない）
+    int talkboxBands = 20;                           // バンド数。変調側・キャリア側のQはバンド間隔に合わせて(bands-1)/19倍にする
+    float talkboxHighHz = 7000.0f;                   // 最上バンドの中心周波数
+    float talkboxAirDb = 0.0f;                       // 3kHz以上の高域の強調（3kHzで0dB → 8kHz以上でこの値。対数周波数で直線）
+    float talkboxConsonant = 0.0f;                   // 2.5kHz以上のバンドのキャリアに混ぜる雑音の量。0 = 低域と同じ（下限適用後の有声度）、1 = 検出器の有声度そのまま（無声子音の摩擦音が雑音で鳴る）
 };
 
 // このツールが受け付ける移調量とフォルマント係数の範囲（製品の範囲ではない）。
