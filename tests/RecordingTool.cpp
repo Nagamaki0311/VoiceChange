@@ -8,6 +8,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdio>
+#include <memory>
 #include <numeric>
 
 // ===== SECTION: RecordingTool実装（T-014） =====
@@ -1007,15 +1008,114 @@ void applyEqPreset (ProcessSettings& s, EqPreset preset)
     }
 }
 
+namespace
+{
+bool usesExperimentChain (const ProcessSettings& s) noexcept
+{
+    return s.semitonesOverride.has_value() || s.formantOverride.has_value() || s.talkboxCarrier != TalkboxCarrier::Follow
+           || s.talkboxChord.size() != 1 || ! juce::approximatelyEqual (s.talkboxChord[0], 0.0f) || s.talkboxVoicingFloor > 0.0f;
+}
+
+// 試聴用の経路。Engineのプリセット表を通さずに、移調量・フォルマント係数・トークボックスのキャリアを自由に決める。
+// 並びは製品のEngineと同じ: マイク処理（Engine A） → ピッチ検出 → シフター → トークボックス → 層1（Engine B: リバーブ・ゲイン・リミッター）。
+// Engine A・Bはどちらもプリセット ノーマル・ピッチ0（シフターは休止）で、Aはマイク処理だけ、Bは層1だけを使う。
+class ExperimentChain
+{
+public:
+    ExperimentChain (double fs, int block, const ProcessSettings& settings) : s (settings)
+    {
+        const auto& spec = kPresets[(size_t) s.preset];
+        semitones = (float) s.pitch + s.semitonesOverride.value_or (spec.semitones);
+        formant = s.formantOverride.value_or (spec.formant);
+        talk = s.preset == Preset::Talkbox;
+        run = ! juce::approximatelyEqual (semitones, 0.0f) || ! juce::approximatelyEqual (formant, 1.0f);
+
+        layer1 = std::make_unique<Engine>();
+        auto& p = layer1->params();
+        p.preset.store ((int) Preset::Normal);
+        p.pitch.store (0);
+        p.gainDb.store (s.gainDb);
+        p.reverb.store (s.reverb);
+        p.enabled.store (true);
+        p.nrEnabled.store (false);
+        p.eqEnabled.store (false);
+        layer1->prepare ({ fs, block });
+
+        shifter.prepare (fs, block);
+        detector.prepare (fs, block);
+        talkbox.resize (talk ? s.talkboxChord.size() : 0);
+
+        for (auto& t : talkbox)
+            t.prepare (fs, block);
+
+        mod.assign ((size_t) block, 0.0f);
+        tmp.assign ((size_t) block, 0.0f);
+    }
+
+    // bufはマイク処理後の1ブロック。その場で書き換える。
+    void process (float* buf, int n) noexcept
+    {
+        float hz = 0.0f, voicing = 0.0f;
+
+        if (talk)
+        {
+            detector.process (buf, n);
+            hz = detector.getFrequencyHz();
+            voicing = std::max (detector.getVoicing(), s.talkboxVoicingFloor);
+        }
+
+        shifter.setTarget (run, semitones, formant);
+        shifter.process (buf, buf, n);
+
+        if (talk)
+        {
+            // Engineと同じ既定値110Hz。Followのキャリア = 検出f0 × 2^(層1ピッチ/12)、Fixedは絶対値（層1ピッチを掛けない）。
+            const float base = s.talkboxCarrier == TalkboxCarrier::Fixed ? s.talkboxFixedHz
+                                                                           : (hz > 0.0f ? hz : 110.0f) * std::exp2 ((float) s.pitch / 12.0f);
+            const float scale = 1.0f / std::sqrt ((float) talkbox.size());
+            std::copy (buf, buf + n, mod.begin());
+            std::fill (buf, buf + n, 0.0f);
+
+            for (size_t i = 0; i < talkbox.size(); ++i)
+            {
+                talkbox[i].process (mod.data(), tmp.data(), n, base * std::exp2 (s.talkboxChord[i] / 12.0f), voicing);
+
+                for (int k = 0; k < n; ++k)
+                    buf[k] += scale * tmp[(size_t) k];
+            }
+        }
+
+        layer1->process (buf, n);
+    }
+
+    int shifterLatencySamples() const noexcept { return shifter.getLatencySamples(); }
+    std::uint32_t errorFlags() const noexcept { return layer1->getErrorFlags(); }
+
+private:
+    ProcessSettings s;
+    float semitones = 0.0f, formant = 1.0f;
+    bool talk = false, run = false;
+    std::unique_ptr<Engine> layer1;
+    PitchShifter shifter;
+    PitchDetector detector;
+    std::vector<Talkbox> talkbox;
+    std::vector<float> mod, tmp;
+};
+} // namespace
+
 ProcessResult processAudio (const std::vector<float>& input, double fs, const ProcessSettings& s)
 {
     ProcessResult result;
     const int block = std::max (1, (int) std::lround (fs * kFrameSec));
+    const bool experiment = usesExperimentChain (s);
 
     Engine engine;
     auto& p = engine.params();
-    p.preset.store ((int) Preset::Normal);
-    p.gainDb.store (0.0f);
+    // 試聴用の経路ではEngine Aはマイク処理だけ（プリセット ノーマル・ゲイン0・ピッチ0・リバーブ0）。層1は後段のEngine Bが担う。
+    p.preset.store (experiment ? (int) Preset::Normal : (int) s.preset);
+    p.gainDb.store (experiment ? 0.0f : s.gainDb);
+    p.pitch.store (experiment ? 0 : s.pitch);
+    p.reverb.store (experiment ? 0.0f : s.reverb);
     p.enabled.store (true);
     p.nrEnabled.store (s.nrEnabled);
     p.nrBackground.store (s.nrBackground);
@@ -1031,8 +1131,17 @@ ProcessResult processAudio (const std::vector<float>& input, double fs, const Pr
     const int latency = s.nrEnabled ? engine.debugNoiseReducer().getDelaySamples() : 0;
     result.latencySamples = latency;
 
+    std::unique_ptr<ExperimentChain> chain;
+
+    if (experiment)
+        chain = std::make_unique<ExperimentChain> (fs, block, s);
+
+    // シフターが動くときは、その遅延（約120ms）ぶんの無音を末尾に足して流し、遅延を取り除く。シフターを使わない設定では従来どおり。
+    const bool shifterMayRun = experiment || shifterShouldRun (s.preset, s.pitch);
+    const size_t tail = shifterMayRun ? (size_t) std::lround (0.3 * fs) : 0;
+
     // 入力の後ろに遅延ぶんの無音を足して流し、先頭のlatencyサンプルを捨てる（入力と同じ長さ・同じ位置）。
-    const size_t total = input.size() + (size_t) latency;
+    const size_t total = input.size() + (size_t) latency + tail;
     const size_t padded = (total + (size_t) block - 1) / (size_t) block * (size_t) block;
     std::vector<float> buf (padded, 0.0f);
     std::copy (input.begin(), input.end(), buf.begin());
@@ -1043,6 +1152,9 @@ ProcessResult processAudio (const std::vector<float>& input, double fs, const Pr
     {
         engine.process (buf.data() + pos, block);
 
+        if (chain != nullptr)
+            chain->process (buf.data() + pos, block);
+
         const int closed = engine.debugNoiseReducer().getGateClosedSampleCount();
         const int impact = engine.debugNoiseReducer().getImpactAttenuatedSampleCount();
         const bool counted = closed >= prevClosed && impact >= prevImpact; // reset（異常時）で累計が戻ったブロックは数えない
@@ -1051,8 +1163,13 @@ ProcessResult processAudio (const std::vector<float>& input, double fs, const Pr
         prevImpact = impact;
     }
 
-    result.output.assign (buf.begin() + latency, buf.begin() + latency + (long) input.size());
-    result.errorFlags = engine.getErrorFlags();
+    result.shifterLatencySamples = chain != nullptr ? chain->shifterLatencySamples() : engine.getShifterLatencySamples();
+    jassert ((size_t) (latency + result.shifterLatencySamples) + input.size() <= padded); // 末尾の無音（0.3秒）が遅延より長い
+
+    const size_t drop = std::min (padded, (size_t) (latency + result.shifterLatencySamples));
+    result.output.assign (buf.begin() + (long) drop, buf.begin() + (long) std::min (padded, drop + input.size()));
+    result.output.resize (input.size(), 0.0f);
+    result.errorFlags = engine.getErrorFlags() | (chain != nullptr ? chain->errorFlags() : 0u);
     result.underflowCount = engine.debugNoiseReducer().getUnderflowCount();
     return result;
 }
@@ -1123,6 +1240,20 @@ bool parseUnit (const juce::String& text, float& out)
     return true;
 }
 
+// lo〜hiの数値だけを受け付ける（数値でない・範囲外・非有限はfalse）。
+bool parseRange (const juce::String& text, double lo, double hi, double& out)
+{
+    const auto utf8 = text.trim().toStdString();
+    char* end = nullptr;
+    const double v = std::strtod (utf8.c_str(), &end);
+
+    if (utf8.empty() || end == utf8.c_str() || *end != '\0' || ! (v >= lo && v <= hi))
+        return false;
+
+    out = v;
+    return true;
+}
+
 // 区間ファイルの時刻が音声の長さを超えていたら警告する（処理は続ける。台本と別の録音を指定した取り違えの検出用）。
 void warnSegmentsBeyond (const std::vector<Segment>& segs, double durationSec, const char* label)
 {
@@ -1167,9 +1298,15 @@ double rmsOf (const std::vector<float>& x, long a, long b)
 
 int runProcessWav (const juce::StringArray& args)
 {
-    const auto parsed = parseArgs (args, { "--bg", "--impact", "--eq", "--eq-gain", "--nr", "--settings", "--segments", "--trace" }, { "--float" });
+    const auto parsed = parseArgs (args,
+                                   { "--bg", "--impact", "--eq", "--eq-gain", "--nr", "--settings", "--segments", "--trace", "--preset", "--gain", "--pitch", "--reverb",
+                                     "--semitones", "--formant", "--talkbox-carrier", "--talkbox-hz", "--talkbox-chord", "--talkbox-voicing-floor" },
+                                   { "--float" });
     const char* usage = "usage: VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.65] [--impact 0.15] [--nr on|off] [--eq on|off|a2|a3|sonar] [--eq-gain -12..12]\n"
-                        "                                     [--settings <VoiceChange.settings>] [--segments <file>] [--trace <csv>] [--float]\n";
+                        "                                     [--settings <VoiceChange.settings>] [--segments <file>] [--trace <csv>] [--float]\n"
+                        "                                     [--preset normal|echo|helium|minion|giant|kerokero|robot|talkbox] [--gain -20..20] [--pitch -36..36] [--reverb 0..1]\n"
+                        "                                     [--semitones -48..48] [--formant 0.25..4]   (audition: override the preset's values; normal/helium/minion/giant/talkbox)\n"
+                        "                                     [--talkbox-carrier follow|fixed] [--talkbox-hz 40..1000] [--talkbox-chord 0,4,7] [--talkbox-voicing-floor 0..1]   (audition: talkbox only)\n";
 
     if (! parsed.error.isEmpty() || parsed.positional.size() != 2)
     {
@@ -1279,6 +1416,124 @@ int runProcessWav (const juce::StringArray& args)
         settings.eqOutputGainDb = (float) v;
     }
 
+    // 層1・層2（試聴用）。--semitones・--formant・--pitchは製品の範囲（±12など）を超えてよい。ツールの範囲外は終了コード2。
+    if (parsed.options.containsKey ("--preset"))
+    {
+        const auto id = parsed.options["--preset"].trim();
+        bool found = false;
+
+        for (size_t i = 0; i < kPresets.size() && ! found; ++i)
+            if (id.equalsIgnoreCase (kPresets[i].id))
+            {
+                settings.preset = static_cast<Preset> (i);
+                found = true;
+            }
+
+        if (! found)
+        {
+            printError ("--preset must be normal, echo, helium, minion, giant, kerokero, robot or talkbox: " + parsed.options["--preset"]);
+            return 2;
+        }
+    }
+
+    auto readNumber = [&] (const char* key, double lo, double hi, double& target)
+    {
+        if (! parsed.options.containsKey (key) || parseRange (parsed.options[key], lo, hi, target))
+            return true;
+
+        printError (juce::String (key) + " must be a number from " + juce::String (lo) + " to " + juce::String (hi) + ": " + parsed.options[key]);
+        return false;
+    };
+
+    {
+        double gain = settings.gainDb, pitch = settings.pitch, reverb = settings.reverb, semitones = 0.0, formant = 1.0, fixedHz = settings.talkboxFixedHz,
+               voicingFloor = settings.talkboxVoicingFloor;
+
+        if (! readNumber ("--gain", -20.0, 20.0, gain) || ! readNumber ("--pitch", -kMaxToolPitch, kMaxToolPitch, pitch) || ! readNumber ("--reverb", 0.0, 1.0, reverb)
+            || ! readNumber ("--semitones", -kMaxToolSemitones, kMaxToolSemitones, semitones) || ! readNumber ("--formant", kMinToolFormant, kMaxToolFormant, formant)
+            || ! readNumber ("--talkbox-hz", 40.0, 1000.0, fixedHz) || ! readNumber ("--talkbox-voicing-floor", 0.0, 1.0, voicingFloor))
+            return 2;
+
+        if (! juce::approximatelyEqual (std::floor (pitch), pitch))
+        {
+            printError ("--pitch must be an integer number of semitones: " + parsed.options["--pitch"]);
+            return 2;
+        }
+
+        settings.gainDb = (float) gain;
+        settings.pitch = (int) pitch;
+        settings.reverb = (float) reverb;
+        settings.talkboxFixedHz = (float) fixedHz;
+        settings.talkboxVoicingFloor = (float) voicingFloor;
+
+        if (parsed.options.containsKey ("--semitones"))
+            settings.semitonesOverride = (float) semitones;
+
+        if (parsed.options.containsKey ("--formant"))
+            settings.formantOverride = (float) formant;
+    }
+
+    if (parsed.options.containsKey ("--talkbox-carrier"))
+    {
+        const auto v = parsed.options["--talkbox-carrier"].toLowerCase();
+
+        if (v != "follow" && v != "fixed")
+        {
+            printError ("--talkbox-carrier must be follow or fixed");
+            return 2;
+        }
+
+        settings.talkboxCarrier = v == "fixed" ? TalkboxCarrier::Fixed : TalkboxCarrier::Follow;
+    }
+
+    if (parsed.options.containsKey ("--talkbox-chord"))
+    {
+        // 半音のコンマ区切り（1〜6個）。例: 0,4,7（長三和音）。
+        juce::StringArray items;
+        items.addTokens (parsed.options["--talkbox-chord"], ",", "");
+        std::vector<float> chord;
+
+        for (const auto& item : items)
+        {
+            double v = 0.0;
+
+            if (! parseRange (item, -kMaxToolSemitones, kMaxToolSemitones, v))
+            {
+                printError ("--talkbox-chord must be 1 to 6 semitone offsets from -48 to 48 separated by commas (e.g. 0,4,7): " + parsed.options["--talkbox-chord"]);
+                return 2;
+            }
+
+            chord.push_back ((float) v);
+        }
+
+        if (chord.empty() || chord.size() > 6)
+        {
+            printError ("--talkbox-chord must be 1 to 6 semitone offsets from -48 to 48 separated by commas (e.g. 0,4,7): " + parsed.options["--talkbox-chord"]);
+            return 2;
+        }
+
+        settings.talkboxChord = chord;
+    }
+
+    // 上書き・実験用のキャリアは、ピッチの効果だけ（またはトークボックス）のプリセットでだけ意味を持つ。無視されて取り違えないよう、他は拒否する。
+    // （ケロケロの効果はEffect::Noneだが補正量をEngineが計算するため、試聴用の経路では再現できない。プリセットのIDで判定する）
+    const bool overridable = settings.preset == Preset::Normal || settings.preset == Preset::Helium || settings.preset == Preset::Minion || settings.preset == Preset::Giant
+                             || settings.preset == Preset::Talkbox;
+
+    if ((settings.semitonesOverride.has_value() || settings.formantOverride.has_value()) && ! overridable)
+    {
+        printError ("--semitones and --formant can be used with the normal, helium, minion, giant and talkbox presets only");
+        return 2;
+    }
+
+    if ((parsed.options.containsKey ("--talkbox-carrier") || parsed.options.containsKey ("--talkbox-hz") || parsed.options.containsKey ("--talkbox-chord")
+         || parsed.options.containsKey ("--talkbox-voicing-floor"))
+        && settings.preset != Preset::Talkbox)
+    {
+        printError ("--talkbox-carrier, --talkbox-hz, --talkbox-chord and --talkbox-voicing-floor can be used with --preset talkbox only");
+        return 2;
+    }
+
     Audio in;
 
     if (! readWav (inFile, in, error))
@@ -1312,9 +1567,35 @@ int runProcessWav (const juce::StringArray& args)
             out << " [" << (b.on ? "" : "off ") << eqTypeId (b.type) << " " << juce::String (b.hz, 0) << "Hz " << juce::String (b.gainDb, 1) << "dB Q"
                 << juce::String (b.q, 2) << "]";
 
-    out << "\nengine: preset normal, gain 0 dB, block " << juce::String (result.blocks.empty() ? 0 : result.blocks.front().blockSamples) << " samples\n";
+    out << "\nengine: preset " << kPresets[(size_t) settings.preset].id << ", gain " << juce::String (settings.gainDb, 1) << " dB, layer1 pitch " << settings.pitch
+        << ", reverb " << juce::String (settings.reverb, 2);
+
+    if (settings.semitonesOverride.has_value() || settings.formantOverride.has_value())
+        out << ", preset values overridden: semitones "
+            << juce::String (settings.semitonesOverride.value_or (kPresets[(size_t) settings.preset].semitones), 2) << ", formant "
+            << juce::String (settings.formantOverride.value_or (kPresets[(size_t) settings.preset].formant), 2);
+
+    if (settings.preset == Preset::Talkbox
+        && (settings.talkboxCarrier == TalkboxCarrier::Fixed || settings.talkboxChord.size() != 1 || ! juce::approximatelyEqual (settings.talkboxChord[0], 0.0f)
+            || settings.talkboxVoicingFloor > 0.0f))
+    {
+        out << ", talkbox carrier " << (settings.talkboxCarrier == TalkboxCarrier::Fixed ? "fixed " + juce::String (settings.talkboxFixedHz, 1) + " Hz" : juce::String ("follow f0"))
+            << " chord";
+
+        for (const auto c : settings.talkboxChord)
+            out << " " << juce::String (c, 1);
+
+        out << ", voicing floor " << juce::String (settings.talkboxVoicingFloor, 2);
+    }
+
+    out << ", block " << juce::String (result.blocks.empty() ? 0 : result.blocks.front().blockSamples) << " samples\n";
     out << "noise reduction latency: " << result.latencySamples << " samples (" << juce::String (1000.0 * result.latencySamples / in.sampleRate, 2)
         << " ms); removed from the output (the output is aligned with the input)\n";
+
+    if (result.shifterLatencySamples > 0)
+        out << "pitch shifter latency: " << result.shifterLatencySamples << " samples (" << juce::String (1000.0 * result.shifterLatencySamples / in.sampleRate, 2)
+            << " ms); also removed from the output\n";
+
     out << "error flags: " << (int) result.errorFlags << ", output FIFO underflows: " << result.underflowCount << "\n";
 
     // 区間ごとのゲート・インパクト抑制の統計（入力の区間。区間ファイルがなければ入力を自動判定）。

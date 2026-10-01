@@ -4190,6 +4190,177 @@ public:
             vc::rectool::applyEqPreset (eq, vc::rectool::EqPreset::Off);
             expect (! eq.eqEnabled, "off");
         }
+
+        // T-018: 試聴サンプル作成用の項目（プリセット・層1・移調/フォルマントの上書き・トークボックスの実験）。製品のプリセット表・範囲は変えない。
+        beginTest ("M1k: audition options (preset, layer 1, semitone/formant override beyond the product range, talkbox carrier) and their validation");
+        {
+            const int len = 3 * 48000;
+            auto vowel = [&] (double f0)
+            {
+                auto v = vc::test::makeSyntheticVowel (f0, fs, len, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.1f);
+                vc::test::addNoiseFloor (v, -60.0f, 444);
+                return v;
+            };
+
+            vc::rectool::ProcessSettings base;
+            base.nrEnabled = false;
+            const auto in150 = vowel (150.0);
+
+            // 既定は従来どおり（ノーマル・ゲイン0・ピッチ0・リバーブ0・上書きなし）。
+            expect (base.preset == vc::Preset::Normal && base.pitch == 0 && ! base.semitonesOverride.has_value() && ! base.formantOverride.has_value()
+                        && base.talkboxCarrier == vc::rectool::TalkboxCarrier::Follow && base.talkboxChord.size() == 1,
+                    "defaults changed");
+
+            // プリセット表の値を上書きで同じにすると、プリセットを選んだ場合（Engine）と同じ音になる（試聴用の経路がEngineの層1・シフターと同じ並びであることの確認）。
+            {
+                auto viaPreset = base;
+                viaPreset.preset = vc::Preset::Helium;
+                auto viaOverride = base;
+                viaOverride.preset = vc::Preset::Normal;
+                viaOverride.semitonesOverride = 0.0f;
+                viaOverride.formantOverride = 1.6f;
+                const auto a = vc::rectool::processAudio (in150, fs, viaPreset);
+                const auto b = vc::rectool::processAudio (in150, fs, viaOverride);
+                expectEquals (a.shifterLatencySamples, (int) std::lround (0.12 * fs));
+                expectEquals (b.shifterLatencySamples, a.shifterLatencySamples);
+                expectEquals ((int) a.output.size(), len);
+                double worst = 0.0;
+
+                for (int i = 0; i < len; ++i)
+                    worst = std::max (worst, (double) std::abs (a.output[(size_t) i] - b.output[(size_t) i]));
+
+                expect (worst < 1.0e-5, "override path differs from the preset path by " + juce::String (worst, 8));
+                expect (vc::test::peakAbs (a.output.data(), len) > 0.05, "helium output is silent");
+            }
+
+            // 層1のゲイン・ピッチ・リバーブ: ゲイン+6dBでRMSが約2倍。層1ピッチは製品の範囲（±12）を超えてよい（+24で220Hz → 880Hz）。
+            {
+                auto g = base;
+                g.gainDb = 6.0f;
+                const double ratio = vc::test::rms (vc::rectool::processAudio (in150, fs, g).output.data(), len) / vc::test::rms (in150.data(), len);
+                expectWithinAbsoluteError (20.0 * std::log10 (ratio), 6.0, 0.2);
+
+                auto up = base;
+                up.pitch = 24;
+                const auto sine = vc::test::makeSine (220.0, fs, len, 0.3f);
+                const auto out = vc::rectool::processAudio (sine, fs, up);
+                const double hz = vc::test::findFftPeakHz (out.output.data() + len / 2, len / 2, fs);
+                expect (std::abs(hz - 880.0) / 880.0 < 0.02, "layer 1 pitch +24: " + juce::String (hz, 1) + " Hz, expected 880");
+
+                auto rv = base;
+                rv.reverb = 1.0f;
+                const auto wet = vc::rectool::processAudio (in150, fs, rv).output;
+                double diff = 0.0;
+
+                for (int i = 0; i < len; ++i)
+                    diff = std::max (diff, (double) std::abs (wet[(size_t) i] - in150[(size_t) i]));
+
+                expect (diff > 0.005, "reverb 100% did not change the signal");
+            }
+
+            // 移調量の上書き（製品の範囲外の+24も可）。formantだけの上書きではプリセット表の移調量（ミニオンの+8）を使う。
+            {
+                auto o = base;
+                o.preset = vc::Preset::Minion;
+                o.semitonesOverride = 24.0f;
+                o.formantOverride = 1.0f;
+                const auto sine = vc::test::makeSine (220.0, fs, len, 0.3f);
+                const double hz = vc::test::findFftPeakHz (vc::rectool::processAudio (sine, fs, o).output.data() + len / 2, len / 2, fs);
+                expect (std::abs (hz - 880.0) / 880.0 < 0.02, "semitones override +24: " + juce::String (hz, 1) + " Hz, expected 880");
+
+                auto f = base;
+                f.preset = vc::Preset::Minion;
+                f.formantOverride = 1.0f; // 移調は表の+8のまま
+                const double hz8 = vc::test::findFftPeakHz (vc::rectool::processAudio (sine, fs, f).output.data() + len / 2, len / 2, fs);
+                expect (std::abs (hz8 - 220.0 * std::pow (2.0, 8.0 / 12.0)) / hz8 < 0.02, "formant-only override changed the preset's semitones: " + juce::String (hz8, 1) + " Hz");
+            }
+
+            // トークボックスの実験: 製品（follow）はキャリアが検出したf0に追従して出力の基本周波数が入力と同じになる。fixedは入力のf0によらず固定の高さになる。
+            {
+                auto tb = base;
+                tb.preset = vc::Preset::Talkbox;
+                const int half = len / 2;
+                const double followHz = vc::test::measureFundamentalHz (vc::rectool::processAudio (in150, fs, tb).output.data() + half, half, fs, 150.0);
+                expect (std::abs (followHz - 150.0) / 150.0 < 0.03, "follow carrier: " + juce::String (followHz, 1) + " Hz, expected ~150");
+
+                tb.talkboxCarrier = vc::rectool::TalkboxCarrier::Fixed;
+                tb.talkboxFixedHz = 110.0f;
+
+                for (const double f0 : { 150.0, 200.0 })
+                {
+                    const auto r = vc::rectool::processAudio (vowel (f0), fs, tb);
+                    const double hz = vc::test::measureFundamentalHz (r.output.data() + half, half, fs, 110.0);
+                    expect (std::abs (hz - 110.0) / 110.0 < 0.02, "fixed carrier (input f0 " + juce::String (f0, 0) + " Hz): " + juce::String (hz, 1) + " Hz, expected 110");
+                    expectEquals ((int) r.errorFlags, 0);
+                    expect (vc::test::allFinite (r.output.data(), len), "non-finite output");
+                }
+
+                // 和音（0,4,7）: 固定110Hzの長三和音。単音（110Hz）の出力に比べて、長3度の138.6Hzと完全5度の164.8Hz付近のエネルギーが増える。
+                auto single = tb;
+                auto chord = tb;
+                chord.talkboxChord = { 0.0f, 4.0f, 7.0f };
+                const auto s1 = vc::rectool::processAudio (in150, fs, single).output;
+                const auto s3 = vc::rectool::processAudio (in150, fs, chord).output;
+                const auto m1 = vc::test::averagedMagnitudeSpectrum (s1.data() + half, half);
+                const auto m3 = vc::test::averagedMagnitudeSpectrum (s3.data() + half, half);
+                auto at = [&] (const std::vector<double>& m, double hz) { return vc::test::findPeakNear (m, fs, 1 << 14, hz, 0.02).magLinear; };
+                expect (at (m3, 138.59) > 3.0 * at (m1, 138.59) && at (m3, 164.81) > 3.0 * at (m1, 164.81), "chord partials missing: "
+                        + juce::String (at (m3, 138.59) / at (m1, 138.59), 2) + " / " + juce::String (at (m3, 164.81) / at (m1, 164.81), 2));
+                expectEquals ((int) vc::rectool::processAudio (in150, fs, chord).errorFlags, 0);
+
+                // 有声度の下限: 0.8にすると、検出器が無声寄りに判定するフレームでも鋸波が主になる（キャリアの周期性が上がる）。無音入力でも非有限値は出ない。
+                auto floored = tb;
+                floored.talkboxVoicingFloor = 0.8f;
+                const auto silent = vc::rectool::processAudio (std::vector<float> ((size_t) len, 0.0f), fs, floored);
+                expect (vc::test::allFinite (silent.output.data(), len) && silent.errorFlags == 0, "silent input");
+            }
+
+            // 引数の検証（不正値は終了コード2）。正常な指定は0で、出力は入力と同じ長さ。
+            {
+                const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("vc_m1h", "");
+                expect (dir.createDirectory().wasOk(), "temp dir");
+                const auto inFile = dir.getChildFile ("in.wav");
+                const auto outFile = dir.getChildFile ("out.wav");
+                juce::String error;
+                expect (vc::rectool::writeWav16 (inFile, std::vector<float> (in150.begin(), in150.begin() + 48000), fs, error), error);
+                const juce::StringArray io { inFile.getFullPathName(), outFile.getFullPathName(), "--nr", "off" };
+
+                auto run = [&] (std::initializer_list<const char*> extra)
+                {
+                    juce::StringArray a (io);
+
+                    for (const auto* e : extra)
+                        a.add (e);
+
+                    return vc::rectool::runProcessWav (a);
+                };
+
+                expectEquals (run ({ "--preset", "minion", "--pitch", "24", "--semitones", "14", "--formant", "1.4", "--gain", "3", "--reverb", "0.2" }), 0);
+                vc::rectool::Audio back;
+                expect (vc::rectool::readWav (outFile, back, error), error);
+                expectEquals ((int) back.samples.size(), 48000);
+                expectEquals (run ({ "--preset", "talkbox", "--talkbox-carrier", "fixed", "--talkbox-hz", "110", "--talkbox-chord", "0,4,7", "--talkbox-voicing-floor", "0.8" }), 0);
+
+                const std::vector<std::vector<const char*>> bad {
+                    { "--preset", "bogus" }, { "--preset", "" }, { "--pitch", "1.5" }, { "--pitch", "37" }, { "--pitch", "abc" }, { "--gain", "21" }, { "--reverb", "1.5" },
+                    { "--semitones", "49" }, { "--semitones", "x" }, { "--formant", "0.2" }, { "--formant", "4.5" }, { "--talkbox-hz", "30", "--preset", "talkbox" },
+                    { "--talkbox-carrier", "sideways", "--preset", "talkbox" }, { "--talkbox-chord", "0,4,", "--preset", "talkbox" }, { "--talkbox-chord", "0,1,2,3,4,5,6", "--preset", "talkbox" },
+                    { "--talkbox-chord", "0,99", "--preset", "talkbox" }, { "--talkbox-voicing-floor", "2", "--preset", "talkbox" },
+                    { "--preset", "echo", "--semitones", "3" }, { "--preset", "kerokero", "--formant", "1.2" }, { "--preset", "helium", "--talkbox-hz", "110" }, { "--talkbox-chord", "0,4,7" } };
+
+                for (const auto& b : bad)
+                {
+                    juce::StringArray a (io);
+
+                    for (const auto* e : b)
+                        a.add (e);
+
+                    expectEquals (vc::rectool::runProcessWav (a), 2, "should be rejected: " + a.joinIntoString (" "));
+                }
+
+                dir.deleteRecursively();
+            }
+        }
     }
 };
 
