@@ -290,6 +290,8 @@ private:
 //   バンドの有効/無効: そのバンドのmix。
 //   タイプの変更: mixを0へ下げる → （素通しになったグループの先頭で）タイプ・係数を切り替え、フィルタ状態をリセット → mixを1へ戻す。
 // 周波数・ゲイン・Qは50msの補間（周波数・Qは乗算的、ゲインはdB）。周波数の実効上限は0.45×出力レート。
+// 出力ゲイン（T-016、D-026）: 5バンドの後で掛け、EQ全体のクロスフェードの内側に入る（OFFでは掛からず、OFFへのフェードでは
+// 原音との混合の中で一緒に消える）。dBのまま50msで補間し、1サンプルごとに線形ゲインへ直す（クリックを出さない。ブロックの区切りに依存しない）。
 // 1バンドのバイクワッド係数（JUCEのIIR::ArrayCoefficients。並びはb0 b1 b2 a0 a1 a2）。周波数は0.45×fsで頭打ちにする。
 // Equalizerの係数更新（音声スレッド。確保しない）と、マイク処理ウィンドウの周波数特性グラフ（UI）が同じ関数を使い、表示と音がずれないようにする。
 std::array<float, 6> eqBandCoefficients (EqType type, double sampleRate, float hz, float q, float gainDb) noexcept;
@@ -306,8 +308,8 @@ public:
     // メッセージスレッドのみ。デバイス停止中に呼ぶ。Coefficientsの作成（確保）はここだけ。
     void prepare (double sampleRate);
 
-    // 音声スレッドのみ。各ブロックの先頭で呼ぶ。範囲外の値は端へ丸め、非有限値は初期値（kEqDefaults）にする。
-    void setTarget (bool run, const std::array<EqBandSettings, kEqBands>& settings) noexcept;
+    // 音声スレッドのみ。各ブロックの先頭で呼ぶ。範囲外の値は端へ丸め、非有限値は初期値（kEqDefaults・kEqOutputGainDefaultDb）にする。
+    void setTarget (bool run, const std::array<EqBandSettings, kEqBands>& settings, float outputGainDb = 0.0f) noexcept; // 出力ゲインの省略は0dB（Equalizer単体の用途。アプリの既定kEqOutputGainDefaultDbはEngineが渡す）
 
     // 音声スレッドのみ。その場で処理する。OFFのフェード完了後（Resting）は何もしない（bufに触れない）。
     void process (float* buf, int n) noexcept;
@@ -346,6 +348,7 @@ private:
     void updateCoefficients (Band& b) noexcept;
     void processBand (Band& b, float* seg, int len) noexcept;
     void mixGlobal (float* seg, const float* dry, int len) noexcept;
+    void applyOutputGain (float* seg, int len) noexcept;
 
     State state = State::Resting;
     double gain = 0.0; // 0=素通し, 1=EQ。反転しても現在値から続けて動く。
@@ -358,6 +361,7 @@ private:
     bool coefficientsStale = true;
 
     std::array<Band, kEqBands> bands;
+    juce::SmoothedValue<float> outputGainDb { 0.0f }; // 出力ゲイン[dB]。50msでdB補間
 };
 
 } // namespace vc

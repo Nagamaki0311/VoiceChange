@@ -66,8 +66,8 @@ constexpr std::array<PresetSpec, 8> kPresets { {
 } };
 
 // マイク処理（ノイズ除去）の背景ノイズの初期値。AtomicParamsの初期値と、Engineが非有限値を読んだときの代替値。
-constexpr float kNrBackgroundDefault = 0.7f;
-constexpr float kNrImpactDefault = 0.0f;
+constexpr float kNrBackgroundDefault = 0.65f;
+constexpr float kNrImpactDefault = 0.15f;
 
 // ===== SECTION: EQ（T-012） =====
 // マイク処理のEQ（5バンド）。docs/spec.md「マイク処理: EQ」、docs/decisions.md D-024、docs/plan.md 8.2節参照。
@@ -99,14 +99,56 @@ constexpr float kEqMinHz = 20.0f, kEqMaxHz = 20000.0f;
 constexpr float kEqMaxGainDb = 18.0f;
 constexpr float kEqMinQ = 0.10f, kEqMaxQ = 10.0f;
 
-// 初期値（仮）。spec.mdの初期値のとおり。T-015でSonarの設定を再現した値に置き換える。
-constexpr std::array<EqBandSettings, kEqBands> kEqDefaults { {
-    { true, EqType::LowShelf,    100.0f, 0.0f, 0.71f },
-    { true, EqType::Peak,        250.0f, 0.0f, 0.71f },
-    { true, EqType::Peak,       1000.0f, 0.0f, 0.71f },
-    { true, EqType::Peak,       3000.0f, 0.0f, 0.71f },
-    { true, EqType::HighShelf,  8000.0f, 0.0f, 0.71f },
+// EQ出力ゲイン（5バンドの後、EQ全体のクロスフェードの内側で掛けるdB）。docs/spec.md「マイク処理: EQ」、D-026。
+// 既定値（kEqOutputGainDefaultDb）はA2の出力ゲイン。バンドの初期値もA2なので、初回にEQをONにしただけでA2になる（D-026）。
+// キーがない設定ファイルと非有限値の代替値でもある。
+constexpr float kEqMaxOutputGainDb = 12.0f;
+
+// EQプリセット（docs/design.md 10.3節「EQプリセットボタン」）。表示名・説明・値の単一の出典（名前を変えるときはここだけ直す）。
+// UI表示名と内部識別子の対照表: EQなし = EqPresetId::None（値を持たない。EQをOFFにするだけ）/ A2・A3 = kEqPresets / カスタム = EqPresetId::Custom
+// （どのプリセットとも一致しない状態。選択はできず、導出だけで決まる）。選択状態は保存せず、deriveEqPresetで毎回導出する。
+// A2 = 自然なクリアさ、A3 = 声の輪郭がはっきり。出力ゲインは声量を下げないための補正（D-026。値の根拠はdocs/progress.md）。
+enum class EqPresetId
+{
+    None = 0,
+    A2,
+    A3,
+    Custom
+};
+
+struct EqPresetSpec
+{
+    const char* name;
+    const char* description; // ツールチップとスクリーンリーダーの説明の前半（後半は呼び出し側で共通）
+    std::array<EqBandSettings, kEqBands> bands;
+    float outputGainDb;
+};
+
+constexpr const char* kEqNoneName = "EQなし";
+constexpr const char* kEqNoneDescription = "EQをOFFにします。バンドと出力ゲインの値はそのまま残ります";
+constexpr const char* kEqCustomName = "カスタム";
+
+// 添字0がA2、1がA3（EqPresetIdの値 - 1）。
+constexpr std::array<EqPresetSpec, 2> kEqPresets { {
+    { "A2", "自然なクリアさ",
+      { { { true, EqType::LowShelf,    26.0f, -18.0f, 0.48f },
+          { true, EqType::Peak,       216.0f,   1.0f, 0.75f },
+          { true, EqType::Peak,       450.0f,  -2.5f, 1.00f },
+          { true, EqType::Peak,      2500.0f,   4.0f, 0.70f },
+          { true, EqType::HighShelf, 5741.0f,   2.0f, 1.00f } } },
+      2.0f },
+    { "A3", "声の輪郭がはっきりする",
+      { { { true, EqType::LowShelf,    26.0f, -18.0f, 0.48f },
+          { true, EqType::Peak,       216.0f,   0.0f, 0.75f },
+          { true, EqType::Peak,       400.0f,  -3.0f, 1.00f },
+          { true, EqType::Peak,      3000.0f,   5.0f, 0.70f },
+          { true, EqType::HighShelf, 5000.0f,   4.0f, 1.00f } } },
+      2.0f },
 } };
+
+// 初期値はA2のバンドと出力ゲイン（T-015: Sonarの設定を再現した値の候補。値を二重に持たない）。
+constexpr std::array<EqBandSettings, kEqBands> kEqDefaults = kEqPresets[0].bands;
+constexpr float kEqOutputGainDefaultDb = kEqPresets[0].outputGainDb;
 
 // int値をEqTypeへ。範囲外ならfallback。
 inline EqType eqTypeFromInt (int value, EqType fallback) noexcept
@@ -177,6 +219,14 @@ struct EqBandAtomic
     }
 };
 
+// EQの設定一式（ON/OFF・5バンド・出力ゲイン）。プリセットの適用と「元に戻す」の記録に使う。
+struct EqState
+{
+    bool on = false;
+    std::array<EqBandSettings, kEqBands> bands = kEqDefaults;
+    float outputGainDb = kEqOutputGainDefaultDb;
+};
+
 // UIスレッドと音声スレッド間で受け渡す層1パラメータ。すべてatomicのみ（音声スレッドはロックしない）。
 struct AtomicParams
 {
@@ -200,6 +250,29 @@ struct AtomicParams
     // マイク処理（EQ）。同じく全体ON/OFFの対象外（D-020）。docs/spec.md「マイク処理: EQ」。
     std::atomic<bool> eqEnabled { false };
     std::array<EqBandAtomic, kEqBands> eqBands;               // 初期値はkEqDefaults（コンストラクタで設定）
+    std::atomic<float> eqOutputGainDb { kEqOutputGainDefaultDb }; // EQ出力ゲイン -12〜+12dB（EQがOFFのときはかからない）
+
+    // UIスレッド（メッセージスレッド）のみ。EQの現在値の読み書き。丸めはしない（書き込み側が丸め済み）。
+    EqState loadEq() const noexcept
+    {
+        EqState e;
+        e.on = eqEnabled.load (std::memory_order_relaxed);
+
+        for (size_t i = 0; i < eqBands.size(); ++i)
+            e.bands[i] = eqBands[i].load (kEqDefaults[i]);
+
+        e.outputGainDb = eqOutputGainDb.load (std::memory_order_relaxed);
+        return e;
+    }
+
+    void storeEq (const EqState& e) noexcept
+    {
+        for (size_t i = 0; i < eqBands.size(); ++i)
+            eqBands[i].store (e.bands[i]);
+
+        eqOutputGainDb.store (e.outputGainDb, std::memory_order_relaxed);
+        eqEnabled.store (e.on, std::memory_order_relaxed);
+    }
 };
 
 static_assert (std::atomic<float>::is_always_lock_free);
@@ -236,6 +309,7 @@ struct SavedSettings
     float nrImpact = kNrImpactDefault;
     bool eqEnabled = false;
     std::array<EqBandSettings, kEqBands> eqBands = kEqDefaults;
+    float eqOutputGainDb = kEqOutputGainDefaultDb;
 };
 
 // プリセットのUI表示名(design.md、対照表は本ファイル冒頭のPreset enum定義直上のコメントを正とする)。
@@ -300,11 +374,16 @@ inline SavedSettings sanitize (SavedSettings s) noexcept
         s.eqBands[i].type = eqTypeFromInt ((int) s.eqBands[i].type, kEqDefaults[i].type);
     }
 
+    if (! std::isfinite (s.eqOutputGainDb))
+        s.eqOutputGainDb = kEqOutputGainDefaultDb;
+
+    s.eqOutputGainDb = juce::jlimit (-kEqMaxOutputGainDb, kEqMaxOutputGainDb, s.eqOutputGainDb);
+
     return s;
 }
 
 // 設定ファイル（PropertiesFile。PropertySetはjuce_coreにあるため、テストからも直接使える）との読み書き。
-// キー: nrEnabled / nrBackground / nrImpact / eqEnabled / eqBand{1..5}{On,Type,Hz,GainDb,Q}（plan.md 8.3 T-013）。
+// キー: nrEnabled / nrBackground / nrImpact / eqEnabled / eqOutputGainDb / eqBand{1..5}{On,Type,Hz,GainDb,Q}（plan.md 8.3 T-013・T-016）。
 inline juce::String eqBandKey (int band, const char* item)
 {
     return "eqBand" + juce::String (band + 1) + item;
@@ -341,6 +420,7 @@ inline SavedSettings loadSettings (const juce::PropertySet& props)
     s.nrBackground = readClampedFloat (props, "nrBackground", s.nrBackground, 0.0f, 1.0f);
     s.nrImpact = readClampedFloat (props, "nrImpact", s.nrImpact, 0.0f, 1.0f);
     s.eqEnabled = props.getBoolValue ("eqEnabled", s.eqEnabled);
+    s.eqOutputGainDb = readClampedFloat (props, "eqOutputGainDb", s.eqOutputGainDb, -kEqMaxOutputGainDb, kEqMaxOutputGainDb);
 
     for (int i = 0; i < kEqBands; ++i)
     {
@@ -355,13 +435,14 @@ inline SavedSettings loadSettings (const juce::PropertySet& props)
     return sanitize (s); // 範囲外の値を範囲の端へ丸める
 }
 
-// マイク処理の項目（ノイズ除去3項目＋EQ 1＋5×5項目）をすべて書く。値が変わらないキーは、PropertySetが変更扱いにしない。
+// マイク処理の項目（ノイズ除去3項目＋EQ 2＋5×5項目）をすべて書く。値が変わらないキーは、PropertySetが変更扱いにしない。
 inline void storeMicSettings (juce::PropertySet& props, const SavedSettings& s)
 {
     props.setValue ("nrEnabled", s.nrEnabled);
     props.setValue ("nrBackground", (double) s.nrBackground);
     props.setValue ("nrImpact", (double) s.nrImpact);
     props.setValue ("eqEnabled", s.eqEnabled);
+    props.setValue ("eqOutputGainDb", (double) s.eqOutputGainDb);
 
     for (int i = 0; i < kEqBands; ++i)
     {
@@ -381,10 +462,11 @@ enum class EqField
 {
     Hz,
     GainDb,
-    Q
+    Q,
+    OutputGainDb // EQ出力ゲイン。表示・刻みはGainDbと同じで、範囲だけ±12dB
 };
 
-// 表示形式: 周波数は整数のHz（`1200 Hz`）、ゲインは小数1桁で符号付き（`+3.0 dB` / `0.0 dB` / `-4.5 dB`）、Qは小数2桁（`0.71`）。
+// 表示形式: 周波数は整数のHz（`1200 Hz`）、ゲイン（出力ゲインを含む）は小数1桁で符号付き（`+3.0 dB` / `0.0 dB` / `-4.5 dB`）、Qは小数2桁（`0.71`）。
 inline juce::String formatEqValue (EqField field, float value)
 {
     switch (field)
@@ -393,6 +475,7 @@ inline juce::String formatEqValue (EqField field, float value)
             return juce::String ((int) std::lround (value)) + " Hz";
 
         case EqField::GainDb:
+        case EqField::OutputGainDb:
         {
             const double r = std::round ((double) value * 10.0) / 10.0;
             return (r > 0.0 ? juce::String ("+") : juce::String()) + juce::String (std::abs (r) < 0.05 ? 0.0 : r, 1) + " dB"; // -0.0を出さない
@@ -413,6 +496,8 @@ inline float roundEqValue (EqField field, double value) noexcept
         case EqField::Hz:     return juce::jlimit (kEqMinHz, kEqMaxHz, (float) std::round (value));
         case EqField::GainDb: return juce::jlimit (-kEqMaxGainDb, kEqMaxGainDb, (float) (std::round (value * 10.0) / 10.0));
         case EqField::Q:      return juce::jlimit (kEqMinQ, kEqMaxQ, (float) (std::round (value * 100.0) / 100.0));
+        case EqField::OutputGainDb:
+            return juce::jlimit (-kEqMaxOutputGainDb, kEqMaxOutputGainDb, (float) (std::round (value * 10.0) / 10.0));
     }
 
     return (float) value;
@@ -481,12 +566,12 @@ inline std::optional<float> parseEqInput (EqField field, const juce::String& tex
 }
 
 // ホイール・矢印キー1回ぶんの変更。direction > 0で増やす。周波数とQは×2^(±1/12)（丸めた結果が変わらなければ最小刻み）、
-// ゲインは±0.5dB。範囲の端では止まる。
+// ゲイン（出力ゲインを含む）は±0.5dB。範囲の端では止まる。
 inline float stepEqValue (EqField field, float current, int direction) noexcept
 {
     const double sign = direction > 0 ? 1.0 : -1.0;
 
-    if (field == EqField::GainDb)
+    if (field == EqField::GainDb || field == EqField::OutputGainDb)
         return roundEqValue (field, (double) current + sign * 0.5);
 
     const double quantum = field == EqField::Hz ? 1.0 : 0.01;
@@ -499,5 +584,112 @@ inline float stepEqValue (EqField field, float current, int direction) noexcept
 
     return roundEqValue (field, next);
 }
+
+// ===== SECTION: EQプリセットの導出と取り消し（T-016） =====
+// 表示中のプリセットは保存せず、EQのON/OFFと値から毎回導出する（design.md 10.3節）。比較は、有効/無効とタイプが完全一致、
+// 周波数・ゲイン・Q・出力ゲインは表示の精度（roundEqValue）で一致。設定ファイルを経由した値の誤差で「カスタム」にならないようにする。
+inline bool eqBandsMatch (const EqBandSettings& a, const EqBandSettings& b) noexcept
+{
+    return a.on == b.on && a.type == b.type
+           && juce::exactlyEqual (roundEqValue (EqField::Hz, a.hz), roundEqValue (EqField::Hz, b.hz))
+           && juce::exactlyEqual (roundEqValue (EqField::GainDb, a.gainDb), roundEqValue (EqField::GainDb, b.gainDb))
+           && juce::exactlyEqual (roundEqValue (EqField::Q, a.q), roundEqValue (EqField::Q, b.q));
+}
+
+inline bool eqMatchesPreset (const EqState& e, const EqPresetSpec& preset) noexcept
+{
+    if (! juce::exactlyEqual (roundEqValue (EqField::OutputGainDb, e.outputGainDb), roundEqValue (EqField::OutputGainDb, preset.outputGainDb)))
+        return false;
+
+    for (size_t i = 0; i < e.bands.size(); ++i)
+        if (! eqBandsMatch (e.bands[i], preset.bands[i]))
+            return false;
+
+    return true;
+}
+
+// EQがOFFなら何を設定していてもNone。ONでA2・A3と一致すればその名前（両方に一致する場合はA2が先。テストで防ぐ）、どれとも不一致ならCustom。
+inline EqPresetId deriveEqPreset (const EqState& e) noexcept
+{
+    if (! e.on)
+        return EqPresetId::None;
+
+    for (size_t i = 0; i < kEqPresets.size(); ++i)
+        if (eqMatchesPreset (e, kEqPresets[i]))
+            return static_cast<EqPresetId> (i + 1);
+
+    return EqPresetId::Custom;
+}
+
+// 「EQ OFF」「EQ A2」「EQ A3」「EQ カスタム」（メインのマイク処理ボタンのツールチップと説明。OFFは「EQなし」でなく「EQ OFF」）。
+inline juce::String eqStatusText (EqPresetId id)
+{
+    switch (id)
+    {
+        case EqPresetId::None:   return "EQ OFF";
+        case EqPresetId::Custom: return juce::String ("EQ ") + juce::String::fromUTF8 (kEqCustomName);
+        case EqPresetId::A2:
+        case EqPresetId::A3:     return juce::String ("EQ ") + kEqPresets[(size_t) id - 1].name;
+    }
+
+    return "EQ OFF";
+}
+
+// プリセットを押した結果。EQなしはEQをOFFにするだけ（値と出力ゲインは変えない）。A2・A3は5バンドと出力ゲインを書き換えてONにする。
+// 押した結果が今の表示と同じ（EQなし: すでにOFF、A2・A3: すでにONで一致）ならnullopt（何もしない。取り消しの記録もしない）。
+inline std::optional<EqState> eqStateAfterPreset (EqPresetId id, const EqState& current)
+{
+    if (id == EqPresetId::Custom || deriveEqPreset (current) == id)
+        return std::nullopt;
+
+    EqState next = current;
+    next.on = id != EqPresetId::None;
+
+    if (id != EqPresetId::None)
+    {
+        const auto& preset = kEqPresets[(size_t) id - 1];
+        next.bands = preset.bands;
+        next.outputGainDb = preset.outputGainDb;
+    }
+
+    return next;
+}
+
+// 「元に戻す」の記録。戻り先は「プリセットを選び始める前の状態」で、使える間に続けて別のプリセットを押しても記録は最初のまま。
+// バンドの値・出力ゲインを変えたときとウィンドウを非表示にしたときはclear()する。EQスイッチの切り替えではclear()しない（UI側の規約）。
+class EqPresetUndo
+{
+public:
+    bool isAvailable() const noexcept { return available; }
+    void clear() noexcept { available = false; }
+
+    // プリセットを押す。変更が必要ならその結果を返す（呼び出し側が書き込む）。未記録なら押す前の状態を記録して有効にする。
+    std::optional<EqState> press (EqPresetId id, const EqState& current)
+    {
+        const auto next = eqStateAfterPreset (id, current);
+
+        if (next.has_value() && ! available)
+        {
+            saved = current;
+            available = true;
+        }
+
+        return next;
+    }
+
+    // 「元に戻す」。記録した状態を返して無効にする。無効のときはnullopt。
+    std::optional<EqState> undo() noexcept
+    {
+        if (! available)
+            return std::nullopt;
+
+        available = false;
+        return saved;
+    }
+
+private:
+    bool available = false;
+    EqState saved;
+};
 
 } // namespace vc

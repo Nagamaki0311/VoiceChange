@@ -129,7 +129,7 @@ CompareResult compareRecordings (const std::vector<float>& raw, const std::vecto
 juce::String formatReport (const CompareResult& result);
 
 // ===== SECTION: 処理 =====
-// EQのプリセット（--eqの値）。値はdocs/plan.md T-014。T-016でParams.hへ正式に置く。Sonarはユーザーの現在のSonarのEQを5バンドで近似した値（比較用）。
+// EQのプリセット（--eqの値）。A2・A3の値は本アプリのプリセット（Params.hのkEqPresets）。Sonarはユーザーの現在のSonarのEQを5バンドで近似した値（比較用。出力ゲインなし）。
 enum class EqPreset { Off, On, A2, A3, Sonar };
 
 struct ProcessSettings
@@ -139,9 +139,10 @@ struct ProcessSettings
     float nrImpact = kNrImpactDefault;
     bool eqEnabled = false;
     std::array<EqBandSettings, kEqBands> eqBands = kEqDefaults;
+    float eqOutputGainDb = kEqOutputGainDefaultDb;
 };
 
-// プリセットを適用（Off/On以外はバンドを置き換えてEQをON）。
+// プリセットを適用（OffはEQをOFFにするだけ。On以外のA2・A3・Sonarはバンドと出力ゲインを置き換えてEQをON）。
 void applyEqPreset (ProcessSettings& settings, EqPreset preset);
 
 struct GateBlockStat

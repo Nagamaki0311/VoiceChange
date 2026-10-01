@@ -147,12 +147,16 @@ private:
     void setEqEnabled (bool on);
     void applySlider (juce::Slider& slider, std::atomic<float>& target);
     void bandChangedByUser (int index, const EqBandSettings& settings);
-    void resetOrUndoEq();
+    void outputGainChangedByUser (float gainDb);
+    void pressPreset (EqPresetId id);
+    void undoPreset();
 
     void refreshNrAppearance();
     void refreshEqAppearance();
     void refreshBandAppearance (int index);
-    void refreshResetButton();
+    void refreshOutputGainAppearance();
+    void refreshPresetAppearance();
+    void refreshUndoButton();
     void refreshAll();
     void updateShowingState();
     void clearUndo();
@@ -166,13 +170,16 @@ private:
     ToggleSwitch nrSwitch, eqSwitch;
     juce::Label backgroundLabel, impactLabel;
     juce::Slider backgroundSlider, impactSlider;
+    juce::Label presetLabel, outputGainLabel;
+    std::array<juce::TextButton, 3> presetButtons; // 添字はEqPresetIdの値（0 = EQなし、1 = A2、2 = A3）。カスタムは選べない
+    juce::TextButton undoButton;
     EqGraph graph;
     std::array<Band, kEqBands> bands;
-    juce::TextButton resetButton;
+    std::unique_ptr<NumberField> outputGain;
 
-    // 「EQを初期値に戻す」の取り消し用。押した直後だけ有効（EQのバンドの値を変えた・ウィンドウを非表示にしたら無効）。
-    bool undoAvailable = false;
-    std::array<EqBandSettings, kEqBands> undoBands {};
+    // 「元に戻す」の記録。プリセットを選んだ直後だけ有効（バンドの値・出力ゲインを変えた・ウィンドウを非表示にしたら無効。EQスイッチでは無効にしない）。
+    EqPresetUndo undo;
+    juce::String shownEqOnSub; // EQスイッチのON時の副文（表示中のプリセットで出し分け）。変わったときだけ更新する
 
     bool wasShowing = false;
 

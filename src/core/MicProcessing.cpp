@@ -665,14 +665,28 @@ void Equalizer::prepare (double newSampleRate)
         b.gainDb.setCurrentAndTargetValue (b.target.gainDb);
     }
 
+    outputGainDb.reset (sampleRate, kEqSmoothSeconds);
+    outputGainDb.setCurrentAndTargetValue (kEqOutputGainDefaultDb);
+
     runTarget = false;
     reset();
 }
 
-void Equalizer::setTarget (bool run, const std::array<EqBandSettings, kEqBands>& settings) noexcept
+void Equalizer::setTarget (bool run, const std::array<EqBandSettings, kEqBands>& settings, float newOutputGainDb) noexcept
 {
     runTarget = run;
     const bool resting = state == State::Resting;
+
+    // 出力ゲイン: 非有限値は初期値、範囲外は端へ（juce::jlimitはNaNをそのまま返すため、先に非有限値を除く）。
+    if (! std::isfinite (newOutputGainDb))
+        newOutputGainDb = kEqOutputGainDefaultDb;
+
+    newOutputGainDb = juce::jlimit (-kEqMaxOutputGainDb, kEqMaxOutputGainDb, newOutputGainDb);
+
+    if (resting) // 休止中は補間しない（起動時に古い値から動かさない）
+        outputGainDb.setCurrentAndTargetValue (newOutputGainDb);
+    else
+        outputGainDb.setTargetValue (newOutputGainDb);
 
     for (size_t i = 0; i < bands.size(); ++i)
     {
@@ -846,6 +860,23 @@ void Equalizer::processBand (Band& b, float* seg, int len) noexcept
         b.idle = true;
 }
 
+// 5バンドの後に出力ゲインを掛ける。補間中は1サンプルごとにdBから線形へ直し、補間が終わったら一定の係数（0dBなら何もしない）。
+void Equalizer::applyOutputGain (float* seg, int len) noexcept
+{
+    if (outputGainDb.isSmoothing())
+    {
+        for (int i = 0; i < len; ++i)
+            seg[i] *= juce::Decibels::decibelsToGain (outputGainDb.getNextValue());
+
+        return;
+    }
+
+    const float g = outputGainDb.getTargetValue();
+
+    if (! juce::exactlyEqual (g, 0.0f)) // 補間の終わったdB値。0dB（既定）では素通しのまま
+        juce::FloatVectorOperations::multiply (seg, juce::Decibels::decibelsToGain (g), len);
+}
+
 // EQ全体のクロスフェード。dryは処理前のセグメント、segはバンドを通した後。状態の切り替わりはサンプル単位。
 void Equalizer::mixGlobal (float* seg, const float* dry, int len) noexcept
 {
@@ -910,6 +941,8 @@ void Equalizer::process (float* buf, int n) noexcept
 
         for (auto& b : bands)
             processBand (b, seg, len);
+
+        applyOutputGain (seg, len);
 
         if (crossfading)
             mixGlobal (seg, dry, len);

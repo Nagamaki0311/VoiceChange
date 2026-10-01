@@ -985,14 +985,15 @@ void applyEqPreset (ProcessSettings& s, EqPreset preset)
             s.eqEnabled = true;
             break;
 
-        case EqPreset::A2: // 自然なクリアさ
+        case EqPreset::A2: // 自然なクリアさ（Params.hのkEqPresets）
+        case EqPreset::A3: // 輪郭はっきり
+        {
+            const auto& spec = kEqPresets[preset == EqPreset::A2 ? 0 : 1];
             s.eqEnabled = true;
-            s.eqBands = { { { true, T::LowShelf, 26.0f, -18.0f, 0.48f },
-                            { true, T::Peak, 216.0f, 1.0f, 0.75f },
-                            { true, T::Peak, 450.0f, -2.5f, 1.0f },
-                            { true, T::Peak, 2500.0f, 4.0f, 0.70f },
-                            { true, T::HighShelf, 5741.0f, 2.0f, 1.0f } } };
+            s.eqBands = spec.bands;
+            s.eqOutputGainDb = spec.outputGainDb;
             break;
+        }
 
         case EqPreset::Sonar: // ユーザーの現在のSonarのEQの5バンド近似
             s.eqEnabled = true;
@@ -1001,15 +1002,7 @@ void applyEqPreset (ProcessSettings& s, EqPreset preset)
                             { true, T::Peak, 546.0f, -0.5f, 1.44f },
                             { true, T::Peak, 2062.0f, 4.1f, 0.70f },
                             { true, T::HighShelf, 5741.0f, -2.3f, 1.19f } } };
-            break;
-
-        case EqPreset::A3: // 輪郭はっきり
-            s.eqEnabled = true;
-            s.eqBands = { { { true, T::LowShelf, 26.0f, -18.0f, 0.48f },
-                            { true, T::Peak, 216.0f, 0.0f, 0.75f },
-                            { true, T::Peak, 400.0f, -3.0f, 1.0f },
-                            { true, T::Peak, 3000.0f, 5.0f, 0.70f },
-                            { true, T::HighShelf, 5000.0f, 4.0f, 1.0f } } };
+            s.eqOutputGainDb = 0.0f;
             break;
     }
 }
@@ -1028,6 +1021,7 @@ ProcessResult processAudio (const std::vector<float>& input, double fs, const Pr
     p.nrBackground.store (s.nrBackground);
     p.nrImpact.store (s.nrImpact);
     p.eqEnabled.store (s.eqEnabled);
+    p.eqOutputGainDb.store (s.eqOutputGainDb);
 
     for (size_t i = 0; i < s.eqBands.size(); ++i)
         p.eqBands[i].store (s.eqBands[i]);
@@ -1173,8 +1167,8 @@ double rmsOf (const std::vector<float>& x, long a, long b)
 
 int runProcessWav (const juce::StringArray& args)
 {
-    const auto parsed = parseArgs (args, { "--bg", "--impact", "--eq", "--nr", "--settings", "--segments", "--trace" }, { "--float" });
-    const char* usage = "usage: VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.65] [--impact 0.15] [--nr on|off] [--eq on|off|a2|a3|sonar]\n"
+    const auto parsed = parseArgs (args, { "--bg", "--impact", "--eq", "--eq-gain", "--nr", "--settings", "--segments", "--trace" }, { "--float" });
+    const char* usage = "usage: VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.65] [--impact 0.15] [--nr on|off] [--eq on|off|a2|a3|sonar] [--eq-gain -12..12]\n"
                         "                                     [--settings <VoiceChange.settings>] [--segments <file>] [--trace <csv>] [--float]\n";
 
     if (! parsed.error.isEmpty() || parsed.positional.size() != 2)
@@ -1225,6 +1219,7 @@ int runProcessWav (const juce::StringArray& args)
         settings.nrImpact = saved.nrImpact;
         settings.eqEnabled = saved.eqEnabled;
         settings.eqBands = saved.eqBands;
+        settings.eqOutputGainDb = saved.eqOutputGainDb;
     }
 
     auto readUnit = [&] (const char* key, float& target)
@@ -1268,6 +1263,22 @@ int runProcessWav (const juce::StringArray& args)
         }
     }
 
+    // 出力ゲイン（dB）。--eqのプリセットや設定ファイルの値を上書きする（ゲインを振って声量を測るため）。
+    if (parsed.options.containsKey ("--eq-gain"))
+    {
+        const auto utf8 = parsed.options["--eq-gain"].trim().toStdString();
+        char* end = nullptr;
+        const double v = std::strtod (utf8.c_str(), &end);
+
+        if (utf8.empty() || end == utf8.c_str() || *end != '\0' || ! (v >= -(double) kEqMaxOutputGainDb && v <= (double) kEqMaxOutputGainDb))
+        {
+            printError ("--eq-gain must be a number from -12 to 12: " + parsed.options["--eq-gain"]);
+            return 2;
+        }
+
+        settings.eqOutputGainDb = (float) v;
+    }
+
     Audio in;
 
     if (! readWav (inFile, in, error))
@@ -1292,6 +1303,9 @@ int runProcessWav (const juce::StringArray& args)
     out << "out: " << outFile.getFullPathName() << (floatOut ? " (32-bit float, for --compare)" : " (16-bit PCM)") << "\n";
     out << "settings: noise reduction " << (settings.nrEnabled ? "ON" : "OFF") << ", background " << juce::String (settings.nrBackground, 2) << ", impact "
         << juce::String (settings.nrImpact, 2) << ", EQ " << (settings.eqEnabled ? "ON" : "OFF");
+
+    if (settings.eqEnabled)
+        out << " output gain " << juce::String (settings.eqOutputGainDb, 1) << "dB";
 
     if (settings.eqEnabled)
         for (const auto& b : settings.eqBands)

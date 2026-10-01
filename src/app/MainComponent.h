@@ -84,6 +84,8 @@ public:
                             juce::Slider::SliderStyle, juce::Slider&) override;
 
 private:
+    bool isLiveButton (const juce::Button& button, int presetIdx) const noexcept;
+
     const std::atomic<bool>* chainEnabledFlag = nullptr;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AppLookAndFeel)
@@ -284,9 +286,9 @@ private:
 
     void applyToggle();
     void refreshEnabledAppearance();
-    // ノイズ除去・EQのON/OFF（AtomicParams。マイク処理ウィンドウが書く）に、ボタンのランプ・ツールチップ・説明、
-    // 全体トグルの副文と説明を合わせる。状態パネルの更新周期（約270ms）ごとに呼ぶ。
-    void refreshMicAppearance (bool nrOn, bool eqOn);
+    // ノイズ除去のON/OFFとEQの状態（AtomicParams。マイク処理ウィンドウが書く。EQは表示中のプリセット: EQ OFF / A2 / A3 / カスタム）に、
+    // ボタンのランプ・ツールチップ・説明、全体トグルの副文と説明を合わせる。状態パネルの更新周期（約270ms）ごとに呼ぶ。
+    void refreshMicAppearance (bool nrOn, EqPresetId eqPreset);
 
     void updateStatus (bool slowUpdate);
     // announceKeyは経過秒数など毎秒変わる部分を除いた文言。キーが変わったときだけ読み上げ通知する。
@@ -316,7 +318,8 @@ private:
 
     StatusPanel statusPanel;
 
-    bool micStateKnown = false, shownNrOn = false, shownEqOn = false; // refreshMicAppearanceの変化検出
+    bool micStateKnown = false, shownNrOn = false; // refreshMicAppearanceの変化検出
+    EqPresetId shownEqPreset = EqPresetId::None;
 
     int frameCounter = 0;
     int accessibilityFrameCounter = 0; // 30fps想定で30回=約1秒ごとにstatusPanelのdescriptionを更新
