@@ -732,7 +732,7 @@ private:
         logMessage ("E9: " + juce::String (4 * (56 + 14) - failures) + "/280 switches passed (224 with talkbox range low + 56 talkbox pairs with range high)");
     }
 
-    // ----- E10: CPU（参考値、失敗判定なし） -----
+    // ----- E10: CPU（表を出力。トークボックスは層1ピッチ0で5%以下を判定） -----
     void runE10()
     {
         beginTest ("E10: CPU（48kHz・480ブロック・10秒、プリセットごとの処理時間/音声時間）");
@@ -776,8 +776,8 @@ private:
             const double percent = 100.0 * seconds / 10.0;
             table << "\n  " << (juce::String (presetName (p)) + (r.pitch != 0 ? " pitch " + juce::String (r.pitch) : juce::String()) + (r.range != 0 ? " high" : juce::String())).paddedRight (' ', 22)
                   << juce::String (percent, 2) << "%";
-            // 仕様の上限: トークボックスは5%以下（docs/spec.md「CPU」）。シフターを使わない設定（層1ピッチ0。実測は音域「低」2.7%・「高」3.1%）で判定する。
-            // 層1ピッチ+24はシフター（約1.5%）が加わり約4.3%で5%に近いため、他のプロセスが動いている環境で不安定にならないよう参考値にする。
+            // 仕様の上限: トークボックスは5%以下（docs/spec.md「CPU」）。シフターを使わない設定（層1ピッチ0。実測は音域「低」「高」とも2.6〜2.7%）で判定する。
+            // 層1ピッチ+24はシフター（約1.5%）が加わり約4.2〜4.3%で5%に近いため、他のプロセスが動いている環境で不安定にならないよう参考値（判定なし）にする。
             if (p == (int) vc::Preset::Talkbox && r.pitch == 0)
                 expect (percent <= 5.0, juce::String (presetName (p)) + " range " + juce::String (r.range) + " pitch " + juce::String (r.pitch) + ": CPU " + juce::String (percent, 2) + "% exceeds 5%");
         }
