@@ -2021,7 +2021,8 @@ private:
         juce::String worstName;
     };
 
-    SwitchResult runPresetSwitchWithNr (int mode, int offset, const std::vector<float>& voice, float bg, float impact)
+    // onlyTalkboxPairsがtrueなら、トークボックスを含む切替だけを、音域「高」で通す（音域の違いが影響するのはトークボックスだけ）。
+    SwitchResult runPresetSwitchWithNr (int mode, int offset, const std::vector<float>& voice, float bg, float impact, bool onlyTalkboxPairs = false)
     {
         constexpr int warmup = (int) (kFs * 2.0);
         constexpr int settle = (int) (kFs * 0.8);
@@ -2035,7 +2036,7 @@ private:
         {
             for (int b = 0; b < (int) vc::kPresets.size(); ++b)
             {
-                if (a == b)
+                if (a == b || (onlyTalkboxPairs && a != (int) vc::Preset::Talkbox && b != (int) vc::Preset::Talkbox))
                     continue;
 
                 const int switchPos = warmup + settle + steady + offset;
@@ -2063,6 +2064,7 @@ private:
                 vc::Engine engine;
                 engine.prepare ({ kFs, 1024 });
                 engine.params().preset.store (a);
+                engine.params().talkboxRange.store (onlyTalkboxPairs ? (int) vc::TalkboxRange::High : (int) vc::TalkboxRange::Low);
                 engine.params().nrEnabled.store (true);
                 engine.params().nrBackground.store (bg);
                 engine.params().nrImpact.store (impact);
@@ -2141,6 +2143,11 @@ private:
                             + ", offset " + juce::String (offset) + ", background " + juce::String ((int) (c.bg * 100)) + " %, impact " + juce::String ((int) (c.impact * 100)) + " %: "
                             + juce::String (r.runs - r.failures) + "/" + juce::String (r.runs) + " switches passed, worst ratio (limit 1.5) " + juce::String (r.worstRatio, 3)
                             + " at " + r.worstName);
+
+                // トークボックスの音域「高」: トークボックスを含む14通りだけ。同じ判定（限界1.5は緩めない）。
+                const auto high = runPresetSwitchWithNr (c.mode, offset, voice, c.bg, c.impact, true);
+                logMessage ("N9b talkbox range high, mode " + juce::String (c.mode) + ", offset " + juce::String (offset) + ": " + juce::String (high.runs - high.failures) + "/" + juce::String (high.runs)
+                            + " switches passed, worst ratio (limit 1.5) " + juce::String (high.worstRatio, 3) + " at " + high.worstName);
             }
         }
     }
@@ -4277,11 +4284,13 @@ public:
                 expect (std::abs (hz12 - 440.0) / 440.0 < 0.02, "formant-only override changed the preset's semitones: " + juce::String (hz12, 1) + " Hz");
             }
 
-            // トークボックスの実験: 製品（follow）はキャリアが検出したf0に追従して出力の基本周波数が入力と同じになる。fixedは入力のf0によらず固定の高さになる。
+            // トークボックスの実験: followはキャリアが検出したf0に追従して出力の基本周波数が入力と同じになる（D-028より前の製品の動作。--talkbox-carrierを明示したとき実験用のボコーダーを通る）。
+            // fixedは入力のf0によらず固定の高さになる。実験の設定がなければ製品のトークボックス（固定フレーズ）で、キャリアは入力のf0に追従しない（M1l・M1m・X3が確認する）。
             {
                 auto tb = base;
                 tb.preset = vc::Preset::Talkbox;
                 const int half = len / 2;
+                tb.talkboxVocoder = true;
                 const double followHz = vc::test::measureFundamentalHz (vc::rectool::processAudio (in150, fs, tb).output.data() + half, half, fs, 150.0);
                 expect (std::abs (followHz - 150.0) / 150.0 < 0.03, "follow carrier: " + juce::String (followHz, 1) + " Hz, expected ~150");
 
@@ -4342,13 +4351,19 @@ public:
                 expect (vc::rectool::readWav (outFile, back, error), error);
                 expectEquals ((int) back.samples.size(), 48000);
                 expectEquals (run ({ "--preset", "talkbox", "--talkbox-carrier", "fixed", "--talkbox-hz", "110", "--talkbox-chord", "0,4,7", "--talkbox-voicing-floor", "0.8" }), 0);
+                expectEquals (run ({ "--preset", "talkbox", "--talkbox-range", "high" }), 0);
+                expectEquals (run ({ "--preset", "talkbox", "--talkbox-range", "low", "--pitch", "5" }), 0);
 
                 const std::vector<std::vector<const char*>> bad {
                     { "--preset", "bogus" }, { "--preset", "" }, { "--pitch", "1.5" }, { "--pitch", "37" }, { "--pitch", "abc" }, { "--gain", "21" }, { "--reverb", "1.5" },
                     { "--semitones", "49" }, { "--semitones", "x" }, { "--formant", "0.2" }, { "--formant", "4.5" }, { "--talkbox-hz", "30", "--preset", "talkbox" },
                     { "--talkbox-carrier", "sideways", "--preset", "talkbox" }, { "--talkbox-chord", "0,4,", "--preset", "talkbox" }, { "--talkbox-chord", "0,1,2,3,4,5,6", "--preset", "talkbox" },
                     { "--talkbox-chord", "0,99", "--preset", "talkbox" }, { "--talkbox-voicing-floor", "2", "--preset", "talkbox" },
-                    { "--preset", "echo", "--semitones", "3" }, { "--preset", "kerokero", "--formant", "1.2" }, { "--preset", "helium", "--talkbox-hz", "110" }, { "--talkbox-chord", "0,4,7" } };
+                    { "--preset", "echo", "--semitones", "3" }, { "--preset", "kerokero", "--formant", "1.2" }, { "--preset", "helium", "--talkbox-hz", "110" }, { "--talkbox-chord", "0,4,7" },
+                    // 音域（製品の固定フレーズ）: 不正な値、talkbox以外のプリセット、実験の設定との併用（実験用のキャリアには音域を掛けないので、無視されて取り違えない）
+                    { "--preset", "talkbox", "--talkbox-range", "mid" }, { "--preset", "talkbox", "--talkbox-range", "" }, { "--preset", "helium", "--talkbox-range", "high" },
+                    { "--talkbox-range", "high" }, { "--preset", "talkbox", "--talkbox-range", "high", "--talkbox-carrier", "fixed" },
+                    { "--preset", "talkbox", "--talkbox-range", "high", "--talkbox-chord", "0,4" }, { "--preset", "talkbox", "--talkbox-range", "high", "--semitones", "3" } };
 
                 for (const auto& b : bad)
                 {
@@ -4396,24 +4411,54 @@ public:
 
             const auto in150 = vowel (150.0);
 
-            // 既定の設定（20バンド・鋸波1本・強調なし）のExperimentVocoderは、製品のTalkboxと同じ出力になる（実験の土台が製品と同じであることの確認。kTalkboxGainの値の写しもここで検出する）。
+            // 製品のトークボックス（固定フレーズS4・鋸波2本±10セント・有声度の下限0.8・子音0.6・20バンド）は、同じ設定のExperimentVocoder（--talkbox-carrier sequence ...）と同じ出力になる
+            // （実験の土台が製品と同じであることの確認。試聴サンプルのS4・S6が製品の音であることの根拠。ゲインの値の写しもここで検出する）。
+            // 音域「高」は、S6（S4の1オクターブ上）の出力に、音域ごとのゲインの比を掛けたものと一致する（実験用のボコーダーは音域「低」のゲインで固定）。
             {
                 vc::rectool::ProcessSettings product;
                 product.nrEnabled = false;
                 product.preset = vc::Preset::Talkbox;
-                auto viaVocoder = product;
-                viaVocoder.talkboxVocoder = true;
-                auto mixed = vowel (150.0);
-                vc::test::addNoiseBurst (mixed, 48000, fs, 120.0, 0.2f); // 無声の区間も通す（有声度による雑音混合の経路）
-                const auto a = vc::rectool::processAudio (mixed, fs, product).output;
-                const auto b = vc::rectool::processAudio (mixed, fs, viaVocoder).output;
-                double worst = 0.0;
+                auto experiment = [&] (const char* notes)
+                {
+                    auto e = product;
+                    e.talkboxCarrier = vc::rectool::TalkboxCarrier::Sequence;
+                    expect (vc::rectool::parseNoteSequence (notes, e.talkboxSeq), "notes");
+                    e.talkboxBpm = 123.0f;
+                    e.talkboxStepBeats = 0.5f;
+                    e.talkboxVoicingFloor = 0.8f;
+                    e.talkboxDetuneCents = { -10.0f, 10.0f };
+                    e.talkboxConsonant = 0.6f;
+                    return e;
+                };
+                auto mixed = vowelN (150.0, 4 * 48000);
+                vc::test::addNoiseBurst (mixed, 96000, fs, 120.0, 0.2f); // 無声の区間も通す（有声度による雑音混合の経路）
+                const auto lowProduct = vc::rectool::processAudio (mixed, fs, product).output;
+                const auto lowExperiment = vc::rectool::processAudio (mixed, fs, experiment ("G2,G2,Bb2,C3,D3,C3,Bb2,F2")).output;
+                auto highSettings = product;
+                highSettings.talkboxRange = vc::TalkboxRange::High;
+                const auto highProduct = vc::rectool::processAudio (mixed, fs, highSettings).output;
+                const auto highExperiment = vc::rectool::processAudio (mixed, fs, experiment ("G3,G3,Bb3,C4,D4,C4,Bb3,F3")).output;
+                const float highScale = vc::Talkbox::kOutputGain[(size_t) vc::TalkboxRange::High] / vc::Talkbox::kOutputGain[(size_t) vc::TalkboxRange::Low];
+                double worstLow = 0.0, worstHigh = 0.0;
 
-                for (size_t i = 0; i < a.size(); ++i)
-                    worst = std::max (worst, (double) std::abs (a[i] - b[i]));
+                for (size_t i = 0; i < lowProduct.size(); ++i)
+                {
+                    worstLow = std::max (worstLow, (double) std::abs (lowProduct[i] - lowExperiment[i]));
+                    worstHigh = std::max (worstHigh, (double) std::abs (highProduct[i] - highScale * highExperiment[i]));
+                }
 
-                expect (worst < 1.0e-5, "default vocoder differs from the product Talkbox by " + juce::String (worst, 8));
-                expect (vc::test::peakAbs (b.data(), (int) b.size()) > 0.05, "vocoder output is silent");
+                expect (worstLow < 1.0e-5, "product talkbox (range low) differs from the S4 experiment by " + juce::String (worstLow, 8));
+                // 高は、MIDIから求めた周波数（G3 = 196.00Hz）と、低の2倍（2 × 98.00Hz）の丸めの差（1e-7）が鋸波の位相に積算するぶんだけ大きい。
+                expect (worstHigh < 5.0e-4, "product talkbox (range high) differs from the S6 experiment by " + juce::String (worstHigh, 8));
+                expect (vc::test::peakAbs (lowProduct.data(), (int) lowProduct.size()) > 0.05 && vc::test::peakAbs (highProduct.data(), (int) highProduct.size()) > 0.05, "talkbox output is silent");
+
+                // 低と高は別の出力（音域が効いている）。
+                double diff = 0.0;
+
+                for (size_t i = 0; i < lowProduct.size(); ++i)
+                    diff = std::max (diff, (double) std::abs (lowProduct[i] - highProduct[i]));
+
+                expect (diff > 0.02, "range had no effect (" + juce::String (diff, 4) + ")");
             }
 
             // 量子化追従: f0=150Hz（D3の146.83Hzより少し高い）の声は、キャリアが最寄りの半音の146.83Hzになる（製品のfollowは150Hzのまま）。

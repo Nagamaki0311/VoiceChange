@@ -481,6 +481,7 @@ private:
                         continue;
 
                     std::copy (signal.begin(), signal.begin() + segment * 2, pairBuf.begin());
+                    engine.params().talkboxRange.store ((a + b) % 2); // トークボックスの音域（低・高）の両方を通す
                     engine.params().preset.store (a);
                     engine.process (pairBuf.data(), segment);
                     engine.params().preset.store (b);
@@ -497,6 +498,7 @@ private:
             for (const int pitch : { -24, -12, 0, 5, 12, 24 })
             {
                 engine.params().pitch.store (pitch);
+                engine.params().talkboxRange.store (pitch > 0 ? 1 : 0);
                 buf = signal;
                 engine.process (buf.data(), (int) buf.size());
             }
@@ -524,6 +526,7 @@ private:
                 for (const int pitch : { -24, -12, 0, 5, 12, 24 })
                 {
                     engine.params().pitch.store (pitch);
+                    engine.params().talkboxRange.store (pitch > 0 ? 1 : 0);
                     engine.process (buf.data(), (int) buf.size());
                 }
             }
@@ -577,23 +580,26 @@ private:
 
         // 全プリセット（層1ピッチ0か-5）に加えて、層1ピッチの端（±24。D-027）とプリセットの移調の合計が最大になる組み合わせ
         // （ミニオン+24 = +36、ジャイアント-24 = -30、ヘリウム+24 = +33、ミニオン-24 = -12）。Engineは合計移調に制限を持たない。
-        struct Run { int preset; int pitch; };
+        // トークボックスは音域（低・高）と、層1ピッチの端（±24。キャリアにもかかる）も通す。
+        struct Run { int preset; int pitch; int range = 0; };
         std::vector<Run> runs;
 
         for (int p = 0; p < (int) vc::kPresets.size(); ++p)
             runs.push_back ({ p, p % 2 == 0 ? 0 : -5 });
 
         for (const auto& extra : { Run { (int) vc::Preset::Minion, 24 }, Run { (int) vc::Preset::Giant, -24 }, Run { (int) vc::Preset::Helium, 24 },
-                                   Run { (int) vc::Preset::Minion, -24 } })
+                                   Run { (int) vc::Preset::Minion, -24 }, Run { (int) vc::Preset::Talkbox, 0, 1 }, Run { (int) vc::Preset::Talkbox, 24, 1 },
+                                   Run { (int) vc::Preset::Talkbox, -24, 0 }, Run { (int) vc::Preset::Talkbox, 24, 0 }, Run { (int) vc::Preset::Talkbox, -24, 1 } })
             runs.push_back (extra);
 
         for (const auto& r : runs)
         {
-            const auto name = juce::String (presetName (r.preset)) + " pitch " + juce::String (r.pitch);
+            const auto name = juce::String (presetName (r.preset)) + " pitch " + juce::String (r.pitch) + (r.range != 0 ? " range high" : "");
             vc::Engine engine;
             prepareEngine (engine);
             engine.params().preset.store (r.preset);
             engine.params().pitch.store (r.pitch);
+            engine.params().talkboxRange.store (r.range);
             engine.params().gainDb.store (10.0f);
             engine.params().reverb.store (0.3f);
 
@@ -618,7 +624,8 @@ private:
     };
 
     // mode 0: 連続発声中の切替、1: 無音からの発声開始（10msアタック、D-017）、2: 同（0msアタック、参考値）。
-    E9Result runE9Mode (int mode, int offset, const std::vector<float>& voice, bool judge)
+    // onlyTalkboxPairsがtrueなら、トークボックスを含む切替だけを、音域「高」で通す（音域の違いが影響するのはトークボックスだけ）。
+    E9Result runE9Mode (int mode, int offset, const std::vector<float>& voice, bool judge, bool onlyTalkboxPairs = false)
     {
         constexpr int settle = (int) (kFs * 0.8);
         constexpr int steady = (int) kFs;
@@ -631,7 +638,7 @@ private:
         {
             for (int b = 0; b < (int) vc::kPresets.size(); ++b)
             {
-                if (a == b)
+                if (a == b || (onlyTalkboxPairs && a != (int) vc::Preset::Talkbox && b != (int) vc::Preset::Talkbox))
                     continue;
 
                 const int switchPos = settle + steady + offset;
@@ -651,6 +658,7 @@ private:
                 vc::Engine engine;
                 prepareEngine (engine);
                 engine.params().preset.store (a);
+                engine.params().talkboxRange.store (onlyTalkboxPairs ? (int) vc::TalkboxRange::High : (int) vc::TalkboxRange::Low);
                 std::vector<float> out (in);
 
                 engine.process (out.data(), switchPos);
@@ -703,6 +711,12 @@ private:
                 failures += r.failures;
                 logMessage ("E9: " + juce::String (mode == 0 ? "steady" : "onset(10ms attack)") + " offset " + juce::String (offset)
                             + " worst ratio (limit 1.5) " + juce::String (r.worstRatio, 3) + " at " + r.worstName);
+
+                // トークボックスの音域「高」: トークボックスを含む14通りだけ（音域が効くのはそこだけ）。同じ判定。
+                const auto high = runE9Mode (mode, offset, voice, true, true);
+                failures += high.failures;
+                logMessage ("E9: talkbox range high, " + juce::String (mode == 0 ? "steady" : "onset(10ms attack)") + " offset " + juce::String (offset)
+                            + " worst ratio (limit 1.5) " + juce::String (high.worstRatio, 3) + " at " + high.worstName);
             }
         }
 
@@ -715,7 +729,7 @@ private:
                         + juce::String (instant.worstRatio, 3) + " at " + instant.worstName);
         }
 
-        logMessage ("E9: " + juce::String (4 * 56 - failures) + "/224 switches passed");
+        logMessage ("E9: " + juce::String (4 * (56 + 14) - failures) + "/280 switches passed (224 with talkbox range low + 56 talkbox pairs with range high)");
     }
 
     // ----- E10: CPU（参考値、失敗判定なし） -----
@@ -732,7 +746,7 @@ private:
         juce::String table = "E10 CPU (processing time / audio time):";
 
         // 全プリセットに加えて、層1ピッチの端（±24）との合計移調が大きい組み合わせ（D-027。CPUは移調量に依存しない）。
-        struct Run { int preset; int pitch; };
+        struct Run { int preset; int pitch; int range = 0; };
         std::vector<Run> runs;
 
         for (int p = 0; p < (int) vc::kPresets.size(); ++p)
@@ -740,6 +754,8 @@ private:
 
         runs.push_back ({ (int) vc::Preset::Minion, 24 });
         runs.push_back ({ (int) vc::Preset::Giant, -24 });
+        runs.push_back ({ (int) vc::Preset::Talkbox, 0, 1 });
+        runs.push_back ({ (int) vc::Preset::Talkbox, 24, 1 });
 
         for (const auto& r : runs)
         {
@@ -748,6 +764,7 @@ private:
             engine.prepare ({ kFs, block });
             engine.params().preset.store (p);
             engine.params().pitch.store (r.pitch);
+            engine.params().talkboxRange.store (r.range);
             std::vector<float> buf (voice);
 
             const auto t0 = juce::Time::getHighResolutionTicks();
@@ -757,8 +774,12 @@ private:
 
             const double seconds = juce::Time::highResolutionTicksToSeconds (t1 - t0);
             const double percent = 100.0 * seconds / 10.0;
-            table << "\n  " << (juce::String (presetName (p)) + (r.pitch != 0 ? " pitch " + juce::String (r.pitch) : juce::String())).paddedRight (' ', 17)
+            table << "\n  " << (juce::String (presetName (p)) + (r.pitch != 0 ? " pitch " + juce::String (r.pitch) : juce::String()) + (r.range != 0 ? " high" : juce::String())).paddedRight (' ', 22)
                   << juce::String (percent, 2) << "%";
+            // 仕様の上限: トークボックスは5%以下（docs/spec.md「CPU」）。シフターを使わない設定（層1ピッチ0。実測は音域「低」2.7%・「高」3.1%）で判定する。
+            // 層1ピッチ+24はシフター（約1.5%）が加わり約4.3%で5%に近いため、他のプロセスが動いている環境で不安定にならないよう参考値にする。
+            if (p == (int) vc::Preset::Talkbox && r.pitch == 0)
+                expect (percent <= 5.0, juce::String (presetName (p)) + " range " + juce::String (r.range) + " pitch " + juce::String (r.pitch) + ": CPU " + juce::String (percent, 2) + "% exceeds 5%");
         }
 
         logMessage (table);

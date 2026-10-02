@@ -400,6 +400,7 @@ public:
         params.reverb.store (saved.reverb, std::memory_order_relaxed);
         params.preset.store ((int) saved.preset, std::memory_order_relaxed);
         params.enabled.store (saved.enabled, std::memory_order_relaxed);
+        params.talkboxRange.store ((int) saved.talkboxRange, std::memory_order_relaxed);
 
         // マイク処理（ノイズ除去・EQ）。全体ON/OFFの対象外（D-020）。
         params.nrEnabled.store (saved.nrEnabled, std::memory_order_relaxed);

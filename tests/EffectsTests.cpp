@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 // ===== SECTION: EffectsTests =====
@@ -18,6 +19,9 @@ namespace
 {
 
 constexpr int kNumFramesWarmupMs = 50;
+
+// トークボックスのフレーズ（G2 G2 Bb2 C3 D3 C3 Bb2 F2）の周波数。MIDIから求める式ではなく、音名のHz（A4 = 440Hz、平均律）を数字で固定する（定数の取り違えを検出するため）。
+constexpr std::array<double, 8> kPhraseHz { 98.0, 98.0, 116.541, 130.813, 146.832, 130.813, 116.541, 87.307 };
 
 struct DetectorFrame
 {
@@ -79,6 +83,8 @@ public:
         runF();
         runK1();
         runX3();
+        runX3Phrase();
+        runX3Engine();
     }
 
 private:
@@ -338,38 +344,46 @@ private:
         expect (db (mid.magLinear, inPeak.magLinear) <= -30.0, "1000Hz component not suppressed");
     }
 
-    // ----- X3（ゲイン決定）: Talkbox単体で母音3種×f0 3種の出力/入力RMS比 -----
+    // ----- X3（ゲイン決定）: Talkbox単体で母音3種×f0 3種の出力/入力RMS比（音域ごと） -----
+    // 出力の声量を入力に近づけるのがユーザーの目標（D-026・D-028）。kOutputGainは実録音（raw_A）のK特性・RMSの差が±0.1〜0.7dBになる値で、
+    // 合成母音の中央値は、それより少し高く出る（低 +0.8dB・高 +0.4dB）。最大の母音（/a/・f0=100Hz。高）が+2.7dBで、基準の±3dBに近い。
     void runX3Gain()
     {
-        beginTest ("X3a: トークボックス単体の出力/入力RMS比（補正ゲイン決定用）");
+        beginTest ("X3a: トークボックス単体の出力/入力RMS比（音域ごと。補正ゲインの根拠）");
 
         constexpr double fs = 48000.0;
         const int n = (int) fs * 2;
         const std::array<std::array<double, 3>, 3> vowels { { { 730.0, 1090.0, 2440.0 }, { 270.0, 2290.0, 3010.0 }, { 300.0, 870.0, 2240.0 } } };
-        std::vector<double> ratiosDb;
 
-        for (const auto& fm : vowels)
+        for (const auto range : { vc::TalkboxRange::Low, vc::TalkboxRange::High })
         {
-            for (const double f0 : { 100.0, 150.0, 250.0 })
+            std::vector<double> ratiosDb;
+
+            for (const auto& fm : vowels)
             {
-                const float amp = 0.1f * 1.41421356f * 1.5f; // ピーク振幅（RMSは概ね-20dBFS付近になる）
-                auto in = vc::test::makeSyntheticVowel (f0, fs, n, fm, { 80.0, 90.0, 120.0 }, amp);
-                std::vector<float> out (in.size());
-                vc::Talkbox tb;
-                tb.prepare (fs, 480);
-                for (int pos = 0; pos + 480 <= n; pos += 480)
-                    tb.process (in.data() + pos, out.data() + pos, 480, (float) f0, 1.0f);
+                for (const double f0 : { 100.0, 150.0, 250.0 })
+                {
+                    const float amp = 0.1f * 1.41421356f * 1.5f; // ピーク振幅（RMSは概ね-20dBFS付近になる）
+                    auto in = vc::test::makeSyntheticVowel (f0, fs, n, fm, { 80.0, 90.0, 120.0 }, amp);
+                    std::vector<float> out (in.size());
+                    vc::Talkbox tb;
+                    tb.prepare (fs, 480);
+                    for (int pos = 0; pos + 480 <= n; pos += 480)
+                        tb.process (in.data() + pos, out.data() + pos, 480, 1.0f, range, 1.0f);
 
-                const int skip = (int) fs / 2;
-                const double r = 20.0 * std::log10 (vc::test::rms (out.data() + skip, n - skip) / vc::test::rms (in.data() + skip, n - skip));
-                ratiosDb.push_back (r);
-                expect (std::abs (r) <= 3.0, "talkbox level ratio out of +-3dB: " + juce::String (r, 2));
-                logMessage ("X3a: f0=" + juce::String (f0) + " F1=" + juce::String (fm[0]) + " ratio " + juce::String (r, 2) + "dB");
+                    const int skip = (int) fs / 2;
+                    const double r = 20.0 * std::log10 (vc::test::rms (out.data() + skip, n - skip) / vc::test::rms (in.data() + skip, n - skip));
+                    ratiosDb.push_back (r);
+                    expect (std::abs (r) <= 3.0, "talkbox level ratio out of +-3dB: " + juce::String (r, 2));
+                    logMessage ("X3a: range=" + juce::String (vc::talkboxRangeId (range)) + " f0=" + juce::String (f0) + " F1=" + juce::String (fm[0]) + " ratio " + juce::String (r, 2) + "dB");
+                }
             }
-        }
 
-        std::sort (ratiosDb.begin(), ratiosDb.end());
-        logMessage ("X3a: median ratio " + juce::String (ratiosDb[4], 2) + "dB");
+            std::sort (ratiosDb.begin(), ratiosDb.end());
+            logMessage ("X3a: range=" + juce::String (vc::talkboxRangeId (range)) + " median ratio " + juce::String (ratiosDb[4], 2) + "dB");
+            // ゲインの変更（±1dB）を検出する帯。音域ごとの値（低 0.92・高 1.08）の差は、この中央値の差で決まっている（実録音でも同じ向きの差が出た）。
+            expect (ratiosDb[4] >= 0.0 && ratiosDb[4] <= 1.2, "median level ratio out of the calibrated band 0..+1.2 dB: " + juce::String (ratiosDb[4], 2) + "dB (range " + vc::talkboxRangeId (range) + ")");
+        }
     }
     // Engineをブロック処理する（480サンプルずつ）。
     static void processEngine (vc::Engine& engine, float* data, int n)
@@ -439,9 +453,42 @@ private:
     }
 
     // ----- X3: トークボックス（Engine経由） -----
+    // 現在のステップ（0から数える）の窓（ステップの始まりの2000サンプル後から9000サンプル）で、h次倍音（約1200Hz付近）のピークから求めたキャリアの基本周波数（Hz）。
+    // 窓はステップの中（1ステップ約11707サンプル）に収まり、音の切替の過渡を避ける。高い倍音ほど周波数の測定誤差が基本周波数に小さく効く。切替は時刻startOffsetに起きたものとして数える。
+    // 倍音のピークがなければ負（呼び出し側が失敗にする。measureFundamentalHzは見つからないと目安を返すため使わない）。
+    // checkOctaveがtrueなら、1オクターブ低いキャリアでないことも確かめる。声（母音）の包絡は声のf0（100〜250Hz）の側波帯をキャリアの各倍音の両脇に作り、
+    // 倍音の間にも成分が出るため、母音を入力にした測定では使えない（雑音入力で使う）。
+    double measuredCarrierHz (const std::vector<float>& out, double fs, int step, long long startOffset, double expectedHz, bool checkOctave = false) const
+    {
+        vc::PhraseSequencer seq;
+        seq.prepare (fs);
+        const long long from = startOffset + seq.boundaryOf (step) + 2000;
+        const int harmonic = std::max (1, (int) std::lround (1200.0 / expectedHz));
+        const auto spec = vc::test::averagedMagnitudeSpectrum (out.data() + from, 9000);
+        const auto peak = vc::test::findPeakNear (spec, fs, 1 << 14, expectedHz * harmonic, 0.03);
+
+        // 1オクターブ低いキャリア（基本波が半分）も、期待する倍音の位置に倍音を持つ（偶数次）ため、それだけでは区別できない。
+        // 期待する倍音の間（(h+0.5)倍）に倍音があれば基本波は半分以下なので、失敗にする。
+        if (checkOctave)
+        {
+            const auto between = vc::test::findPeakNear (spec, fs, 1 << 14, expectedHz * (harmonic + 0.5), std::min (0.02, 0.25 / (harmonic + 0.5)));
+
+            if (between.freqHz > 0.0 && between.magLinear > 0.5 * peak.magLinear)
+                return -1.0;
+        }
+
+        return peak.freqHz > 0.0 ? peak.freqHz / harmonic : -1.0;
+    }
+
+    // キャリアの下限は40Hz（Talkbox内。層1ピッチ-24で低い音が40Hz未満になるとき）。
+    static double expectedCarrierHz (int step, int pitch, vc::TalkboxRange range)
+    {
+        return std::max (40.0, kPhraseHz[(size_t) (step % 8)] * std::pow (2.0, (double) pitch / 12.0) * (range == vc::TalkboxRange::High ? 2.0 : 1.0));
+    }
+
     void runX3()
     {
-        beginTest ("X3: トークボックス 出力RMS比±3dB、倍音間隔=検出f0×2^(p/12)±1%、雑音入力で-40dB超");
+        beginTest ("X3: トークボックス（Engine） 出力RMS比±3dB、倍音間隔 = 現在のフレーズの音 × 2^(p/12)（検出f0・声の母音によらない）、雑音入力で-40dB超");
 
         constexpr double fs = 48000.0;
         const int n = (int) (3.0 * fs);
@@ -453,48 +500,50 @@ private:
 
         // 音量は層1ピッチ0で比較する。ピッチシフター自体が強い倍音構造の合成母音で音量を最大約9dB
         // 変える（Signalsmithの特性。DBGで確認済み）ため、ピッチ != 0では入力比では測れない。
-        // 倍音間隔はピッチ0/+5/-7を9通りの母音・f0に割り当てて測る。
+        // 倍音のピークはデチューン（±10セント = ±0.6%）の2本に分かれるため、測定の許容は1%。
+        // 倍音間隔は層1ピッチ（0/+5/-7/+24/-24）・音域（低/高）・ステップ（2〜9）を9通りの母音・f0に割り当てて測る。検出f0（100/150/250Hz）が違っても、
+        // キャリアは同じフレーズの音になる。
         for (const auto& fm : vowels)
         {
             for (const double f0 : { 100.0, 150.0, 250.0 })
             {
-                const int pitchForSpacing = std::array<int, 3> { 0, 5, -7 }[(size_t) (caseIdx++ % 3)];
+                const int pitchForSpacing = std::array<int, 5> { 0, 5, -7, 24, -24 }[(size_t) (caseIdx % 5)];
+                const auto rangeForSpacing = caseIdx % 2 == 0 ? vc::TalkboxRange::Low : vc::TalkboxRange::High;
+                const int step = 2 + caseIdx % 8;
+                ++caseIdx;
                 const float amp = 0.1f * 1.41421356f * 1.5f;
                 const auto in = vc::test::makeSyntheticVowel (f0, fs, n, fm, { 80.0, 90.0, 120.0 }, amp);
 
-                std::vector<int> pitches { 0 };
-                if (pitchForSpacing != 0)
-                    pitches.push_back (pitchForSpacing);
-
-                for (const int pitch : pitches)
+                // 声量（層1ピッチ0、音域は低と高の両方）
+                for (const auto range : { vc::TalkboxRange::Low, vc::TalkboxRange::High })
                 {
                     vc::Engine engine;
                     engine.prepare ({ fs, 480 });
                     engine.params().preset.store ((int) vc::Preset::Talkbox);
-                    engine.params().pitch.store (pitch);
+                    engine.params().talkboxRange.store ((int) range);
                     std::vector<float> out (in);
                     processEngine (engine, out.data(), n);
 
-                    if (pitch == 0)
-                    {
-                        const double inRms = vc::test::rms (in.data() + n - len, len);
-                        const double outRms = vc::test::rms (out.data() + n - len, len);
-                        const double ratioDb = 20.0 * std::log10 (outRms / inRms);
-                        logMessage ("X3: F1=" + juce::String (fm[0]) + " f0=" + juce::String (f0) + " ratio " + juce::String (ratioDb, 2) + "dB");
-                        worstDb = std::max (worstDb, std::abs (ratioDb));
-                    }
-
-                    if (pitch == pitchForSpacing)
-                    {
-                        const double carrier = f0 * std::pow (2.0, (double) pitch / 12.0);
-                        const auto spec = vc::test::averagedMagnitudeSpectrum (out.data() + n - len, len);
-                        const auto h4 = vc::test::findPeakNear (spec, fs, 1 << 14, 4.0 * carrier, 0.03);
-                        const double spacingErrPct = h4.freqHz > 0.0 ? std::abs (h4.freqHz / 4.0 - carrier) / carrier * 100.0 : 100.0;
-                        logMessage ("X3: F1=" + juce::String (fm[0]) + " f0=" + juce::String (f0) + " pitch=" + juce::String (pitch)
-                                    + " harmonic spacing err " + juce::String (spacingErrPct, 3) + "%");
-                        worstSpacingPct = std::max (worstSpacingPct, spacingErrPct);
-                    }
+                    const double ratioDb = 20.0 * std::log10 (vc::test::rms (out.data() + n - len, len) / vc::test::rms (in.data() + n - len, len));
+                    logMessage ("X3: range=" + juce::String (vc::talkboxRangeId (range)) + " F1=" + juce::String (fm[0]) + " f0=" + juce::String (f0) + " ratio " + juce::String (ratioDb, 2) + "dB");
+                    worstDb = std::max (worstDb, std::abs (ratioDb));
                 }
+
+                // 倍音間隔
+                vc::Engine engine;
+                engine.prepare ({ fs, 480 });
+                engine.params().preset.store ((int) vc::Preset::Talkbox);
+                engine.params().talkboxRange.store ((int) rangeForSpacing);
+                engine.params().pitch.store (pitchForSpacing);
+                std::vector<float> out (in);
+                processEngine (engine, out.data(), n);
+
+                const double expected = expectedCarrierHz (step, pitchForSpacing, rangeForSpacing);
+                const double measured = measuredCarrierHz (out, fs, step, 0, expected);
+                const double errPct = measured > 0.0 ? std::abs (measured - expected) / expected * 100.0 : 100.0;
+                logMessage ("X3: F1=" + juce::String (fm[0]) + " f0=" + juce::String (f0) + " pitch=" + juce::String (pitchForSpacing) + " range=" + juce::String (vc::talkboxRangeId (rangeForSpacing))
+                            + " step " + juce::String (step) + ": carrier " + juce::String (measured, 2) + "Hz, expected " + juce::String (expected, 2) + "Hz, err " + juce::String (errPct, 3) + "%");
+                worstSpacingPct = std::max (worstSpacingPct, errPct);
             }
         }
 
@@ -515,6 +564,261 @@ private:
             const double ratioDb = 20.0 * std::log10 (vc::test::rms (out.data() + n - len, len) / vc::test::rms (in.data() + n - len, len));
             logMessage ("X3: noise in -> " + juce::String (ratioDb, 2) + "dB");
             expect (ratioDb > -40.0, "noise input output level " + juce::String (ratioDb, 2) + "dB");
+        }
+    }
+
+    // ----- X3b: フレーズ（PhraseSequencer）。テンポ・音程・巡回・リセット -----
+    void runX3Phrase()
+    {
+        beginTest ("X3b: PhraseSequencer 123BPM・8分音符のステップ境界（整数サンプルの計算でドリフトなし）、フレーズの音程、巡回、reset");
+
+        const auto& phraseHz = kPhraseHz;
+
+        for (const double fs : { 48000.0, 44100.0, 96000.0 })
+        {
+            vc::PhraseSequencer seq;
+            seq.prepare (fs);
+
+            // ステップ長 = 60/123 × 0.5 秒 = fs × 30 / 123 サンプル。k番目のステップの始まりは ceil(k × fs × 30 / 123) 。
+            // 10分ぶん（約2460ステップ）を回し、境界ごとに切替のサンプルが理論値ぴったりであることと、音が正しいことを確かめる。
+            const long long total = (long long) (600.0 * fs);
+            const long long samplesPerStepNumerator = (long long) std::llround (fs) * 30;
+            long long observed = 0;
+            int mismatches = 0;
+            double worstHzErr = 0.0;
+
+            for (long long i = 0; i < total; ++i)
+            {
+                const float hz = seq.next();
+
+                if (seq.getStepIndex() != observed)
+                {
+                    ++observed;
+                    const long long expectedBoundary = (observed * samplesPerStepNumerator + 122) / 123; // ceil
+                    mismatches += (i != expectedBoundary || seq.getStepIndex() != observed) ? 1 : 0;
+                }
+
+                if (i % 997 == 0 || seq.getStepIndex() != observed)
+                    worstHzErr = std::max (worstHzErr, std::abs ((double) hz - phraseHz[(size_t) (observed % 8)]) / phraseHz[(size_t) (observed % 8)]);
+            }
+
+            logMessage ("X3b: fs=" + juce::String (fs, 0) + " mismatched step numbers " + juce::String (mismatches) + ", worst note frequency error " + juce::String (worstHzErr * 100.0, 4) + "%");
+            expectEquals (mismatches, 0, "step boundaries are not ceil(k * L) at fs=" + juce::String (fs, 0));
+            expect (worstHzErr < 1.0e-4, "phrase note frequency error " + juce::String (worstHzErr));
+        }
+
+        // 48kHz: 最初の境界は11708サンプル目（ceil(11707.317)）、8ステップ（1フレーズ）は ceil(8 × 11707.317) = 93659 サンプル目に1周する。
+        {
+            vc::PhraseSequencer seq;
+            seq.prepare (48000.0);
+            expectEquals ((int) seq.boundaryOf (1), 11708);
+            expectEquals ((int) seq.boundaryOf (2), 23415);
+            expectEquals ((int) seq.boundaryOf (8), 93659);
+            expectEquals ((int) seq.boundaryOf (41), 480000); // 41ステップ = ちょうど10秒（60/123 × 0.5 × 41 = 10秒の整数サンプル）
+            expect (seq.boundaryOf (41000) == 480000000LL && seq.boundaryOf (123000) == 1440000000LL, "boundary drifts over 10000 s"); // 1万秒（約2.8時間）でも小数の丸めがずれない
+
+            // 切替のサンプルで音が変わり、その前のサンプルは変わらない（階段）。
+            std::vector<float> hz;
+            for (int i = 0; i < 11709; ++i)
+                hz.push_back (seq.next());
+
+            expect (std::abs (hz[11706] - hz[0]) < 1.0e-6f && std::abs (hz[11707] - hz[0]) < 1.0e-6f, "note changed before the boundary");
+            expectEquals ((double) hz[11707], (double) hz[0]); // サンプル11707（0始まり）はまだ最初のステップ
+            expect (std::abs (hz[11708] - hz[0]) < 1.0e-6f, "boundary sample should be the 2nd G2 (the phrase starts with G2 G2)");
+        }
+
+        // reset: 先頭のステップ（時刻0）へ戻る。途中でresetしても、その後は先頭から同じ列を再生する。
+        {
+            vc::PhraseSequencer a, b;
+            a.prepare (48000.0);
+            b.prepare (48000.0);
+
+            for (int i = 0; i < 100000; ++i)
+                a.next();
+
+            a.reset();
+
+            for (int i = 0; i < 100000; ++i)
+                expect (std::abs (a.next() - b.next()) < 1.0e-9f, "reset did not restart the phrase from the first note");
+        }
+
+        // 1フレーズ（8ステップ）の長さは4拍 = 1.9512秒。フレーズ内で最も低い音（F2 = 87.31Hz）の次に先頭のG2（98.00Hz）へ戻る。
+        {
+            vc::PhraseSequencer seq;
+            seq.prepare (48000.0);
+            float last = 0.0f;
+            long long lastChange = 0;
+
+            for (long long i = 0; i < 93659 + 20; ++i)
+            {
+                const float hz = seq.next();
+
+                if (i == 93659 - 1)
+                    expectWithinAbsoluteError ((double) hz, 87.307, 0.01); // 8番目の音（F2）の最後のサンプル
+
+                if (i == 93659)
+                    expectWithinAbsoluteError ((double) hz, 98.0, 0.01); // 1周して先頭の音
+
+                if (std::abs (hz - last) > 1.0e-6f)
+                    lastChange = i;
+
+                last = hz;
+            }
+
+            expectEquals ((int) lastChange, 93659);
+        }
+    }
+
+    // ----- X3c: 開始位相・状態の復帰・音域の切替（Engine） -----
+    // キャリアの位置はEngine（時刻0から）の経過で決まり、プリセットの切替・バイパス解除・NaN回復・prepareのたびに先頭の音から始め直す（D-028）。
+    void runX3Engine()
+    {
+        beginTest ("X3c: トークボックスのフレーズは、選択・バイパス解除・NaN回復・prepareのたびに先頭の音から始まり、以後は自走する。音域の切替はフレーズの位置を変えない");
+
+        constexpr double fs = 48000.0;
+        constexpr int block = 480;
+        // 入力は白色雑音（-20dBFS RMS）。キャリアの周波数を測るため、声の側波帯（キャリアの倍音の両脇）が出ない入力にする。有声度は0（無声）で、キャリアは下限0.8の鋸波が主。
+        // 声のf0（100〜250Hz）に依らないことは、母音を入力にしたX3が確かめる。
+        std::vector<float> vowel ((size_t) (6.0 * fs));
+        juce::Random noiseRng (31);
+
+        for (auto& v : vowel)
+            v = (noiseRng.nextFloat() * 2.0f - 1.0f) * 0.1f * 1.7320508f;
+
+        // 開始位置 start（ブロックの境界）からの出力を作り、step番目の音のキャリア周波数を測る。
+        auto expectStep = [&] (const std::vector<float>& out, long long start, int step, int pitch, vc::TalkboxRange range, const juce::String& label)
+        {
+            const double expected = expectedCarrierHz (step, pitch, range);
+            const double measured = measuredCarrierHz (out, fs, step, start, expected, true);
+            expect (measured > 0.0 && std::abs (measured - expected) / expected < 0.01, label + " step " + juce::String (step) + ": carrier " + juce::String (measured, 2) + "Hz, expected " + juce::String (expected, 2) + "Hz");
+        };
+
+        // (1) prepare直後のTalkbox選択: 時刻0から。
+        {
+            vc::Engine engine;
+            engine.params().preset.store ((int) vc::Preset::Talkbox);
+            engine.prepare ({ fs, block });
+            std::vector<float> out (vowel);
+            processEngine (engine, out.data(), (int) out.size());
+
+            for (const int step : { 0, 1, 2, 4, 7, 8, 9, 10 }) // 0〜1のG2、巡回後（8〜10）も
+                expectStep (out, 0, step, 0, vc::TalkboxRange::Low, "prepare");
+        }
+
+        // (2) 途中でプリセットを切り替えて（ノーマル → トークボックス）選択したとき: 切替の時刻から先頭の音。
+        // 2回目（トークボックス → エコー → トークボックス）も、前回の位置から続けず先頭に戻る。
+        {
+            vc::Engine engine;
+            engine.prepare ({ fs, block });
+            engine.params().preset.store ((int) vc::Preset::Normal);
+            std::vector<float> out (vowel);
+            const int switchAt = block * 70; // 0.7秒
+            processEngine (engine, out.data(), switchAt);
+            engine.params().preset.store ((int) vc::Preset::Talkbox);
+            processEngine (engine, out.data() + switchAt, block * 170); // 1.7秒 = 約7ステップ（フレーズの途中で切り替える）
+
+            for (const int step : { 0, 1, 2, 3, 5 })
+                expectStep (out, switchAt, step, 0, vc::TalkboxRange::Low, "select");
+
+            const int echoAt = switchAt + block * 170;
+            engine.params().preset.store ((int) vc::Preset::Echo);
+            processEngine (engine, out.data() + echoAt, block * 30); // 切替の途中経過（フェード）を済ませる
+            const int again = echoAt + block * 30;
+            engine.params().preset.store ((int) vc::Preset::Talkbox);
+            processEngine (engine, out.data() + again, block * 170);
+
+            for (const int step : { 0, 1, 2, 3, 5 })
+                expectStep (out, again, step, 0, vc::TalkboxRange::Low, "reselect");
+        }
+
+        // (3) バイパス解除: 全体OFFのあいだ止まり、ONへ戻した時刻から先頭の音。
+        {
+            vc::Engine engine;
+            engine.prepare ({ fs, block });
+            engine.params().preset.store ((int) vc::Preset::Talkbox);
+            std::vector<float> out (vowel);
+            processEngine (engine, out.data(), block * 100);
+            engine.params().enabled.store (false);
+            processEngine (engine, out.data() + block * 100, block * 50); // 完全バイパス（20msのクロスフェード後はチェーンを通さない）
+            engine.params().enabled.store (true);
+            const int back = block * 150;
+            processEngine (engine, out.data() + back, block * 200);
+
+            for (const int step : { 0, 1, 2, 3, 5 })
+                expectStep (out, back, step, 0, vc::TalkboxRange::Low, "bypass release");
+        }
+
+        // (4) NaN回復: 入力にNaNを入れたブロックはEngineがリセットする。次のブロックから先頭の音。
+        {
+            vc::Engine engine;
+            engine.prepare ({ fs, block });
+            engine.params().preset.store ((int) vc::Preset::Talkbox);
+            std::vector<float> out (vowel);
+            processEngine (engine, out.data(), block * 100);
+            out[(size_t) (block * 100 + 10)] = std::numeric_limits<float>::quiet_NaN();
+            processEngine (engine, out.data() + block * 100, block); // このブロックは無音になりリセットされる
+            expect ((engine.getErrorFlags() & 1u) != 0, "NaN was not detected");
+            const int after = block * 101;
+            processEngine (engine, out.data() + after, block * 200);
+
+            for (const int step : { 0, 1, 2, 3, 5 })
+                expectStep (out, after, step, 0, vc::TalkboxRange::Low, "NaN recovery");
+        }
+
+        // (5) 音域の切替: 稼働中に低 → 高にしてもフレーズは先頭へ戻らず、同じステップで1オクターブ上になる。層1ピッチとも合成される。
+        {
+            vc::Engine engine;
+            engine.prepare ({ fs, block });
+            engine.params().preset.store ((int) vc::Preset::Talkbox);
+            std::vector<float> out (vowel);
+            const int toHigh = block * 120; // 1.2秒（ステップ4: 0.976〜1.22秒の途中。ステップ5以降で測る）
+            processEngine (engine, out.data(), toHigh);
+            engine.params().talkboxRange.store ((int) vc::TalkboxRange::High);
+            processEngine (engine, out.data() + toHigh, block * 150);
+
+            for (const int step : { 6, 7, 8, 9 })
+                expectStep (out, 0, step, 0, vc::TalkboxRange::High, "switched to high");
+
+            for (const int step : { 2, 3 })
+                expectStep (out, 0, step, 0, vc::TalkboxRange::Low, "before the switch");
+        }
+
+        // (5b) Engineが読む音域が不正な値のときは低（設定ファイルの破損が直接届いても、鳴らない・NaNにはならない）。低と同じ出力。
+        {
+            std::vector<float> a (vowel), b (vowel);
+
+            for (const int value : { 0, 99 })
+            {
+                vc::Engine engine;
+                engine.prepare ({ fs, block });
+                engine.params().preset.store ((int) vc::Preset::Talkbox);
+                engine.params().talkboxRange.store (value);
+                auto& out = value == 0 ? a : b;
+                processEngine (engine, out.data(), block * 100);
+            }
+
+            expect (std::equal (a.begin(), a.begin() + block * 100, b.begin()), "an invalid range value did not behave as low");
+        }
+
+        // (6) 音域のオクターブ差: 同じステップで低 → 高は周波数がちょうど2倍（キャリアの周波数の比）。
+        for (const int pitch : { 0, 7, -12 })
+        {
+            double hz[2] {};
+
+            for (const auto range : { vc::TalkboxRange::Low, vc::TalkboxRange::High })
+            {
+                vc::Engine engine;
+                engine.prepare ({ fs, block });
+                engine.params().preset.store ((int) vc::Preset::Talkbox);
+                engine.params().talkboxRange.store ((int) range);
+                engine.params().pitch.store (pitch);
+                std::vector<float> out (vowel);
+                processEngine (engine, out.data(), block * 150);
+                hz[(size_t) range] = measuredCarrierHz (out, fs, 4, 0, expectedCarrierHz (4, pitch, range), true);
+            }
+
+            // ±10セントのデチューンで倍音が2本に分かれ（約±0.6%）、どちらに寄ったピークを取るかで測定値が動くため、許容は3%（半音は6%、1オクターブは100%）。
+            expect (hz[0] > 0.0 && hz[1] > 0.0 && std::abs (hz[1] / hz[0] - 2.0) < 0.06, "pitch " + juce::String (pitch) + ": high/low carrier ratio " + juce::String (hz[1] / hz[0], 4));
         }
     }
     // ----- F1〜F3: フォルマント移動（Engineのヘリウム・ミニオン・ジャイアント） -----

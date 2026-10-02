@@ -278,6 +278,9 @@ private:
 
     void createPresetButtons();
     void updatePresetButtonStates();
+    // トークボックスの音域（低・高）。トークボックス選択中だけ表示する（design.md 3.5節「音域の2択」）。
+    void createRangeButtons();
+    void updateRangeButtonStates();
 
     void updateSliderAppearance (juce::Slider& slider);
     void applyGainFromSlider();
@@ -313,6 +316,9 @@ private:
     juce::Slider gainSlider, pitchSlider, reverbSlider;
 
     std::array<std::unique_ptr<juce::TextButton>, 8> presetButtons;
+
+    juce::Label rangeLabel;
+    std::array<std::unique_ptr<juce::TextButton>, 2> rangeButtons; // 添字はTalkboxRange
 
     ToggleSwitch toggleButton;
 

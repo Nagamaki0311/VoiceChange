@@ -138,7 +138,7 @@ enum class EqPreset { Off, On, A2, A3, Sonar };
 // 通称（コマンドの値）と内部識別子: follow = TalkboxCarrier::Follow / fixed = TalkboxCarrier::Fixed。
 // quantized = TalkboxCarrier::Quantized（T-018第2段。検出f0を音階に量子化して補正時間ゼロの階段状に動かす）。
 // sequence = TalkboxCarrier::Sequence（T-018第2段の続き。キャリアの音程を声の高さではなく、あらかじめ決めたフレーズ（音列）に従って動かす。声は包絡と音量だけを与える）。
-enum class TalkboxCarrier { Follow, Fixed, Quantized, Sequence }; // Follow = 検出したf0に追従（製品と同じ）/ Fixed = 固定の高さ（平坦なロボット声）
+enum class TalkboxCarrier { Follow, Fixed, Quantized, Sequence }; // Follow = 検出したf0に追従（D-028より前の製品の動作。実験用）/ Fixed = 固定の高さ（平坦なロボット声）
 enum class TalkboxAdvance { Free, Syllable }; // フレーズの進め方（free = テンポに従って自走、syllable = 声の立ち上がり（音節）ごとに次の音へ）
 enum class TalkboxScale { Chromatic, Major, Minor }; // 量子化の音階（chromatic = 半音、major/minor = 主音（talkboxKey）からの長音階・自然短音階）
 
@@ -161,7 +161,11 @@ struct ProcessSettings
     std::optional<float> semitonesOverride;
     std::optional<float> formantOverride;
 
+    // 製品のトークボックス（固定フレーズS4。D-028）の音域（--talkbox-range）。実験の設定（下の項目）がないときだけ有効（実験用のキャリアには音域を掛けない）。
+    TalkboxRange talkboxRange = TalkboxRange::Low;
+
     // トークボックスの実験（--talkbox-carrier・--talkbox-hz・--talkbox-chord）。キャリアはf0（またはfixedHz）× 2^(chord[i]/12)の和（各1/sqrt(個数)）。
+    // 実験の設定が1つもなければ、製品のトークボックス（固定フレーズ）になる。--talkbox-carrierを明示するとfollow（検出f0に追従。D-028より前の製品の動作）も実験用のボコーダーを通る。
     TalkboxCarrier talkboxCarrier = TalkboxCarrier::Follow;
     float talkboxFixedHz = 110.0f;
     std::vector<float> talkboxChord { 0.0f };
