@@ -419,7 +419,7 @@ void ToggleSwitch::paintButton (juce::Graphics& g, bool isHighlighted, bool isDo
     g.setColour (border);
     g.drawRoundedRectangle (bounds.reduced (borderWidth * 0.5f), 4.0f, borderWidth);
 
-    // ランプ: 直径12、中心は部品内(24, 高さ/2)。メインのトグル（20,388・高さ48）ではdesign.md絶対座標(44,412)。
+    // ランプ: 直径12、中心は部品内(24, 高さ/2)。メインのトグル（20,428・高さ48）ではdesign.md絶対座標(44,452)。
     constexpr float lampCx = 24.0f, lampR = 6.0f;
     const float lampCy = bounds.getHeight() * 0.5f;
 

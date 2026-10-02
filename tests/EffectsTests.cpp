@@ -381,7 +381,7 @@ private:
 
             std::sort (ratiosDb.begin(), ratiosDb.end());
             logMessage ("X3a: range=" + juce::String (vc::talkboxRangeId (range)) + " median ratio " + juce::String (ratiosDb[4], 2) + "dB");
-            // ゲインの変更（±1dB）を検出する帯。音域ごとの値（低 0.92・高 1.08）の差は、この中央値の差で決まっている（実録音でも同じ向きの差が出た）。
+            // ゲインの変更（±1dB）を検出する帯。音域ごとの値（低 0.92・高 1.06）の差は、この中央値の差で決まっている（実録音でも同じ向きの差が出た）。
             expect (ratiosDb[4] >= 0.0 && ratiosDb[4] <= 1.2, "median level ratio out of the calibrated band 0..+1.2 dB: " + juce::String (ratiosDb[4], 2) + "dB (range " + vc::talkboxRangeId (range) + ")");
         }
     }
