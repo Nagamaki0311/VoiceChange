@@ -20,6 +20,9 @@ namespace
 
 constexpr int kNumFramesWarmupMs = 50;
 
+// トークボックスのフレーズ（G2 G2 Bb2 C3 D3 C3 Bb2 F2）の周波数。MIDIから求める式ではなく、音名のHz（A4 = 440Hz、平均律）を数字で固定する（定数の取り違えを検出するため）。
+constexpr std::array<double, 8> kPhraseHz { 98.0, 98.0, 116.541, 130.813, 146.832, 130.813, 116.541, 87.307 };
+
 struct DetectorFrame
 {
     float hz;
@@ -453,7 +456,9 @@ private:
     // 現在のステップ（0から数える）の窓（ステップの始まりの2000サンプル後から9000サンプル）で、h次倍音（約1200Hz付近）のピークから求めたキャリアの基本周波数（Hz）。
     // 窓はステップの中（1ステップ約11707サンプル）に収まり、音の切替の過渡を避ける。高い倍音ほど周波数の測定誤差が基本周波数に小さく効く。切替は時刻startOffsetに起きたものとして数える。
     // 倍音のピークがなければ負（呼び出し側が失敗にする。measureFundamentalHzは見つからないと目安を返すため使わない）。
-    double measuredCarrierHz (const std::vector<float>& out, double fs, int step, long long startOffset, double expectedHz) const
+    // checkOctaveがtrueなら、1オクターブ低いキャリアでないことも確かめる。声（母音）の包絡は声のf0（100〜250Hz）の側波帯をキャリアの各倍音の両脇に作り、
+    // 倍音の間にも成分が出るため、母音を入力にした測定では使えない（雑音入力で使う）。
+    double measuredCarrierHz (const std::vector<float>& out, double fs, int step, long long startOffset, double expectedHz, bool checkOctave = false) const
     {
         vc::PhraseSequencer seq;
         seq.prepare (fs);
@@ -461,14 +466,24 @@ private:
         const int harmonic = std::max (1, (int) std::lround (1200.0 / expectedHz));
         const auto spec = vc::test::averagedMagnitudeSpectrum (out.data() + from, 9000);
         const auto peak = vc::test::findPeakNear (spec, fs, 1 << 14, expectedHz * harmonic, 0.03);
+
+        // 1オクターブ低いキャリア（基本波が半分）も、期待する倍音の位置に倍音を持つ（偶数次）ため、それだけでは区別できない。
+        // 期待する倍音の間（(h+0.5)倍）に倍音があれば基本波は半分以下なので、失敗にする。
+        if (checkOctave)
+        {
+            const auto between = vc::test::findPeakNear (spec, fs, 1 << 14, expectedHz * (harmonic + 0.5), std::min (0.02, 0.25 / (harmonic + 0.5)));
+
+            if (between.freqHz > 0.0 && between.magLinear > 0.5 * peak.magLinear)
+                return -1.0;
+        }
+
         return peak.freqHz > 0.0 ? peak.freqHz / harmonic : -1.0;
     }
 
     // キャリアの下限は40Hz（Talkbox内。層1ピッチ-24で低い音が40Hz未満になるとき）。
     static double expectedCarrierHz (int step, int pitch, vc::TalkboxRange range)
     {
-        return std::max (40.0, (double) vc::PhraseSequencer::midiToHz (vc::PhraseSequencer::kMidiNotes[(size_t) (step % vc::PhraseSequencer::kNumSteps)]) * std::pow (2.0, (double) pitch / 12.0)
-                                   * (range == vc::TalkboxRange::High ? 2.0 : 1.0));
+        return std::max (40.0, kPhraseHz[(size_t) (step % 8)] * std::pow (2.0, (double) pitch / 12.0) * (range == vc::TalkboxRange::High ? 2.0 : 1.0));
     }
 
     void runX3()
@@ -557,8 +572,7 @@ private:
     {
         beginTest ("X3b: PhraseSequencer 123BPM・8分音符のステップ境界（整数サンプルの計算でドリフトなし）、フレーズの音程、巡回、reset");
 
-        // 期待するフレーズ（G2 G2 Bb2 C3 D3 C3 Bb2 F2）の周波数。MIDIから求める式ではなく、音名のHz（A4 = 440Hz、平均律）を数字で固定する（定数の取り違えを検出するため）。
-        const std::array<double, 8> phraseHz { 98.0, 98.0, 116.541, 130.813, 146.832, 130.813, 116.541, 87.307 };
+        const auto& phraseHz = kPhraseHz;
 
         for (const double fs : { 48000.0, 44100.0, 96000.0 })
         {
@@ -663,13 +677,19 @@ private:
 
         constexpr double fs = 48000.0;
         constexpr int block = 480;
-        const auto vowel = vc::test::makeSyntheticVowel (150.0, fs, (int) (6.0 * fs), { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.3f);
+        // 入力は白色雑音（-20dBFS RMS）。キャリアの周波数を測るため、声の側波帯（キャリアの倍音の両脇）が出ない入力にする。有声度は0（無声）で、キャリアは下限0.8の鋸波が主。
+        // 声のf0（100〜250Hz）に依らないことは、母音を入力にしたX3が確かめる。
+        std::vector<float> vowel ((size_t) (6.0 * fs));
+        juce::Random noiseRng (31);
+
+        for (auto& v : vowel)
+            v = (noiseRng.nextFloat() * 2.0f - 1.0f) * 0.1f * 1.7320508f;
 
         // 開始位置 start（ブロックの境界）からの出力を作り、step番目の音のキャリア周波数を測る。
         auto expectStep = [&] (const std::vector<float>& out, long long start, int step, int pitch, vc::TalkboxRange range, const juce::String& label)
         {
             const double expected = expectedCarrierHz (step, pitch, range);
-            const double measured = measuredCarrierHz (out, fs, step, start, expected);
+            const double measured = measuredCarrierHz (out, fs, step, start, expected, true);
             expect (measured > 0.0 && std::abs (measured - expected) / expected < 0.01, label + " step " + juce::String (step) + ": carrier " + juce::String (measured, 2) + "Hz, expected " + juce::String (expected, 2) + "Hz");
         };
 
@@ -695,17 +715,17 @@ private:
             const int switchAt = block * 70; // 0.7秒
             processEngine (engine, out.data(), switchAt);
             engine.params().preset.store ((int) vc::Preset::Talkbox);
-            processEngine (engine, out.data() + switchAt, block * 200);
+            processEngine (engine, out.data() + switchAt, block * 170); // 1.7秒 = 約7ステップ（フレーズの途中で切り替える）
 
             for (const int step : { 0, 1, 2, 3, 5 })
                 expectStep (out, switchAt, step, 0, vc::TalkboxRange::Low, "select");
 
-            const int echoAt = switchAt + block * 200;
+            const int echoAt = switchAt + block * 170;
             engine.params().preset.store ((int) vc::Preset::Echo);
             processEngine (engine, out.data() + echoAt, block * 30); // 切替の途中経過（フェード）を済ませる
             const int again = echoAt + block * 30;
             engine.params().preset.store ((int) vc::Preset::Talkbox);
-            processEngine (engine, out.data() + again, block * 200);
+            processEngine (engine, out.data() + again, block * 170);
 
             for (const int step : { 0, 1, 2, 3, 5 })
                 expectStep (out, again, step, 0, vc::TalkboxRange::Low, "reselect");
@@ -794,7 +814,7 @@ private:
                 engine.params().pitch.store (pitch);
                 std::vector<float> out (vowel);
                 processEngine (engine, out.data(), block * 150);
-                hz[(size_t) range] = measuredCarrierHz (out, fs, 4, 0, expectedCarrierHz (4, pitch, range));
+                hz[(size_t) range] = measuredCarrierHz (out, fs, 4, 0, expectedCarrierHz (4, pitch, range), true);
             }
 
             // ±10セントのデチューンで倍音が2本に分かれ（約±0.6%）、どちらに寄ったピークを取るかで測定値が動くため、許容は3%（半音は6%、1オクターブは100%）。
