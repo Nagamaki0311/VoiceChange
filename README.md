@@ -172,10 +172,11 @@ VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.65] [--impact 0.15] [-
                  [--segments <区間ファイル>] [--trace <csv>] [--float]
                  [--preset <名前>] [--gain <dB>] [--pitch <半音>] [--reverb <0〜1>]
                  [--semitones <半音>] [--formant <係数>]
-                 [--talkbox-carrier follow|fixed|quantized] [--talkbox-hz <Hz>] [--talkbox-chord <半音,...>] [--talkbox-voicing-floor <0〜1>]
+                 [--talkbox-carrier follow|fixed|quantized|sequence] [--talkbox-hz <Hz>] [--talkbox-chord <半音,...>] [--talkbox-voicing-floor <0〜1>]
                  [--talkbox-scale chromatic|major|minor] [--talkbox-key <0〜11>] [--talkbox-spread <0.5〜4>]
                  [--talkbox-detune <セント,...>] [--talkbox-octave-up <dB>] [--talkbox-bands <8〜48>] [--talkbox-high-hz <Hz>]
                  [--talkbox-air-db <0〜12>] [--talkbox-consonant <0〜1>]
+                 [--talkbox-carrier sequence --talkbox-seq <音列>] [--talkbox-bpm <60〜200>] [--talkbox-step <拍>] [--talkbox-advance free|syllable] [--talkbox-glide <ms>]
 ```
 
 - WAVを読み、WAVのサンプルレートでEngine（プリセット ノーマル、ゲイン0）に通して書き出す。設定は、既定（ノイズ除去ON、背景0.65・インパクト0.15、EQ OFF）→ `--settings`（アプリの設定ファイル。Linuxでは`$HOME/VoiceChange/VoiceChange.settings`、Windowsでは`%APPDATA%\VoiceChange\VoiceChange.settings`）→ 各オプション、の順に上書きされる。`--bg`・`--impact`は0〜1（アプリの0〜100%）、`--nr`は`on`・`off`、`--eq`は下記の値だけを受け付け、それ以外は終了コード2のエラー。入力と出力に同じファイルは指定できない。
@@ -185,6 +186,7 @@ VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.65] [--impact 0.15] [-
   - `--semitones`（-48〜48）・`--formant`（0.25〜4）: プリセット表の移調量・フォルマント係数を上書きする（片方だけなら、もう片方は表の値）。製品の表と範囲は変えない。`normal`・`helium`・`minion`・`giant`・`talkbox`のプリセットだけで使える。
   - `--talkbox-carrier`（`follow` = 検出したf0に追従する製品の動作 / `fixed` = `--talkbox-hz`（40〜1000、既定110）の固定の高さ）、`--talkbox-chord`（キャリアの和音を半音のコンマ区切りで、例`0,4,7`。1〜6個）、`--talkbox-voicing-floor`（キャリアの鋸波の割合の下限。製品は検出器の値そのままで0）。`--preset talkbox`のときだけ使える。
   - トークボックスのボコーダー実験（T-018第2段。`--preset talkbox`のときだけ）: `--talkbox-carrier quantized` = 検出f0を音階の最寄りの音へ補正時間ゼロで量子化（`--talkbox-scale`: 半音階・長音階・自然短音階、`--talkbox-key`: 主音のピッチクラス 0 = C … 11 = B、`--talkbox-spread`: 抑揚の拡大率。検出音高の、時定数3秒で追従する中心からの差をこの倍率にしてから量子化する。話し声は音高の動きが小さく、1のままだと3〜4音にしか動かない。無声・無音区間は直前の音を保つ）。`--talkbox-detune`（鋸波の本数と各本のデチューン、セントのコンマ区切り、1〜4個、各±50）、`--talkbox-octave-up`（オクターブ上の鋸波を重ねるレベル、-24〜0dB）、`--talkbox-bands`（20 = 製品。Qはバンド間隔に合わせて比例）、`--talkbox-high-hz`（最上バンドの中心周波数）、`--talkbox-air-db`（3kHzで0dB、8kHz以上でこの値になる高域強調）、`--talkbox-consonant`（2.5kHz以上のバンドのキャリアの雑音混合を、下限適用後の有声度から検出器の有声度そのままへ近づける量。無声子音の摩擦音を雑音で鳴らす）。`--talkbox-scale`・`--talkbox-key`・`--talkbox-spread`は`quantized`のときだけ使える。これらの実験は、製品のTalkboxの代わりに`tests/RecordingTool.cpp`内のExperimentVocoder（製品と同じ帯域構成。既定の設定で製品のTalkboxと同じ出力になることをテストM1lで確認している）を通る。製品のTalkboxは変えていない。
+  - 固定フレーズ・キャリア（T-018第2段の続き。`--preset talkbox`のときだけ）: `--talkbox-carrier sequence --talkbox-seq <音列>` = キャリアの音程を声の高さではなく、あらかじめ決めた音列に従って動かす。声は発音（包絡）と音量だけを与え、検出したf0はキャリアの音程に影響しない（有声度だけ検出器の値を使う）。音列は音名（`G2`、`Bb2`、`F#3`。C4 = 60、A4 = 440Hz）か整数のMIDI番号（24〜96）のコンマ区切り（1〜64ステップ）。`+`でつなぐと1ステップに和音（最大6音）、例`G2+Bb2+D3,G2+Bb2+Eb3`。`--talkbox-chord`は各音にさらに重なる。`--talkbox-bpm`（60〜200、既定120）・`--talkbox-step`（1ステップの長さ［拍］、0.0625〜4、既定0.5。0.25 = 16分音符、0.5 = 8分音符、1 = 4分音符）・`--talkbox-advance`（`free` = テンポに従って自走 / `syllable` = 声の低域の包絡の立ち上がり［音節］ごとに次の音へ。最初の立ち上がりで先頭の音。`syllable`では`--talkbox-bpm`・`--talkbox-step`は使えない）・`--talkbox-glide`（音の切り替えのグライド、0〜500ms、0 = 階段。`free`では1ステップより短いこと）。`--talkbox-seq`・`--talkbox-bpm`・`--talkbox-step`・`--talkbox-advance`・`--talkbox-glide`は`sequence`のときだけ使える。不正な値・組み合わせは終了コード2。ExperimentVocoder（上の実験と同じ土台）を通り、製品のTalkboxは変えていない（テストM1m）。
   - 上書きとトークボックスの実験があるときは、Engineを「マイク処理」と「層1」の2つに分け、間にPitchShifter・PitchDetector・Talkboxを直接置く試聴用の経路を通す（並びは製品のEngineと同じ。同じ値ならプリセットを選んだ場合と同じ音になることをテストM1hで確認している）。それ以外はEngineをそのまま使う。
   - 不正な値・範囲外・組み合わせの誤りは、説明を出して終了コード2。ピッチシフターが動くときは、その遅延（120ms）も出力から取り除いて入力に揃える（表示される）。
 - 出力は、ノイズ除去の遅延（48kHzで1440サンプル = 30ms。表示される）を取り除いて入力と同じ長さ・同じ位置に揃える。既定は16bit PCM（聴き比べ用）。**`--compare`に渡すWAVは`--float`（32bit float）で書き出す**: 16bitの量子化雑音は約-90dBFSで、それ以下の残留雑音は測れない。

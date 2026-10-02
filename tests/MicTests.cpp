@@ -4666,6 +4666,377 @@ public:
                 dir.deleteRecursively();
             }
         }
+
+        // T-018第2段（続き）: 固定フレーズ・キャリア（--talkbox-carrier sequence）。キャリアの音程を声の高さではなく音列に従って動かす。製品のTalkboxは変えない。
+        beginTest ("M1m: talkbox fixed phrase carrier (sequence: tempo, syllable advance, glide, chords, independence from the detected f0) and its validation");
+        {
+            const int len = 3 * 48000;
+            const int half = len / 2;
+            auto vowelN = [&] (double f0, int count)
+            {
+                auto v = vc::test::makeSyntheticVowel (f0, fs, count, { 730.0, 1090.0, 2440.0 }, { 80.0, 90.0, 120.0 }, 0.1f);
+                vc::test::addNoiseFloor (v, -60.0f, 444);
+                return v;
+            };
+            auto vowel = [&] (double f0) { return vowelN (f0, len); };
+            using Steps = std::vector<std::vector<float>>;
+            // 基本波のピーク周波数。近くにピークがなければ0（measureFundamentalHzは見つからないと目安の値をそのまま返すため、周波数の一致を確かめる用途には使わない）。
+            auto peakHz = [&] (const std::vector<float>& out, int from, int count, double approx)
+            {
+                return vc::test::findPeakNear (vc::test::averagedMagnitudeSpectrum (out.data() + from, count), fs, 1 << 14, approx, 0.1).freqHz;
+            };
+            auto parse = [] (const char* text)
+            {
+                Steps steps;
+                return vc::rectool::parseNoteSequence (text, steps) ? steps : Steps {};
+            };
+            auto seqSettings = [&] (const char* notes)
+            {
+                vc::rectool::ProcessSettings t;
+                t.nrEnabled = false;
+                t.preset = vc::Preset::Talkbox;
+                t.talkboxCarrier = vc::rectool::TalkboxCarrier::Sequence;
+                t.talkboxVoicingFloor = 0.8f;
+                t.talkboxSeq = parse (notes);
+                t.traceSequence = true;
+                return t;
+            };
+            auto run = [&] (const std::vector<float>& in, const vc::rectool::ProcessSettings& t)
+            {
+                auto r = vc::rectool::processAudio (in, fs, t);
+                expectEquals ((int) r.errorFlags, 0);
+                expectEquals ((int) r.output.size(), (int) in.size());
+                expect (vc::test::allFinite (r.output.data(), (int) r.output.size()), "non-finite output");
+                return r;
+            };
+            // 軌跡の変化点（サンプル番号）。
+            auto changes = [] (const std::vector<float>& trace)
+            {
+                std::vector<int> at;
+
+                for (size_t i = 1; i < trace.size(); ++i)
+                    if (std::abs (trace[i] - trace[i - 1]) > 1.0e-4f)
+                        at.push_back ((int) i);
+
+                return at;
+            };
+
+            // 音列の文字列: 音名（C4 = 60、A4 = 69）・MIDI番号・和音（'+'）。範囲外・不正は空（失敗）。
+            {
+                expect (parse ("G2,Bb2,D3,Bb2") == Steps { { 43.0f }, { 46.0f }, { 50.0f }, { 46.0f } }, "note names");
+                expect (parse ("c4, A4 ,F#3,Db2,bb2") == Steps { { 60.0f }, { 69.0f }, { 54.0f }, { 37.0f }, { 46.0f } }, "note names 2 (case, spaces, # and b)");
+                expect (parse ("43,46,96,24") == Steps { { 43.0f }, { 46.0f }, { 96.0f }, { 24.0f } }, "MIDI numbers");
+                expect (parse ("G2+Bb2+D3,43") == Steps { { 43.0f, 46.0f, 50.0f }, { 43.0f } }, "chord");
+
+                for (const char* bad : { "", ",", "G2,,D3", "G2+", "+G2", "H2", "G", "G#", "Bbb2", "G9", "C1x", "23", "97", "1000", "-5", "G2+G2+G2+G2+G2+G2+G2", "1.5", "G2 D3" })
+                    expect (parse (bad).empty(), juce::String ("accepted: ") + bad);
+
+                juce::StringArray sixtyFive;
+
+                for (int i = 0; i < 65; ++i)
+                    sixtyFive.add ("G2");
+
+                vc::rectool::ProcessSettings dummy;
+                expect (parse (sixtyFive.joinIntoString (",").toRawUTF8()).empty(), "65 steps accepted");
+                expect (parse (sixtyFive.joinIntoString (",").substring (0, 64 * 3 - 1).toRawUTF8()).size() == 64, "64 steps rejected");
+            }
+
+            // テンポ: ステップの境界はステップ長（60/bpm × step 秒）の整数倍のサンプル（切り上げ）で、小数のステップ長でもずれが累積しない。切り替えは階段（その1サンプルで完全に移る）。
+            for (const auto& cfg : { std::pair<float, float> { 120.0f, 0.25f }, std::pair<float, float> { 123.0f, 0.5f }, std::pair<float, float> { 77.0f, 1.0f } })
+            {
+                auto t = seqSettings ("G2,Bb2,D3,Bb2,C3");
+                t.talkboxBpm = cfg.first;
+                t.talkboxStepBeats = cfg.second;
+                const auto r = run (vowel (110.0), t);
+                expectEquals ((int) r.sequenceSlotMidi.size(), 1);
+                const auto& trace = r.sequenceSlotMidi[0];
+                expectEquals ((int) trace.size(), len);
+                const double step = 60.0 / (double) cfg.first * (double) cfg.second * fs;
+                const auto at = changes (trace);
+                const int expectedCount = (int) std::floor ((double) (len - 1) / step);
+                expectEquals ((int) at.size(), expectedCount);
+                const std::array<float, 5> notes { 43.0f, 46.0f, 50.0f, 46.0f, 48.0f };
+
+                for (size_t k = 0; k < at.size(); ++k)
+                {
+                    expectEquals (at[k], (int) std::ceil ((double) (k + 1) * step));
+                    expectEquals (trace[(size_t) at[k]], notes[(k + 1) % notes.size()]);
+                    expectEquals (trace[(size_t) at[k] - 1], notes[k % notes.size()]);
+                }
+
+                expectEquals (trace[0], 43.0f);
+            }
+
+            // 検出したf0に依存しない: 入力の声の高さを変えても（検出結果が変わっても）キャリアの音程の軌跡は完全に同じで、出力の基本周波数は音列の音になる（D3 = 146.83Hz）。
+            // 声の高さに追従する（follow）は入力のf0に従う。
+            {
+                auto t = seqSettings ("D3");
+                const auto ref = run (vowel (100.0), t).sequenceSlotMidi;
+                std::vector<double> hz;
+
+                for (const double f0 : { 100.0, 150.0, 220.0, 310.0 })
+                {
+                    const auto r = run (vowel (f0), t);
+                    expect (r.sequenceSlotMidi == ref, "carrier trace changed with the input f0 " + juce::String (f0, 0));
+                    hz.push_back (peakHz (r.output, half, half, 146.83));
+                    expect (std::abs (hz.back() - 146.83) / 146.83 < 0.01, "sequence carrier (input f0 " + juce::String (f0, 0) + " Hz): " + juce::String (hz.back(), 2) + " Hz, expected 146.83");
+                }
+
+                auto follow = t;
+                follow.talkboxCarrier = vc::rectool::TalkboxCarrier::Follow;
+                const double followHz = peakHz (run (vowel (220.0), follow).output, half, half, 220.0);
+                expect (std::abs (followHz - 220.0) / 220.0 < 0.02, "follow control: " + juce::String (followHz, 1) + " Hz");
+
+                // 声がまったく別の信号（ノイズ・無音）でも、free のキャリアの音程は同じ軌跡。
+                t.talkboxSeq = parse ("G2,Bb2,D3");
+                t.talkboxBpm = 100.0f;
+                t.talkboxStepBeats = 0.5f;
+                const auto base = run (vowel (150.0), t).sequenceSlotMidi;
+                expect (run (makeWhiteNoise (len, 0.3f, 3), t).sequenceSlotMidi == base && run (std::vector<float> ((size_t) len, 0.0f), t).sequenceSlotMidi == base,
+                        "free carrier depends on the input signal");
+            }
+
+            // 音の高さの階段: 各ステップの出力の基本周波数が音列の音（G2 98.00Hz → Bb2 116.54Hz → D3 146.83Hz）。120BPMの1拍ずつ（0.5秒）。
+            {
+                auto t = seqSettings ("G2,Bb2,D3");
+                t.talkboxStepBeats = 1.0f;
+                const auto out = run (vowel (180.0), t).output;
+                const int step = (int) std::lround (0.5 * fs);
+
+                for (const auto& [k, want] : { std::pair<int, double> { 0, 98.0 }, { 1, 116.54 }, { 2, 146.83 } })
+                {
+                    const double hz = peakHz (out, k * step + step / 4, step / 2, want);
+                    expect (std::abs (hz - want) / want < 0.015, "step " + juce::String (k) + ": " + juce::String (hz, 2) + " Hz, expected " + juce::String (want, 2));
+                }
+            }
+
+            // syllable: 声の立ち上がりごとに次の音へ進む。0.3秒の母音5つを0.25秒の無音で区切る。立ち上がりの位置は母音の始まり付近、音は 0,1,2,0,1 番目。
+            // 連続した1つの母音では進まない（先頭の音のまま）。声の高さを変えても立ち上がりの位置は同じ。
+            {
+                auto bursts = [&] (double f0)
+                {
+                    std::vector<float> v;
+                    const auto burst = vowelN (f0, (int) std::lround (0.3 * fs));
+
+                    for (int k = 0; k < 5; ++k)
+                    {
+                        v.insert (v.end(), (size_t) std::lround (0.25 * fs), 0.0f);
+                        v.insert (v.end(), burst.begin(), burst.end());
+                    }
+
+                    v.insert (v.end(), (size_t) std::lround (0.25 * fs), 0.0f);
+                    return v;
+                };
+
+                auto t = seqSettings ("G2,Bb2,D3");
+                t.talkboxAdvance = vc::rectool::TalkboxAdvance::Syllable;
+                const auto a = run (bursts (120.0), t);
+                const auto b = run (bursts (230.0), t);
+                expectEquals ((int) a.sequenceOnsets.size(), 5);
+                expect (a.sequenceOnsets == b.sequenceOnsets, "syllable onsets depend on the input f0");
+                const std::array<float, 5> notes { 43.0f, 46.0f, 50.0f, 43.0f, 46.0f };
+
+                for (size_t k = 0; k < a.sequenceOnsets.size(); ++k)
+                {
+                    const int start = (int) std::lround ((0.25 + 0.55 * (double) k) * fs);
+                    expect (a.sequenceOnsets[k] >= start - 100 && a.sequenceOnsets[k] < start + (int) (0.03 * fs), "onset " + juce::String ((int) k) + " at sample " + juce::String (a.sequenceOnsets[k]) + ", vowel starts at " + juce::String (start));
+                    expectEquals (a.sequenceSlotMidi[0][(size_t) start + (size_t) (0.2 * fs)], notes[k]);
+                }
+
+                expectEquals (a.sequenceSlotMidi[0][10], 43.0f); // 最初の立ち上がりまでは先頭の音
+
+                const auto cont = run (vowel (150.0), t);
+                expectEquals ((int) cont.sequenceOnsets.size(), 1);
+                expectEquals (cont.sequenceSlotMidi[0].back(), 43.0f);
+
+                // 無音・非常に小さい雑音では進まない。
+                expect (run (std::vector<float> ((size_t) len, 0.0f), t).sequenceOnsets.empty(), "silence advanced the phrase");
+                expect (run (makeWhiteNoise (len, 0.0005f, 8), t).sequenceOnsets.empty(), "quiet noise advanced the phrase");
+            }
+
+            // グライド: 音の切り替えをMIDI音高の直線で行う（0 = 階段）。43 → 55（1オクターブ）を100msで移る。
+            {
+                auto t = seqSettings ("G2,G3");
+                t.talkboxStepBeats = 1.0f; // 0.5秒
+                t.talkboxGlideMs = 100.0f;
+                const auto trace = run (vowel (150.0), t).sequenceSlotMidi[0];
+                const int boundary = (int) std::lround (0.5 * fs), g = (int) std::lround (0.1 * fs);
+                expectEquals (trace[(size_t) boundary - 1], 43.0f);
+                expectWithinAbsoluteError (trace[(size_t) boundary + g / 2], 49.0f, 0.05f);
+                expectEquals (trace[(size_t) boundary + g + 2], 55.0f);
+                bool monotonic = true;
+
+                for (int i = boundary; i < boundary + g; ++i)
+                    monotonic = monotonic && trace[(size_t) i + 1] >= trace[(size_t) i];
+
+                expect (monotonic, "glide is not monotonic");
+                expect ((int) changes (trace).size() > g - 10, "glide is not gradual");
+
+                auto stair = t;
+                stair.talkboxGlideMs = 0.0f;
+                expectEquals ((int) changes (run (vowel (150.0), stair).sequenceSlotMidi[0]).size(), 5); // 3秒 = 6ステップの5つの境界で、それぞれ1サンプルで切り替わる
+            }
+
+            // 和音: ステップに複数の音（'+'）。スロットごとの軌跡が音列どおり。D3+F#3+A3（D長三和音）の出力は、単音D3に比べて185.0Hz・220.0Hzのエネルギーが増える。
+            // --talkbox-chord（各音に重ねる）も同様（D3 + 完全5度 = 220.0Hz）。音が少ないステップは巡回して埋める。
+            {
+                auto single = seqSettings ("D3");
+                auto triad = seqSettings ("D3+F#3+A3");
+                auto fifth = seqSettings ("D3");
+                fifth.talkboxChord = { 0.0f, 7.0f };
+                const auto r1 = run (vowel (150.0), single);
+                const auto r3 = run (vowel (150.0), triad);
+                const auto r5 = run (vowel (150.0), fifth);
+                expectEquals ((int) r3.sequenceSlotMidi.size(), 3);
+                expectEquals (r3.sequenceSlotMidi[0].back(), 50.0f);
+                expectEquals (r3.sequenceSlotMidi[1].back(), 54.0f);
+                expectEquals (r3.sequenceSlotMidi[2].back(), 57.0f);
+                expectEquals ((int) r5.sequenceSlotMidi.size(), 1);
+                const auto m1 = vc::test::averagedMagnitudeSpectrum (r1.output.data() + half, half);
+                const auto m3 = vc::test::averagedMagnitudeSpectrum (r3.output.data() + half, half);
+                const auto m5 = vc::test::averagedMagnitudeSpectrum (r5.output.data() + half, half);
+                auto at = [&] (const std::vector<double>& m, double hz) { return vc::test::findPeakNear (m, fs, 1 << 14, hz, 0.02).magLinear; };
+                expect (at (m3, 185.0) > 3.0 * at (m1, 185.0) && at (m3, 220.0) > 3.0 * at (m1, 220.0), "triad partials missing: " + juce::String (at (m3, 185.0) / at (m1, 185.0), 2) + " / "
+                                                                                                           + juce::String (at (m3, 220.0) / at (m1, 220.0), 2));
+                expect (at (m5, 220.0) > 3.0 * at (m1, 220.0), "chord option partial missing: " + juce::String (at (m5, 220.0) / at (m1, 220.0), 2));
+
+                // 音の数が違うステップ（1音と3音）: スロットは3つで、1音のステップは同じ音で埋める。切り替えのたびに3つとも移る。
+                auto mixed = seqSettings ("G2,D3+F#3+A3");
+                mixed.talkboxStepBeats = 1.0f;
+                const auto rm = run (vowel (150.0), mixed);
+                expectEquals ((int) rm.sequenceSlotMidi.size(), 3);
+
+                for (size_t k = 0; k < 3; ++k)
+                {
+                    expectEquals (rm.sequenceSlotMidi[k][100], 43.0f);
+                    expectEquals (rm.sequenceSlotMidi[k][(size_t) (0.5 * fs) + 100], std::array<float, 3> { 50.0f, 54.0f, 57.0f }[k]);
+                }
+            }
+
+            // 有声度: 声が無声（雑音だけ）のとき、キャリアは雑音になる（既存の仕組み）。有声度の下限0なら雑音入力の出力は周期的でない（無声音は雑音キャリア）。
+            // 下限0.8では鋸波が主になる。ここでは「下限0は下限0.8より周期性が低い」だけ確認する。
+            {
+                const auto noise = makeWhiteNoise (len, 0.1f, 5);
+                auto floored = seqSettings ("A2");
+                auto open = floored;
+                open.talkboxVoicingFloor = 0.0f;
+                auto periodicity = [&] (const std::vector<float>& out)
+                {
+                    const double lag = fs / 110.0; // A2 = 110Hz
+                    double c = 0.0, e0 = 0.0;
+
+                    for (int i = half; i + 600 < len; ++i)
+                    {
+                        e0 += (double) out[(size_t) i] * out[(size_t) i];
+                        c += (double) out[(size_t) i] * out[(size_t) i + (size_t) std::lround (lag)];
+                    }
+
+                    return c / std::max (e0, 1.0e-30);
+                };
+                const double pf = periodicity (run (noise, floored).output), po = periodicity (run (noise, open).output);
+                expect (pf > 0.1 && po < 0.6 * pf, "voicing floor: periodicity " + juce::String (pf, 3) + " vs " + juce::String (po, 3));
+            }
+
+            // 極端な設定でも有限: 6音の和音×6スロット×デチューン4本×オクターブ上、無音・大きな雑音、グライド500ms・最短ステップ。
+            {
+                auto extreme = seqSettings ("G2+Bb2+D3+F3+A3+C4,C2+E2,96");
+                extreme.talkboxChord = { 0.0f, 4.0f, 7.0f };
+                extreme.talkboxDetuneCents = { -50.0f, -10.0f, 10.0f, 50.0f };
+                extreme.talkboxOctaveUpDb = 0.0f;
+                extreme.talkboxStepBeats = 0.0625f;
+                extreme.talkboxBpm = 200.0f;
+                extreme.talkboxGlideMs = 18.0f;
+                run (std::vector<float> ((size_t) len, 0.0f), extreme);
+                run (makeWhiteNoise (len, 1.0f, 9), extreme);
+                run (vowel (150.0), extreme);
+                extreme.talkboxAdvance = vc::rectool::TalkboxAdvance::Syllable;
+                extreme.talkboxGlideMs = 500.0f;
+                run (makeWhiteNoise (len, 1.0f, 10), extreme);
+            }
+
+            // 軌跡は、要求したときだけ残る。sequence以外では空。
+            {
+                auto off = seqSettings ("G2");
+                off.traceSequence = false;
+                expect (run (vowel (150.0), off).sequenceSlotMidi.empty(), "trace recorded without request");
+                vc::rectool::ProcessSettings quantized;
+                quantized.nrEnabled = false;
+                quantized.preset = vc::Preset::Talkbox;
+                quantized.talkboxCarrier = vc::rectool::TalkboxCarrier::Quantized;
+                quantized.traceSequence = true;
+                const auto r = run (vowel (150.0), quantized);
+                expect (r.sequenceSlotMidi.empty() && r.sequenceOnsets.empty(), "trace for a non-sequence carrier");
+            }
+
+            // 引数の検証（不正値は終了コード2）。正常な指定は0で、出力は入力と同じ長さ。
+            {
+                const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("vc_m1m", "");
+                expect (dir.createDirectory().wasOk(), "temp dir");
+                const auto inFile = dir.getChildFile ("in.wav");
+                const auto outFile = dir.getChildFile ("out.wav");
+                juce::String error;
+                const auto in150 = vowel (150.0);
+                expect (vc::rectool::writeWav16 (inFile, std::vector<float> (in150.begin(), in150.begin() + 48000), fs, error), error);
+                const juce::StringArray io { inFile.getFullPathName(), outFile.getFullPathName(), "--nr", "off", "--preset", "talkbox", "--talkbox-carrier", "sequence" };
+
+                auto run2 = [&] (std::initializer_list<const char*> extra)
+                {
+                    juce::StringArray a (io);
+
+                    for (const auto* e : extra)
+                        a.add (e);
+
+                    return vc::rectool::runProcessWav (a);
+                };
+
+                expectEquals (run2 ({ "--talkbox-seq", "G2,Bb2,D3,Bb2", "--talkbox-bpm", "120", "--talkbox-step", "0.25", "--talkbox-advance", "free", "--talkbox-glide", "30",
+                                      "--talkbox-chord", "0,7", "--talkbox-voicing-floor", "0.8", "--talkbox-detune", "-10,10", "--talkbox-consonant", "0.6" }),
+                              0);
+                vc::rectool::Audio back;
+                expect (vc::rectool::readWav (outFile, back, error), error);
+                expectEquals ((int) back.samples.size(), 48000);
+                expectEquals (run2 ({ "--talkbox-seq", "43+46+50,41", "--talkbox-advance", "syllable", "--talkbox-glide", "500" }), 0);
+                expectEquals (run2 ({ "--talkbox-seq", "G2", "--talkbox-bpm", "60", "--talkbox-step", "4", "--talkbox-glide", "500" }), 0);
+                expectEquals (run2 ({ "--talkbox-seq", "G2", "--talkbox-bpm", "200", "--talkbox-step", "0.0625" }), 0);
+
+                const std::vector<std::vector<const char*>> bad {
+                    {}, // sequence には --talkbox-seq が必須
+                    { "--talkbox-seq", "" }, { "--talkbox-seq", "G2,,D3" }, { "--talkbox-seq", "H2" }, { "--talkbox-seq", "G9" }, { "--talkbox-seq", "G2+" }, { "--talkbox-seq", "23" },
+                    { "--talkbox-seq", "G2,D3", "--talkbox-bpm", "59" }, { "--talkbox-seq", "G2,D3", "--talkbox-bpm", "201" }, { "--talkbox-seq", "G2,D3", "--talkbox-bpm", "fast" },
+                    { "--talkbox-seq", "G2,D3", "--talkbox-step", "0.06" }, { "--talkbox-seq", "G2,D3", "--talkbox-step", "4.1" }, { "--talkbox-seq", "G2,D3", "--talkbox-step", "0" },
+                    { "--talkbox-seq", "G2,D3", "--talkbox-advance", "sometimes" }, { "--talkbox-seq", "G2,D3", "--talkbox-advance", "" },
+                    { "--talkbox-seq", "G2,D3", "--talkbox-glide", "-1" }, { "--talkbox-seq", "G2,D3", "--talkbox-glide", "501" },
+                    { "--talkbox-seq", "G2,D3", "--talkbox-bpm", "120", "--talkbox-step", "0.25", "--talkbox-glide", "200" },           // グライドが1ステップ（125ms）より長い
+                    { "--talkbox-seq", "G2,D3", "--talkbox-advance", "syllable", "--talkbox-bpm", "120" },                              // syllable では bpm・step は意味を持たない
+                    { "--talkbox-seq", "G2,D3", "--talkbox-advance", "syllable", "--talkbox-step", "0.5" },
+                    { "--talkbox-seq", "G2,D3", "--talkbox-scale", "major" }, { "--talkbox-seq", "G2,D3", "--talkbox-spread", "2" }, { "--talkbox-seq", "G2,D3", "--talkbox-key", "7" } };
+
+                for (const auto& b : bad)
+                {
+                    juce::StringArray a (io);
+
+                    for (const auto* e : b)
+                        a.add (e);
+
+                    expectEquals (vc::rectool::runProcessWav (a), 2, "should be rejected: " + a.joinIntoString (" "));
+                }
+
+                // sequence 以外のキャリア・プリセットでは、フレーズの項目はすべて拒否する。
+                for (const auto* opt : { "--talkbox-seq", "--talkbox-bpm", "--talkbox-step", "--talkbox-advance", "--talkbox-glide" })
+                {
+                    const juce::String o (opt);
+                    const char* value = o == "--talkbox-seq" ? "G2" : o == "--talkbox-advance" ? "free" : o == "--talkbox-glide" ? "10" : "100";
+                    expectEquals (vc::rectool::runProcessWav (juce::StringArray { inFile.getFullPathName(), outFile.getFullPathName(), "--nr", "off", "--preset", "talkbox", opt, value }), 2,
+                                  juce::String ("should be rejected without the sequence carrier: ") + opt);
+                    expectEquals (vc::rectool::runProcessWav (juce::StringArray { inFile.getFullPathName(), outFile.getFullPathName(), "--nr", "off", "--preset", "talkbox", "--talkbox-carrier", "quantized", opt, value }), 2,
+                                  juce::String ("should be rejected with quantized: ") + opt);
+                    expectEquals (vc::rectool::runProcessWav (juce::StringArray { inFile.getFullPathName(), outFile.getFullPathName(), "--nr", "off", "--preset", "helium", "--talkbox-carrier", "sequence", opt, value }), 2,
+                                  juce::String ("should be rejected with helium: ") + opt);
+                }
+
+                dir.deleteRecursively();
+            }
+        }
     }
 };
 

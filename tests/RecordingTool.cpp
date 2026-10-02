@@ -1009,12 +1009,104 @@ void applyEqPreset (ProcessSettings& s, EqPreset preset)
     }
 }
 
+// 音名（C〜B、#またはb、オクターブ。C4 = 60）か整数のMIDI番号を、MIDI番号（24〜96）へ。
+static bool parseNoteName (const juce::String& token, float& midi)
+{
+    const auto t = token.trim();
+
+    if (t.isEmpty())
+        return false;
+
+    int value = 0;
+
+    if (t.containsOnly ("0123456789"))
+    {
+        if (t.length() > 3)
+            return false;
+
+        value = t.getIntValue();
+    }
+    else
+    {
+        static constexpr int kSemitone[7] = { 9, 11, 0, 2, 4, 5, 7 }; // A B C D E F G
+        const int letter = (int) juce::CharacterFunctions::toUpperCase (t[0]) - 'A';
+
+        if (letter < 0 || letter > 6)
+            return false;
+
+        int pos = 1, accidental = 0;
+
+        if (t[pos] == '#')
+            accidental = 1, ++pos;
+        else if (t[pos] == 'b')
+            accidental = -1, ++pos;
+
+        auto octaveText = t.substring (pos);
+        const bool negative = octaveText.startsWithChar ('-');
+
+        if (negative)
+            octaveText = octaveText.substring (1);
+
+        if (octaveText.isEmpty() || octaveText.length() > 2 || ! octaveText.containsOnly ("0123456789"))
+            return false;
+
+        value = 12 * ((negative ? -1 : 1) * octaveText.getIntValue() + 1) + kSemitone[letter] + accidental;
+    }
+
+    if (value < 24 || value > 96)
+        return false;
+
+    midi = (float) value;
+    return true;
+}
+
+bool parseNoteSequence (const juce::String& text, std::vector<std::vector<float>>& steps)
+{
+    juce::StringArray items;
+    items.addTokens (text, ",", "");
+    steps.clear();
+
+    if (items.isEmpty() || items.size() > 64)
+        return false;
+
+    for (const auto& item : items)
+    {
+        juce::StringArray notes;
+        notes.addTokens (item, "+", "");
+
+        if (notes.isEmpty() || notes.size() > 6)
+        {
+            steps.clear();
+            return false;
+        }
+
+        std::vector<float> step;
+
+        for (const auto& n : notes)
+        {
+            float midi = 0.0f;
+
+            if (! parseNoteName (n, midi))
+            {
+                steps.clear();
+                return false;
+            }
+
+            step.push_back (midi);
+        }
+
+        steps.push_back (step);
+    }
+
+    return true;
+}
+
 namespace
 {
 // ExperimentVocoderを使うか。talkboxVocoderの明示か、製品のTalkboxでは表せない設定（デチューン・オクターブ上・バンド数・高域・強調・子音）があるとき。
 bool usesVocoder (const ProcessSettings& s) noexcept
 {
-    return s.talkboxVocoder || s.talkboxDetuneCents.size() != 1 || ! juce::approximatelyEqual (s.talkboxDetuneCents[0], 0.0f) || s.talkboxOctaveUpDb.has_value()
+    return s.talkboxVocoder || s.talkboxCarrier == TalkboxCarrier::Sequence || s.talkboxDetuneCents.size() != 1 || ! juce::approximatelyEqual (s.talkboxDetuneCents[0], 0.0f) || s.talkboxOctaveUpDb.has_value()
            || s.talkboxBands != 20 || ! juce::approximatelyEqual (s.talkboxHighHz, 7000.0f) || s.talkboxAirDb > 0.0f || s.talkboxConsonant > 0.0f;
 }
 
@@ -1047,19 +1139,21 @@ public:
     static constexpr float kSplitHz = 2500.0f;      // これ以上のバンドが子音用のキャリアを使う
     static constexpr float kAirStartHz = 3000.0f, kAirFullHz = 8000.0f;
 
-    void prepare (double fs, int maxBlock, const VocoderConfig& cfg)
+    // slotCountは、キャリアの音程を個別に指定できる音の数（固定フレーズの和音。通常は1）。鋸波の本数 = slotCount × cfg.ratios.size()。
+    void prepare (double fs, int maxBlock, const VocoderConfig& cfg, int slotCount = 1)
     {
         config = cfg;
         sampleRate = fs;
         carrierLow.assign ((size_t) maxBlock, 0.0f);
         carrierHigh.assign ((size_t) maxBlock, 0.0f);
         scratchMod.assign ((size_t) maxBlock, 0.0f);
-        phases.assign (cfg.ratios.size(), 0.0);
-        jassert (cfg.ratios.size() == cfg.gains.size() && ! cfg.ratios.empty());
+        phases.assign (cfg.ratios.size() * (size_t) slotCount, 0.0);
+        jassert (cfg.ratios.size() == cfg.gains.size() && ! cfg.ratios.empty() && slotCount >= 1);
 
         double power = 0.0;
         for (const auto g : cfg.gains)
             power += (double) g * (double) g;
+        power *= (double) slotCount;
         sumNorm = (float) (1.0 / std::sqrt (power));
 
         const double high = std::min ((double) cfg.highHz, fs * 0.4);
@@ -1095,7 +1189,8 @@ public:
     }
 
     // voicingFlooredは下限適用後（低域のキャリアと、consonant = 0 のときの高域）、voicingRawは検出器の値（consonant > 0 の高域へ混ぜる）。modulator == outでもよい。
-    void process (const float* modulator, float* out, int n, float carrierHz, float voicingFloored, float voicingRaw) noexcept
+    // slotHzを渡すと、キャリアの基本周波数はそれ（スロットごとにn個、スロット順に並べたサンプルごとの値。平滑・グライドは呼び出し側）になり、carrierHzは使わない。
+    void process (const float* modulator, float* out, int n, float carrierHz, float voicingFloored, float voicingRaw, const float* slotHz = nullptr) noexcept
     {
         const float fMax = (float) (sampleRate * 0.25);
         carrierFreq.setTargetValue (juce::jlimit (40.0f, fMax, carrierHz));
@@ -1110,11 +1205,15 @@ public:
             const float vh = vHigh.getNextValue();
             float sum = 0.0f;
 
+            const size_t perSlot = config.ratios.size();
+
             for (size_t k = 0; k < phases.size(); ++k)
             {
-                const float dt = juce::jlimit (40.0f, fMax, f * config.ratios[k]) / (float) sampleRate;
+                const size_t slot = k / perSlot, r = k % perSlot;
+                const float base = slotHz != nullptr ? slotHz[slot * (size_t) n + (size_t) i] : f;
+                const float dt = juce::jlimit (40.0f, fMax, base * config.ratios[r]) / (float) sampleRate;
                 const float t = (float) phases[k];
-                sum += config.gains[k] * (2.0f * t - 1.0f - polyBlep (t, dt));
+                sum += config.gains[r] * (2.0f * t - 1.0f - polyBlep (t, dt));
                 phases[k] += (double) dt;
                 if (phases[k] >= 1.0)
                     phases[k] -= 1.0;
@@ -1243,6 +1342,165 @@ private:
     int note = -1;       // MIDIノート番号（未確定は-1）
 };
 
+// 固定フレーズ・キャリアの音程の発生器。声のf0には一切触れない（入力はsyllableの立ち上がり検出に使う包絡だけ）。
+// free: ステップの境界はステップ長（60/bpm × stepBeats 秒、小数のサンプル数で累積。ドリフトなし）の整数倍のサンプル（切り上げ）。
+// syllable: 低域（約800Hz以下。母音の有声部）の包絡が、直前の谷から約5dB以上持ち上がった点で次の音へ進める。無声子音（摩擦音）は低域が少ないので進めない。
+//   最初の立ち上がりで先頭の音が鳴り（それまでも先頭の音）、立ち上がりの間隔は最短kMinIntervalSec（1つの音節の中の揺れで進めない）。声がない間は進まない。
+// グライド: 音が切り替わるとき、MIDI音高の直線でglideSamplesかけて移る（0 = 階段）。
+// スロット: 1ステップの音の数の最大値。音が少ないステップは巡回して埋める（スロットの音 = notes[slot % 音の数]）。
+class PhraseSequencer
+{
+public:
+    PhraseSequencer (const ProcessSettings& s, double fs, bool recordTraceFlag)
+        : steps (s.talkboxSeq), syllable (s.talkboxAdvance == TalkboxAdvance::Syllable), recordTrace (recordTraceFlag)
+    {
+        jassert (! steps.empty());
+
+        for (const auto& st : steps)
+            slotCount = std::max (slotCount, (int) st.size());
+
+        samplesPerStep = 60.0 / (double) s.talkboxBpm * (double) s.talkboxStepBeats * fs;
+        glideSamples = (int) std::lround ((double) s.talkboxGlideMs * 0.001 * fs);
+        nextBoundary = samplesPerStep;
+        lpCoeff = (float) std::exp (-2.0 * juce::MathConstants<double>::pi * 800.0 / fs);
+        attack = (float) std::exp (-1.0 / (0.003 * fs));
+        release = (float) std::exp (-1.0 / (0.030 * fs));
+        minIntervalSamples = (long long) std::lround (kMinIntervalSec * fs);
+        current.assign ((size_t) slotCount, 0.0f);
+        target.assign ((size_t) slotCount, 0.0f);
+        increment.assign ((size_t) slotCount, 0.0f);
+        trace.assign ((size_t) slotCount, {});
+        setStep (0, true);
+    }
+
+    int slots() const noexcept { return slotCount; }
+
+    // inputは声（マイク処理後）のn個。slotHzへスロット順（スロット0のn個、スロット1のn個…）で、サンプルごとのキャリア周波数（Hz）を書く。
+    void process (const float* input, int n, float* slotHz)
+    {
+        for (int i = 0; i < n; ++i, ++clock)
+        {
+            if (syllable)
+            {
+                if (detectOnset (input[i]))
+                {
+                    onsets.push_back ((int) clock);
+
+                    if (started)
+                        setStep (stepIndex + 1, false);
+
+                    started = true;
+                }
+            }
+            else
+            {
+                while ((double) clock >= nextBoundary)
+                {
+                    setStep (stepIndex + 1, false);
+                    nextBoundary += samplesPerStep;
+                }
+            }
+
+            for (size_t k = 0; k < (size_t) slotCount; ++k)
+            {
+                if (remaining > 0)
+                {
+                    current[k] += increment[k];
+
+                    if (remaining == 1)
+                        current[k] = target[k];
+                }
+
+                slotHz[k * (size_t) n + (size_t) i] = 440.0f * std::exp2 ((current[k] - 69.0f) / 12.0f);
+
+                if (recordTrace)
+                    trace[k].push_back (current[k]);
+            }
+
+            if (remaining > 0)
+                --remaining;
+        }
+    }
+
+    const std::vector<int>& onsetList() const noexcept { return onsets; }
+    const std::vector<std::vector<float>>& traceList() const noexcept { return trace; }
+
+private:
+    static constexpr double kMinIntervalSec = 0.09;
+    static constexpr float kRiseRatio = 2.5f; // 約8dB（谷からこれだけ上がったら立ち上がり）
+    static constexpr float kDipRatio = 1.8f;  // 約5dB（立ち上がったあと、ピークからこれだけ下がるまで次の立ち上がりを検出しない）
+    static constexpr float kFloor = 0.003f;   // 低域の包絡がこれ（約-50dBFS）未満の立ち上がりは声とみなさない
+
+    // 声の低域の包絡の立ち上がりを検出する。立ち上がり（谷からkRiseRatio倍）を検出したら、ピークからkDipRatio分下がる（音節の切れ目）まで待ってから再び検出する
+    // （1つの音節の立ち上がりの途中で2回数えない）。
+    bool detectOnset (float x) noexcept
+    {
+        lp = lpCoeff * lp + (1.0f - lpCoeff) * x;
+        const float rect = std::abs (lp);
+        const float coeff = rect > env ? attack : release;
+        env = coeff * env + (1.0f - coeff) * rect;
+
+        if (! armed)
+        {
+            peak = std::max (peak, env);
+
+            if (env * kDipRatio < peak)
+            {
+                armed = true;
+                valley = env;
+            }
+
+            return false;
+        }
+
+        valley = std::min (valley, env);
+
+        if (env > kFloor && env > kRiseRatio * std::max (valley, 1.0e-5f) && clock - lastOnset >= minIntervalSamples)
+        {
+            lastOnset = clock;
+            armed = false;
+            peak = env;
+            return true;
+        }
+
+        return false;
+    }
+
+    // 音の切り替え。idxはステップ番号（巡回）。immediateなら現在値も即座に移す。
+    void setStep (long long idx, bool immediate)
+    {
+        stepIndex = idx;
+        const auto& notes = steps[(size_t) (idx % (long long) steps.size())];
+
+        for (size_t k = 0; k < (size_t) slotCount; ++k)
+        {
+            target[k] = notes[k % notes.size()];
+
+            if (immediate || glideSamples <= 0)
+            {
+                current[k] = target[k];
+                increment[k] = 0.0f;
+            }
+            else
+            {
+                increment[k] = (target[k] - current[k]) / (float) glideSamples;
+            }
+        }
+
+        remaining = immediate || glideSamples <= 0 ? 0 : glideSamples;
+    }
+
+    std::vector<std::vector<float>> steps;
+    bool syllable = false, recordTrace = false, started = false, armed = true;
+    int slotCount = 1, glideSamples = 0, remaining = 0;
+    double samplesPerStep = 0.0, nextBoundary = 0.0;
+    long long clock = 0, stepIndex = 0, lastOnset = -1000000000LL, minIntervalSamples = 0;
+    std::vector<float> current, target, increment;
+    std::vector<std::vector<float>> trace;
+    std::vector<int> onsets;
+    float lpCoeff = 0.0f, attack = 0.0f, release = 0.0f, lp = 0.0f, env = 0.0f, valley = 1.0f, peak = 0.0f;
+};
+
 // 試聴用の経路。Engineのプリセット表を通さずに、移調量・フォルマント係数・トークボックスのキャリアを自由に決める。
 // 並びは製品のEngineと同じ: マイク処理（Engine A） → ピッチ検出 → シフター → トークボックス → 層1（Engine B: リバーブ・ゲイン・リミッター）。
 // Engine A・Bはどちらもプリセット ノーマル・ピッチ0（シフターは休止）で、Aはマイク処理だけ、Bは層1だけを使う。
@@ -1299,7 +1557,13 @@ public:
                     }
                 }
 
-            vocoder.prepare (fs, block, cfg);
+            if (s.talkboxCarrier == TalkboxCarrier::Sequence)
+            {
+                sequencer = std::make_unique<PhraseSequencer> (s, fs, s.traceSequence);
+                slotHz.assign ((size_t) sequencer->slots() * (size_t) block, 0.0f);
+            }
+
+            vocoder.prepare (fs, block, cfg, sequencer != nullptr ? sequencer->slots() : 1);
         }
 
         mod.assign ((size_t) block, 0.0f);
@@ -1331,7 +1595,11 @@ public:
 
             if (vocoderOn)
             {
-                vocoder.process (buf, buf, n, base, voicing, detector.getVoicing());
+                // 固定フレーズ: キャリアの音程は音列だけで決まる（検出したf0は使わない。有声度だけ検出器の値）。
+                if (sequencer != nullptr)
+                    sequencer->process (buf, n, slotHz.data());
+
+                vocoder.process (buf, buf, n, base, voicing, detector.getVoicing(), sequencer != nullptr ? slotHz.data() : nullptr);
             }
             else
             {
@@ -1352,6 +1620,7 @@ public:
         layer1->process (buf, n);
     }
 
+    const PhraseSequencer* phrase() const noexcept { return sequencer.get(); }
     int shifterLatencySamples() const noexcept { return shifter.getLatencySamples(); }
     std::uint32_t errorFlags() const noexcept { return layer1->getErrorFlags(); }
 
@@ -1364,6 +1633,8 @@ private:
     PitchDetector detector;
     std::vector<Talkbox> talkbox;
     ExperimentVocoder vocoder;
+    std::unique_ptr<PhraseSequencer> sequencer;
+    std::vector<float> slotHz;
     QuantizedPitch quantizer { s.talkboxScale, s.talkboxKey, s.talkboxSpread };
     double sampleRateForQuantizer = 48000.0;
     std::vector<float> mod, tmp;
@@ -1436,6 +1707,18 @@ ProcessResult processAudio (const std::vector<float>& input, double fs, const Pr
     const size_t drop = std::min (padded, (size_t) (latency + result.shifterLatencySamples));
     result.output.assign (buf.begin() + (long) drop, buf.begin() + (long) std::min (padded, drop + input.size()));
     result.output.resize (input.size(), 0.0f);
+
+    if (chain != nullptr && chain->phrase() != nullptr)
+    {
+        for (const auto onset : chain->phrase()->onsetList())
+            if ((size_t) onset < input.size())
+                result.sequenceOnsets.push_back (onset);
+
+        if (s.traceSequence)
+            for (const auto& slot : chain->phrase()->traceList())
+                result.sequenceSlotMidi.emplace_back (slot.begin(), slot.begin() + (long) std::min (slot.size(), input.size()));
+    }
+
     result.errorFlags = engine.getErrorFlags() | (chain != nullptr ? chain->errorFlags() : 0u);
     result.underflowCount = engine.debugNoiseReducer().getUnderflowCount();
     return result;
@@ -1569,7 +1852,7 @@ int runProcessWav (const juce::StringArray& args)
                                    { "--bg", "--impact", "--eq", "--eq-gain", "--nr", "--settings", "--segments", "--trace", "--preset", "--gain", "--pitch", "--reverb",
                                      "--semitones", "--formant", "--talkbox-carrier", "--talkbox-hz", "--talkbox-chord", "--talkbox-voicing-floor",
                                      "--talkbox-scale", "--talkbox-key", "--talkbox-spread", "--talkbox-detune", "--talkbox-octave-up", "--talkbox-bands", "--talkbox-high-hz",
-                                     "--talkbox-air-db", "--talkbox-consonant" },
+                                     "--talkbox-air-db", "--talkbox-consonant", "--talkbox-seq", "--talkbox-bpm", "--talkbox-step", "--talkbox-advance", "--talkbox-glide" },
                                    { "--float" });
     const char* usage = "usage: VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.65] [--impact 0.15] [--nr on|off] [--eq on|off|a2|a3|sonar] [--eq-gain -12..12]\n"
                         "                                     [--settings <VoiceChange.settings>] [--segments <file>] [--trace <csv>] [--float]\n"
@@ -1578,7 +1861,9 @@ int runProcessWav (const juce::StringArray& args)
                         "                                     [--talkbox-carrier follow|fixed|quantized] [--talkbox-hz 40..1000] [--talkbox-chord 0,4,7] [--talkbox-voicing-floor 0..1]   (audition: talkbox only)\n"
                         "                                     [--talkbox-scale chromatic|major|minor] [--talkbox-key 0..11] [--talkbox-spread 0.5..4]   (quantized carrier only; key 0 = C)\n"
                         "                                     [--talkbox-detune -12,0,12] [--talkbox-octave-up -24..0] [--talkbox-bands 8..48] [--talkbox-high-hz 4000..12000]\n"
-                        "                                     [--talkbox-air-db 0..12] [--talkbox-consonant 0..1]   (audition: talkbox vocoder experiments)\n";
+                        "                                     [--talkbox-air-db 0..12] [--talkbox-consonant 0..1]   (audition: talkbox vocoder experiments)\n"
+                        "                                     [--talkbox-carrier sequence --talkbox-seq G2,Bb2,D3+F3,43 [--talkbox-bpm 60..200] [--talkbox-step 0.0625..4]\n"
+                        "                                      [--talkbox-advance free|syllable] [--talkbox-glide 0..500]]   (fixed phrase carrier; notes: C4 = 60, '+' joins a chord; bpm/step with free only)\n";
 
     if (! parsed.error.isEmpty() || parsed.positional.size() != 2)
     {
@@ -1778,13 +2063,16 @@ int runProcessWav (const juce::StringArray& args)
     {
         const auto v = parsed.options["--talkbox-carrier"].toLowerCase();
 
-        if (v != "follow" && v != "fixed" && v != "quantized")
+        if (v != "follow" && v != "fixed" && v != "quantized" && v != "sequence")
         {
-            printError ("--talkbox-carrier must be follow, fixed or quantized");
+            printError ("--talkbox-carrier must be follow, fixed, quantized or sequence");
             return 2;
         }
 
-        settings.talkboxCarrier = v == "fixed" ? TalkboxCarrier::Fixed : v == "quantized" ? TalkboxCarrier::Quantized : TalkboxCarrier::Follow;
+        settings.talkboxCarrier = v == "fixed"       ? TalkboxCarrier::Fixed
+                                  : v == "quantized" ? TalkboxCarrier::Quantized
+                                  : v == "sequence"  ? TalkboxCarrier::Sequence
+                                                     : TalkboxCarrier::Follow;
     }
 
     if (parsed.options.containsKey ("--talkbox-scale"))
@@ -1858,6 +2146,72 @@ int runProcessWav (const juce::StringArray& args)
         settings.talkboxChord = chord;
     }
 
+    // 固定フレーズ・キャリア（sequence）の項目。sequenceでは--talkbox-seqが必須で、seq・bpm・step・advance・glideはsequenceのときだけ意味を持つ。
+    {
+        double bpm = settings.talkboxBpm, step = settings.talkboxStepBeats, glide = settings.talkboxGlideMs;
+
+        if (! readNumber ("--talkbox-bpm", 60.0, 200.0, bpm) || ! readNumber ("--talkbox-step", 0.0625, 4.0, step) || ! readNumber ("--talkbox-glide", 0.0, 500.0, glide))
+            return 2;
+
+        settings.talkboxBpm = (float) bpm;
+        settings.talkboxStepBeats = (float) step;
+        settings.talkboxGlideMs = (float) glide;
+
+        if (parsed.options.containsKey ("--talkbox-advance"))
+        {
+            const auto v = parsed.options["--talkbox-advance"].toLowerCase();
+
+            if (v != "free" && v != "syllable")
+            {
+                printError ("--talkbox-advance must be free or syllable");
+                return 2;
+            }
+
+            settings.talkboxAdvance = v == "syllable" ? TalkboxAdvance::Syllable : TalkboxAdvance::Free;
+        }
+
+        bool sequenceOptionGiven = false;
+
+        for (const char* k : { "--talkbox-seq", "--talkbox-bpm", "--talkbox-step", "--talkbox-advance", "--talkbox-glide" })
+            sequenceOptionGiven = sequenceOptionGiven || parsed.options.containsKey (k);
+
+        if (settings.talkboxCarrier != TalkboxCarrier::Sequence)
+        {
+            if (sequenceOptionGiven)
+            {
+                printError ("--talkbox-seq, --talkbox-bpm, --talkbox-step, --talkbox-advance and --talkbox-glide can be used with --talkbox-carrier sequence only");
+                return 2;
+            }
+        }
+        else
+        {
+            if (! parsed.options.containsKey ("--talkbox-seq"))
+            {
+                printError ("--talkbox-carrier sequence needs --talkbox-seq (e.g. G2,Bb2,D3,Bb2)");
+                return 2;
+            }
+
+            if (! parseNoteSequence (parsed.options["--talkbox-seq"], settings.talkboxSeq))
+            {
+                printError ("--talkbox-seq must be 1 to 64 steps separated by commas, each 1 to 6 notes joined by '+' (note names like G2 Bb2 F#3 with C4 = 60, or MIDI numbers 24 to 96): "
+                            + parsed.options["--talkbox-seq"]);
+                return 2;
+            }
+
+            if (settings.talkboxAdvance == TalkboxAdvance::Syllable && (parsed.options.containsKey ("--talkbox-bpm") || parsed.options.containsKey ("--talkbox-step")))
+            {
+                printError ("--talkbox-bpm and --talkbox-step have no effect with --talkbox-advance syllable");
+                return 2;
+            }
+
+            if (settings.talkboxAdvance == TalkboxAdvance::Free && settings.talkboxGlideMs > 1000.0f * 60.0f / settings.talkboxBpm * settings.talkboxStepBeats)
+            {
+                printError ("--talkbox-glide is longer than one step (60 / bpm * step seconds)");
+                return 2;
+            }
+        }
+    }
+
     // 上書き・実験用のキャリアは、ピッチの効果だけ（またはトークボックス）のプリセットでだけ意味を持つ。無視されて取り違えないよう、他は拒否する。
     // （ケロケロの効果はEffect::Noneだが補正量をEngineが計算するため、試聴用の経路では再現できない。プリセットのIDで判定する）
     const bool overridable = settings.preset == Preset::Normal || settings.preset == Preset::Helium || settings.preset == Preset::Minion || settings.preset == Preset::Giant
@@ -1872,7 +2226,8 @@ int runProcessWav (const juce::StringArray& args)
     bool talkboxOptionGiven = false;
 
     for (const char* k : { "--talkbox-carrier", "--talkbox-hz", "--talkbox-chord", "--talkbox-voicing-floor", "--talkbox-scale", "--talkbox-key", "--talkbox-spread", "--talkbox-detune",
-                           "--talkbox-octave-up", "--talkbox-bands", "--talkbox-high-hz", "--talkbox-air-db", "--talkbox-consonant" })
+                           "--talkbox-octave-up", "--talkbox-bands", "--talkbox-high-hz", "--talkbox-air-db", "--talkbox-consonant", "--talkbox-seq", "--talkbox-bpm", "--talkbox-step",
+                           "--talkbox-advance", "--talkbox-glide" })
         talkboxOptionGiven = talkboxOptionGiven || parsed.options.containsKey (k);
 
     if (talkboxOptionGiven && settings.preset != Preset::Talkbox)
@@ -1938,7 +2293,13 @@ int runProcessWav (const juce::StringArray& args)
                                                                                                           : settings.talkboxScale == TalkboxScale::Minor ? "minor"
                                                                                                                                                          : "chromatic")
                                                                              + ", key " + juce::String (settings.talkboxKey) + ", spread " + juce::String (settings.talkboxSpread, 2) + ")"
-                                                                       : juce::String ("follow f0"))
+                : settings.talkboxCarrier == TalkboxCarrier::Sequence
+                    ? "fixed phrase (" + juce::String ((int) settings.talkboxSeq.size()) + " steps, "
+                          + (settings.talkboxAdvance == TalkboxAdvance::Syllable
+                                 ? juce::String ("advance per syllable")
+                                 : juce::String (settings.talkboxBpm, 1) + " bpm, " + juce::String (settings.talkboxStepBeats, 4) + " beat steps")
+                          + ", glide " + juce::String (settings.talkboxGlideMs, 0) + " ms)"
+                    : juce::String ("follow f0"))
             << " chord";
 
         for (const auto c : settings.talkboxChord)
@@ -1957,6 +2318,14 @@ int runProcessWav (const juce::StringArray& args)
             if (settings.talkboxOctaveUpDb.has_value())
                 out << ", octave up " << juce::String (*settings.talkboxOctaveUpDb, 1) << " dB";
         }
+    }
+
+    if (settings.talkboxCarrier == TalkboxCarrier::Sequence && settings.talkboxAdvance == TalkboxAdvance::Syllable)
+    {
+        out << ", syllable onsets " << (int) result.sequenceOnsets.size() << " at s:";
+
+        for (const auto o : result.sequenceOnsets)
+            out << " " << juce::String ((double) o / in.sampleRate, 2);
     }
 
     out << ", block " << juce::String (result.blocks.empty() ? 0 : result.blocks.front().blockSamples) << " samples\n";
