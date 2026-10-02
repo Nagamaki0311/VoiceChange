@@ -34,8 +34,15 @@ constexpr float kTalkboxCarrierLevelFloor = 1.0e-5f;
 constexpr double kSmoothSeconds = 0.005;
 constexpr float kTalkboxMinCarrierHz = 40.0f;
 
-// 出力音量を入力と揃える固定の補正ゲイン（X3で母音3種×f0 3種の中央値から決めた。docs/spec.mdに記録）。
-constexpr float kTalkboxGain = 0.904f; // 中央値+0.88dBを打ち消す
+// キャリアは鋸波2本（±10セントのデチューン。厚み）の和。位相はそれぞれ別に持つ。
+constexpr std::array<float, 2> kTalkboxDetuneCents { -10.0f, 10.0f };
+// 有声度の下限。検出器が無声寄りに判定するフレーム（低い声・息混じり）でも、低域・中域のキャリアは鋸波を主にして音程のあるフレーズを保つ。
+constexpr float kTalkboxVoicingFloor = 0.8f;
+// 2.5kHz以上のバンドのキャリアを、下限適用後の有声度から検出器の値そのままへ近づける割合。無声の摩擦音（s・sh）を雑音で鳴らし、子音を保つ。
+constexpr float kTalkboxConsonant = 0.6f;
+constexpr double kTalkboxConsonantSplitHz = 2500.0;
+// 鋸波2本の和を1本ぶんの振幅へそろえる（電力の和を1にする）。
+constexpr float kTalkboxSawNorm = 0.70710678f;
 
 double onePoleCoeff (double seconds, double sampleRate) noexcept
 {
@@ -123,13 +130,59 @@ void RingModulator::process (const float* in, float* out, int n) noexcept
     }
 }
 
+// ===== SECTION: PhraseSequencer =====
+
+void PhraseSequencer::prepare (double fs)
+{
+    sampleRateInt = std::llround (fs);
+    jassert (boundaryOf (1) >= 1 && boundaryOf (2) - boundaryOf (1) >= 1); // ステップ長が1サンプル以上（next()は1回に1ステップだけ進める）
+    reset();
+}
+
+long long PhraseSequencer::boundaryOf (long long step) const noexcept
+{
+    constexpr long long denominator = (long long) kBpm * kStepsPerBeat;
+    return (step * 60 * sampleRateInt + denominator - 1) / denominator;
+}
+
+void PhraseSequencer::reset() noexcept
+{
+    clock = 0;
+    stepIndex = 0;
+    nextBoundary = boundaryOf (1);
+    hz = midiToHz (kMidiNotes[0]);
+}
+
+float PhraseSequencer::midiToHz (int midiNote) noexcept
+{
+    return 440.0f * std::exp2 (((float) midiNote - 69.0f) / 12.0f);
+}
+
+float PhraseSequencer::next() noexcept
+{
+    if (clock >= nextBoundary)
+    {
+        ++stepIndex;
+        nextBoundary = boundaryOf (stepIndex + 1);
+        hz = midiToHz (kMidiNotes[(size_t) (stepIndex % kNumSteps)]);
+    }
+
+    ++clock;
+    return hz;
+}
+
 // ===== SECTION: Talkbox =====
 
 void Talkbox::prepare (double fs, int maxBlockSamples)
 {
     sampleRate = fs;
-    carrierScratch.assign ((size_t) maxBlockSamples, 0.0f);
+    carrierLowScratch.assign ((size_t) maxBlockSamples, 0.0f);
+    carrierHighScratch.assign ((size_t) maxBlockSamples, 0.0f);
     modulatorScratch.assign ((size_t) maxBlockSamples, 0.0f);
+    sequencer.prepare (fs);
+
+    for (size_t k = 0; k < detuneRatio.size(); ++k)
+        detuneRatio[k] = std::exp2 (kTalkboxDetuneCents[k] / 1200.0f);
 
     const double high = std::min (kTalkboxHighHz, fs * 0.4);
     const double ratio = std::pow (high / kTalkboxLowHz, 1.0 / (double) (kNumBands - 1));
@@ -143,15 +196,17 @@ void Talkbox::prepare (double fs, int maxBlockSamples)
             bands[(size_t) b].mod[(size_t) stage].coefficients = juce::dsp::IIR::Coefficients<float>::makeBandPass (fs, centre, kTalkboxBandQ);
             bands[(size_t) b].carrier[(size_t) stage].coefficients = juce::dsp::IIR::Coefficients<float>::makeBandPass (fs, centre, kTalkboxCarrierBandQ);
         }
+
+        bands[(size_t) b].useHighCarrier = (double) centre >= kTalkboxConsonantSplitHz;
     }
 
     attackCoeff = (float) onePoleCoeff (kTalkboxAttackSeconds, fs);
     releaseCoeff = (float) onePoleCoeff (kTalkboxReleaseSeconds, fs);
 
-    carrierFreq.reset (fs, kSmoothSeconds);
-    carrierFreq.setCurrentAndTargetValue (110.0f);
-    voicingSmoothed.reset (fs, kSmoothSeconds);
-    voicingSmoothed.setCurrentAndTargetValue (0.0f);
+    voicingLow.reset (fs, kSmoothSeconds);
+    voicingLow.setCurrentAndTargetValue (0.0f);
+    voicingHigh.reset (fs, kSmoothSeconds);
+    voicingHigh.setCurrentAndTargetValue (0.0f);
 
     reset();
 }
@@ -168,30 +223,47 @@ void Talkbox::reset() noexcept
         band.carrierEnvelope = kTalkboxCarrierLevelInit;
     }
 
-    phase = 0.0;
+    phase = { 0.0, 0.0 };
+    sequencer.reset();
 }
 
-void Talkbox::process (const float* modulator, float* out, int n, float carrierHz, float voicing) noexcept
+void Talkbox::process (const float* modulator, float* out, int n, float pitchRatio, TalkboxRange range, float voicing) noexcept
 {
     const float fMax = (float) (sampleRate * 0.25);
-    carrierFreq.setTargetValue (juce::jlimit (kTalkboxMinCarrierHz, fMax, carrierHz));
-    voicingSmoothed.setTargetValue (juce::jlimit (0.0f, 1.0f, voicing));
+    const float scale = pitchRatio * (range == TalkboxRange::High ? 2.0f : 1.0f);
 
-    // キャリア（PolyBLEP鋸波と白色雑音を有声度で混合）。
-    float* carrier = carrierScratch.data();
+    // 有声度: 低域・中域のキャリアは下限適用後、2.5kHz以上は下限適用後から検出器の値へ子音ぶん近づけた値。
+    const float raw = juce::jlimit (0.0f, 1.0f, voicing);
+    const float floored = std::max (raw, kTalkboxVoicingFloor);
+    voicingLow.setTargetValue (floored);
+    voicingHigh.setTargetValue (juce::jlimit (0.0f, 1.0f, floored + kTalkboxConsonant * (raw - floored)));
+
+    // キャリア（PolyBLEP鋸波2本の和と白色雑音を有声度で混合）。低域・中域用と、2.5kHz以上（子音）用の2本を作る。
+    float* carrierLow = carrierLowScratch.data();
+    float* carrierHigh = carrierHighScratch.data();
+
     for (int i = 0; i < n; ++i)
     {
-        const float dt = carrierFreq.getNextValue() / (float) sampleRate;
-        const float v = voicingSmoothed.getNextValue();
-        const float t = (float) phase;
+        const float base = sequencer.next() * scale;
+        const float vl = voicingLow.getNextValue();
+        const float vh = voicingHigh.getNextValue();
+        float sum = 0.0f;
 
-        const float saw = 2.0f * t - 1.0f - polyBlep (t, dt);
+        for (size_t k = 0; k < phase.size(); ++k)
+        {
+            const float dt = juce::jlimit (kTalkboxMinCarrierHz, fMax, base * detuneRatio[k]) / (float) sampleRate;
+            const float t = (float) phase[k];
+            sum += 2.0f * t - 1.0f - polyBlep (t, dt);
+
+            phase[k] += (double) dt;
+            if (phase[k] >= 1.0)
+                phase[k] -= 1.0;
+        }
+
+        sum *= kTalkboxSawNorm;
         const float noise = rng.nextFloat() * 2.0f - 1.0f;
-        carrier[i] = v * saw + (1.0f - v) * noise;
-
-        phase += (double) dt;
-        if (phase >= 1.0)
-            phase -= 1.0;
+        carrierLow[i] = vl * sum + (1.0f - vl) * noise;
+        carrierHigh[i] = vh * sum + (1.0f - vh) * noise;
     }
 
     // modulator == outでも壊れないよう、入力をコピーしてから出力を積算する。
@@ -201,6 +273,7 @@ void Talkbox::process (const float* modulator, float* out, int n, float carrierH
 
     for (auto& band : bands)
     {
+        const float* carrier = band.useHighCarrier ? carrierHigh : carrierLow;
         float env = band.envelope;
         float carrierEnv = band.carrierEnvelope;
 
@@ -222,7 +295,7 @@ void Talkbox::process (const float* modulator, float* out, int n, float carrierH
         band.carrierEnvelope = carrierEnv;
     }
 
-    juce::FloatVectorOperations::multiply (out, kTalkboxGain, n);
+    juce::FloatVectorOperations::multiply (out, kOutputGain[(size_t) range], n);
 }
 
 } // namespace vc

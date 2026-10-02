@@ -13,7 +13,6 @@ constexpr double kBypassCrossfadeSeconds = 0.020;
 constexpr double kGainRampSeconds = 0.050;
 constexpr double kReverbRampSeconds = 0.020;
 constexpr double kEffectCrossfadeSeconds = 0.020;
-constexpr float kDefaultCarrierHz = 110.0f; // 一度も有声にならないうちのトークボックスのキャリア
 constexpr float kVoicedThreshold = 0.5f;
 
 bool allFinite (const float* data, int n) noexcept
@@ -188,7 +187,7 @@ void Engine::applyLimiter (float* buf, int n) noexcept
     juce::FloatVectorOperations::clip (buf, buf, -1.0f, 1.0f, n);
 }
 
-void Engine::runEffect (Effect effect, const float* in, float* out, int n, float carrierHz, float voicing) noexcept
+void Engine::runEffect (Effect effect, const float* in, float* out, int n, float pitchRatio, TalkboxRange range, float voicing) noexcept
 {
     switch (effect)
     {
@@ -198,13 +197,13 @@ void Engine::runEffect (Effect effect, const float* in, float* out, int n, float
             break;
         case Effect::Echo:     echo.process (in, out, n); break;
         case Effect::Robot:    ringMod.process (in, out, n); break;
-        case Effect::Talkbox:  talkbox.process (in, out, n, carrierHz, voicing); break;
+        case Effect::Talkbox:  talkbox.process (in, out, n, pitchRatio, range, voicing); break;
     }
 }
 
 // 層2のピッチ以外の効果。効果が変わるときは新効果をreset()し、旧新を20ms並行処理してクロスフェードする。
 // 切替中に来た次の変更は、切替が終わった次のブロックで反映する（保留）。
-void Engine::processLayer2 (float* buf, int n, Effect desired, float carrierHz, float voicing) noexcept
+void Engine::processLayer2 (float* buf, int n, Effect desired, float pitchRatio, TalkboxRange range, float voicing) noexcept
 {
     if (! fading && desired != activeEffect)
     {
@@ -217,20 +216,20 @@ void Engine::processLayer2 (float* buf, int n, Effect desired, float carrierHz, 
         {
             case Effect::Echo:    echo.reset(); break;
             case Effect::Robot:   ringMod.reset(); break;
-            case Effect::Talkbox: talkbox.reset(); break;
+            case Effect::Talkbox: talkbox.reset(); break; // フレーズも先頭の音から始め直す（D-028）
             case Effect::None:    break;
         }
     }
 
     if (! fading)
     {
-        runEffect (activeEffect, buf, buf, n, carrierHz, voicing);
+        runEffect (activeEffect, buf, buf, n, pitchRatio, range, voicing);
         return;
     }
 
     std::memcpy (fxInScratch.data(), buf, sizeof (float) * (size_t) n);
-    runEffect (fadeFrom, fxInScratch.data(), fxOldScratch.data(), n, carrierHz, voicing);
-    runEffect (activeEffect, fxInScratch.data(), buf, n, carrierHz, voicing);
+    runEffect (fadeFrom, fxInScratch.data(), fxOldScratch.data(), n, pitchRatio, range, voicing);
+    runEffect (activeEffect, fxInScratch.data(), buf, n, pitchRatio, range, voicing);
 
     for (int i = 0; i < n && fadePos < fadeLen; ++i, ++fadePos)
     {
@@ -242,7 +241,7 @@ void Engine::processLayer2 (float* buf, int n, Effect desired, float carrierHz, 
         fading = false;
 }
 
-void Engine::processChain (float* buf, int n, int presetIdx, int pitchSemis, float gainDb, float reverbAmt) noexcept
+void Engine::processChain (float* buf, int n, int presetIdx, int pitchSemis, float gainDb, float reverbAmt, TalkboxRange talkboxRange) noexcept
 {
     const auto presetEnum = static_cast<Preset> (presetIdx);
     const auto& spec = kPresets[(size_t) presetIdx];
@@ -283,9 +282,9 @@ void Engine::processChain (float* buf, int n, int presetIdx, int pitchSemis, flo
     shifter.setTarget (shifterRun, semitonesTotal, spec.formant);
     shifter.process (buf, buf, n);
 
-    // トークボックスのキャリア = 検出f0 × 2^(層1ピッチ/12)。一度も有声にならないうちは既定値を使う。
-    const float carrierHz = (detectedHz > 0.0f ? detectedHz : kDefaultCarrierHz) * std::exp2 ((float) pitchSemis / 12.0f);
-    processLayer2 (buf, n, spec.effect, carrierHz, voicing);
+    // トークボックスのキャリアは固定フレーズ（D-028）で、検出したf0には依存しない（検出器は有声度だけ）。層1ピッチ（±24）は2^(p/12)としてキャリアにもかかる。
+    const float pitchRatio = std::exp2 ((float) pitchSemis / 12.0f);
+    processLayer2 (buf, n, spec.effect, pitchRatio, talkboxRange, voicing);
 
     processReverb (buf, n, reverbAmt);
 
@@ -321,6 +320,7 @@ void Engine::processChunk (float* buf, int n) noexcept
     const int pitchSemis = atomicParams.pitch.load (std::memory_order_relaxed);
     const int presetIdx = juce::jlimit (0, (int) kPresets.size() - 1, atomicParams.preset.load (std::memory_order_relaxed));
     const bool targetOn = atomicParams.enabled.load (std::memory_order_relaxed);
+    const auto talkboxRange = talkboxRangeFromInt (atomicParams.talkboxRange.load (std::memory_order_relaxed)); // 不正な値は低
 
     updateInputPeak (buf, n);
 
@@ -374,7 +374,7 @@ void Engine::processChunk (float* buf, int n) noexcept
 
     std::memcpy (dryScratch.data(), buf, sizeof (float) * (size_t) n);
 
-    processChain (buf, n, presetIdx, pitchSemis, gainDb, reverbAmt);
+    processChain (buf, n, presetIdx, pitchSemis, gainDb, reverbAmt, talkboxRange);
 
     if (targetOn && chainGain >= 1.0)
     {

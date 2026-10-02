@@ -1,5 +1,6 @@
 #include "AllocationGuard.h"
 #include "TestSignals.h"
+#include "core/Effects.h"
 #include "core/Engine.h"
 #include "core/Params.h"
 #include "core/ResamplingFifo.h"
@@ -228,6 +229,7 @@ public:
             if (presetSlot != lastPresetSlot)
             {
                 engine.params().preset.store (presetSlot % (int) vc::kPresets.size());
+                engine.params().talkboxRange.store ((presetSlot / (int) vc::kPresets.size()) % 2); // トークボックスの音域（低・高）を1周ごとに入れ替える（トークボックスは各音域で約22回）
                 lastPresetSlot = presetSlot;
                 ++presetChanges;
             }
@@ -411,6 +413,43 @@ public:
         expectEquals ((int) cViolations, 0, "c) 平滑充填が目標±25%を外れた区間がある");
         expect (diffMs <= 0.5, "d) 平滑充填の後半平均が前半平均より0.5ms相当を超えて増加している");
         expectWithinAbsoluteError (avgPpm, expectedPpm, 10.0, "e) 速度比補正の平均が期待値の±10ppmを外れている");
+
+        // トークボックスのフレーズ（D-028）は連続稼働でテンポがずれない（整数の計算）。24時間ぶんのサンプルを回し、毎ステップの境界が
+        // 理論値ceil(k × fs × 30 / 123)ぴったりであることを確かめる。解析的な値なので、44.1k・48k・96kのすべてで同じ判定。
+        beginTest ("LongRun: トークボックスのフレーズ（PhraseSequencer）24時間でステップ境界がずれない");
+        {
+            for (const double fs : { 48000.0, 96000.0 })
+            {
+                vc::PhraseSequencer seq;
+                seq.prepare (fs);
+                const long long total = (long long) (24.0 * 3600.0 * fs);
+                const long long numerator = (long long) fs * 30;
+                long long observed = 0;
+                long long wrong = 0;
+                float lastHz = 0.0f;
+
+                for (long long i = 0; i < total; ++i)
+                {
+                    lastHz = seq.next();
+
+                    if (seq.getStepIndex() != observed)
+                    {
+                        ++observed;
+
+                        if (i != (observed * numerator + 122) / 123)
+                            ++wrong;
+                    }
+                }
+
+                // 24時間 = 86400秒 ÷ (60/123 × 0.5 秒) = 354240ステップ。最後の音は通し番号 % 8 の音。
+                const long long expectedSteps = ((total - 1) * 123) / numerator; // 時刻 total-1 までに始まったステップの数
+                logMessage ("LongRun: PhraseSequencer fs=" + juce::String (fs, 0) + " 24h: steps " + juce::String ((juce::int64) observed) + " (expected " + juce::String ((juce::int64) expectedSteps)
+                            + "), wrong boundaries " + juce::String ((juce::int64) wrong));
+                expectEquals ((juce::int64) wrong, (juce::int64) 0, "ステップ境界がceil(k * L)からずれた");
+                expectEquals ((juce::int64) observed, (juce::int64) expectedSteps, "24時間のステップ数が理論値と異なる");
+                expect (std::abs (lastHz - vc::PhraseSequencer::midiToHz (vc::PhraseSequencer::kMidiNotes[(size_t) (observed % vc::PhraseSequencer::kNumSteps)])) < 1.0e-3f, "巡回後の音が違う");
+            }
+        }
     }
 };
 

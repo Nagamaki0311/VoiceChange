@@ -1103,25 +1103,26 @@ bool parseNoteSequence (const juce::String& text, std::vector<std::vector<float>
 
 namespace
 {
-// ExperimentVocoderを使うか。talkboxVocoderの明示か、製品のTalkboxでは表せない設定（デチューン・オクターブ上・バンド数・高域・強調・子音）があるとき。
+// ExperimentVocoderを使うか。talkboxVocoderの明示（--talkbox-carrierを含む）か、製品のTalkbox（固定フレーズS4。D-028）では表せない設定
+// （キャリアの種類・和音・有声度の下限・デチューン・オクターブ上・バンド数・高域・強調・子音）があるとき。どれもなければ、製品のTalkboxと同じ音になる。
 bool usesVocoder (const ProcessSettings& s) noexcept
 {
-    return s.talkboxVocoder || s.talkboxCarrier == TalkboxCarrier::Sequence || s.talkboxDetuneCents.size() != 1 || ! juce::approximatelyEqual (s.talkboxDetuneCents[0], 0.0f) || s.talkboxOctaveUpDb.has_value()
+    return s.talkboxVocoder || s.talkboxCarrier != TalkboxCarrier::Follow || s.talkboxChord.size() != 1 || ! juce::approximatelyEqual (s.talkboxChord[0], 0.0f) || s.talkboxVoicingFloor > 0.0f
+           || s.talkboxDetuneCents.size() != 1 || ! juce::approximatelyEqual (s.talkboxDetuneCents[0], 0.0f) || s.talkboxOctaveUpDb.has_value()
            || s.talkboxBands != 20 || ! juce::approximatelyEqual (s.talkboxHighHz, 7000.0f) || s.talkboxAirDb > 0.0f || s.talkboxConsonant > 0.0f;
 }
 
 bool usesExperimentChain (const ProcessSettings& s) noexcept
 {
-    return s.semitonesOverride.has_value() || s.formantOverride.has_value() || s.talkboxCarrier != TalkboxCarrier::Follow
-           || s.talkboxChord.size() != 1 || ! juce::approximatelyEqual (s.talkboxChord[0], 0.0f) || s.talkboxVoicingFloor > 0.0f || usesVocoder (s);
+    return s.semitonesOverride.has_value() || s.formantOverride.has_value() || usesVocoder (s);
 }
 
 // ----- トークボックス実験その2（T-018第2段） -----
-// 製品のTalkbox（src/core/Effects.cpp）と同じ帯域構成（変調側・キャリア側とも2段のバンドパス、全波整流の包絡、キャリア包絡で正規化、kTalkboxGain）で、
-// 次の4点だけを変えられる試聴用のボコーダー。製品のTalkboxはバンド数が定数・キャリアが鋸波1本のため、実験は製品のクラスを変えずにここで行う。
+// 製品のTalkbox（src/core/Effects.cpp）と同じ帯域構成（変調側・キャリア側とも2段のバンドパス、全波整流の包絡、キャリア包絡で正規化、Talkbox::kOutputGain[低]）で、
+// 次の4点だけを変えられる試聴用のボコーダー。製品のTalkboxはバンド数・キャリア（固定フレーズ・鋸波2本）が定数のため、実験は製品のクラスを変えずにここで行う。
 //   1. キャリア = 鋸波の複数本（和音の音 x デチューン x オクターブ上）の和 + 白色雑音（有声度で混合。製品と同じ式）
 //   2. バンド数（Qは間隔に合わせて(bands-1)/19倍）  3. 3〜8kHzの高域強調  4. 高域バンド（2.5kHz以上）だけ別の有声度（子音の摩擦音を雑音で鳴らす）
-// 検証: 既定の設定（20バンド・鋸波1本・強調なし）は製品のTalkboxと同じ出力になる（テストM1l）。
+// 検証: 製品のトークボックス（S4）と同じ設定（20バンド・鋸波2本±10セント・固定フレーズ・有声度の下限0.8・子音0.6）は製品のTalkboxと同じ出力になる（テストX3b・M1l）。
 struct VocoderConfig
 {
     int bands = 20;
@@ -1251,7 +1252,7 @@ public:
             band.carrierEnvelope = carrierEnv;
         }
 
-        juce::FloatVectorOperations::multiply (out, 0.904f, n); // 製品のkTalkboxGainと同じ（Effects.cppの定数は非公開のため値を写している。M1lが一致を確認する）
+        juce::FloatVectorOperations::multiply (out, Talkbox::kOutputGain[(size_t) TalkboxRange::Low], n); // 製品の音域「低」のゲインと同じ
     }
 
 private:
@@ -1529,10 +1530,9 @@ public:
 
         shifter.prepare (fs, block);
         detector.prepare (fs, block);
-        talkbox.resize (talk && ! vocoderOn ? s.talkboxChord.size() : 0);
 
-        for (auto& t : talkbox)
-            t.prepare (fs, block);
+        if (talk && ! vocoderOn)
+            talkbox.prepare (fs, block); // 製品のTalkbox（固定フレーズS4）。実験の設定がないとき
 
         if (talk && vocoderOn)
         {
@@ -1566,8 +1566,6 @@ public:
             vocoder.prepare (fs, block, cfg, sequencer != nullptr ? sequencer->slots() : 1);
         }
 
-        mod.assign ((size_t) block, 0.0f);
-        tmp.assign ((size_t) block, 0.0f);
     }
 
     // bufはマイク処理後の1ブロック。その場で書き換える。
@@ -1587,14 +1585,15 @@ public:
 
         if (talk)
         {
-            // Engineと同じ既定値110Hz。Followのキャリア = 検出f0 × 2^(層1ピッチ/12)、Fixedは絶対値（層1ピッチを掛けない）。
             const float pitchRatio = std::exp2 ((float) s.pitch / 12.0f);
-            const float base = s.talkboxCarrier == TalkboxCarrier::Fixed       ? s.talkboxFixedHz
-                               : s.talkboxCarrier == TalkboxCarrier::Quantized ? quantizer.update (hz, (float) n / (float) sampleRateForQuantizer) * pitchRatio
-                                                                               : (hz > 0.0f ? hz : 110.0f) * pitchRatio;
 
             if (vocoderOn)
             {
+                // 実験用のキャリア。110Hzは一度も有声にならないうちの既定値。Followのキャリア = 検出f0 × 2^(層1ピッチ/12)（D-028より前の製品の動作）、Fixedは絶対値（層1ピッチを掛けない）。
+                const float base = s.talkboxCarrier == TalkboxCarrier::Fixed       ? s.talkboxFixedHz
+                                   : s.talkboxCarrier == TalkboxCarrier::Quantized ? quantizer.update (hz, (float) n / (float) sampleRateForQuantizer) * pitchRatio
+                                                                                   : (hz > 0.0f ? hz : 110.0f) * pitchRatio;
+
                 // 固定フレーズ: キャリアの音程は音列だけで決まる（検出したf0は使わない。有声度だけ検出器の値）。
                 if (sequencer != nullptr)
                     sequencer->process (buf, n, slotHz.data());
@@ -1603,17 +1602,7 @@ public:
             }
             else
             {
-                const float scale = 1.0f / std::sqrt ((float) talkbox.size());
-                std::copy (buf, buf + n, mod.begin());
-                std::fill (buf, buf + n, 0.0f);
-
-                for (size_t i = 0; i < talkbox.size(); ++i)
-                {
-                    talkbox[i].process (mod.data(), tmp.data(), n, base * std::exp2 (s.talkboxChord[i] / 12.0f), voicing);
-
-                    for (int k = 0; k < n; ++k)
-                        buf[k] += scale * tmp[(size_t) k];
-                }
+                talkbox.process (buf, buf, n, pitchRatio, s.talkboxRange, detector.getVoicing());
             }
         }
 
@@ -1631,13 +1620,12 @@ private:
     std::unique_ptr<Engine> layer1;
     PitchShifter shifter;
     PitchDetector detector;
-    std::vector<Talkbox> talkbox;
+    Talkbox talkbox;
     ExperimentVocoder vocoder;
     std::unique_ptr<PhraseSequencer> sequencer;
     std::vector<float> slotHz;
     QuantizedPitch quantizer { s.talkboxScale, s.talkboxKey, s.talkboxSpread };
     double sampleRateForQuantizer = 48000.0;
-    std::vector<float> mod, tmp;
 };
 } // namespace
 
@@ -1655,6 +1643,7 @@ ProcessResult processAudio (const std::vector<float>& input, double fs, const Pr
     p.pitch.store (experiment ? 0 : s.pitch);
     p.reverb.store (experiment ? 0.0f : s.reverb);
     p.enabled.store (true);
+    p.talkboxRange.store ((int) s.talkboxRange);
     p.nrEnabled.store (s.nrEnabled);
     p.nrBackground.store (s.nrBackground);
     p.nrImpact.store (s.nrImpact);
@@ -1852,13 +1841,14 @@ int runProcessWav (const juce::StringArray& args)
                                    { "--bg", "--impact", "--eq", "--eq-gain", "--nr", "--settings", "--segments", "--trace", "--preset", "--gain", "--pitch", "--reverb",
                                      "--semitones", "--formant", "--talkbox-carrier", "--talkbox-hz", "--talkbox-chord", "--talkbox-voicing-floor",
                                      "--talkbox-scale", "--talkbox-key", "--talkbox-spread", "--talkbox-detune", "--talkbox-octave-up", "--talkbox-bands", "--talkbox-high-hz",
-                                     "--talkbox-air-db", "--talkbox-consonant", "--talkbox-seq", "--talkbox-bpm", "--talkbox-step", "--talkbox-advance", "--talkbox-glide" },
+                                     "--talkbox-air-db", "--talkbox-consonant", "--talkbox-seq", "--talkbox-bpm", "--talkbox-step", "--talkbox-advance", "--talkbox-glide", "--talkbox-range" },
                                    { "--float" });
     const char* usage = "usage: VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.65] [--impact 0.15] [--nr on|off] [--eq on|off|a2|a3|sonar] [--eq-gain -12..12]\n"
                         "                                     [--settings <VoiceChange.settings>] [--segments <file>] [--trace <csv>] [--float]\n"
                         "                                     [--preset normal|echo|helium|minion|giant|kerokero|robot|talkbox] [--gain -20..20] [--pitch -36..36] [--reverb 0..1]\n"
                         "                                     [--semitones -48..48] [--formant 0.25..4]   (audition: override the preset's values; normal/helium/minion/giant/talkbox)\n"
-                        "                                     [--talkbox-carrier follow|fixed|quantized] [--talkbox-hz 40..1000] [--talkbox-chord 0,4,7] [--talkbox-voicing-floor 0..1]   (audition: talkbox only)\n"
+                        "                                     [--talkbox-range low|high]   (talkbox: the product's fixed phrase (D-028); not with the experiment options below)\n"
+                        "                                     [--talkbox-carrier follow|fixed|quantized] [--talkbox-hz 40..1000] [--talkbox-chord 0,4,7] [--talkbox-voicing-floor 0..1]   (audition: talkbox only; any of these selects the experimental vocoder)\n"
                         "                                     [--talkbox-scale chromatic|major|minor] [--talkbox-key 0..11] [--talkbox-spread 0.5..4]   (quantized carrier only; key 0 = C)\n"
                         "                                     [--talkbox-detune -12,0,12] [--talkbox-octave-up -24..0] [--talkbox-bands 8..48] [--talkbox-high-hz 4000..12000]\n"
                         "                                     [--talkbox-air-db 0..12] [--talkbox-consonant 0..1]   (audition: talkbox vocoder experiments)\n"
@@ -2036,7 +2026,7 @@ int runProcessWav (const juce::StringArray& args)
             settings.talkboxOctaveUpDb = (float) octaveUp;
 
         for (const char* k : { "--talkbox-key", "--talkbox-spread", "--talkbox-bands", "--talkbox-high-hz", "--talkbox-air-db", "--talkbox-consonant", "--talkbox-octave-up", "--talkbox-detune",
-                               "--talkbox-scale" })
+                               "--talkbox-scale", "--talkbox-carrier" })
             if (parsed.options.containsKey (k))
                 settings.talkboxVocoder = true;
 
@@ -2073,6 +2063,19 @@ int runProcessWav (const juce::StringArray& args)
                                   : v == "quantized" ? TalkboxCarrier::Quantized
                                   : v == "sequence"  ? TalkboxCarrier::Sequence
                                                      : TalkboxCarrier::Follow;
+    }
+
+    if (parsed.options.containsKey ("--talkbox-range"))
+    {
+        const auto v = parsed.options["--talkbox-range"].toLowerCase();
+
+        if (v != "low" && v != "high")
+        {
+            printError ("--talkbox-range must be low or high");
+            return 2;
+        }
+
+        settings.talkboxRange = talkboxRangeFromId (v);
     }
 
     if (parsed.options.containsKey ("--talkbox-scale"))
@@ -2227,12 +2230,19 @@ int runProcessWav (const juce::StringArray& args)
 
     for (const char* k : { "--talkbox-carrier", "--talkbox-hz", "--talkbox-chord", "--talkbox-voicing-floor", "--talkbox-scale", "--talkbox-key", "--talkbox-spread", "--talkbox-detune",
                            "--talkbox-octave-up", "--talkbox-bands", "--talkbox-high-hz", "--talkbox-air-db", "--talkbox-consonant", "--talkbox-seq", "--talkbox-bpm", "--talkbox-step",
-                           "--talkbox-advance", "--talkbox-glide" })
+                           "--talkbox-advance", "--talkbox-glide", "--talkbox-range" })
         talkboxOptionGiven = talkboxOptionGiven || parsed.options.containsKey (k);
 
     if (talkboxOptionGiven && settings.preset != Preset::Talkbox)
     {
         printError ("the --talkbox-* options can be used with --preset talkbox only");
+        return 2;
+    }
+
+    // 音域は製品の固定フレーズのもの。実験用のキャリア（検出f0・固定・量子化・フレーズ）はキャリアの音程を自分で決めるため、音域を掛けない。取り違えないよう拒否する。
+    if (parsed.options.containsKey ("--talkbox-range") && (usesVocoder (settings) || settings.semitonesOverride.has_value() || settings.formantOverride.has_value()))
+    {
+        printError ("--talkbox-range can be used with the product's talkbox only (not with the other --talkbox-* options, --semitones or --formant)");
         return 2;
     }
 
@@ -2283,9 +2293,10 @@ int runProcessWav (const juce::StringArray& args)
             << juce::String (settings.semitonesOverride.value_or (kPresets[(size_t) settings.preset].semitones), 2) << ", formant "
             << juce::String (settings.formantOverride.value_or (kPresets[(size_t) settings.preset].formant), 2);
 
-    if (settings.preset == Preset::Talkbox
-        && (settings.talkboxCarrier != TalkboxCarrier::Follow || usesVocoder (settings) || settings.talkboxChord.size() != 1 || ! juce::approximatelyEqual (settings.talkboxChord[0], 0.0f)
-            || settings.talkboxVoicingFloor > 0.0f))
+    if (settings.preset == Preset::Talkbox && ! usesVocoder (settings))
+        out << ", talkbox: product fixed phrase (range " << talkboxRangeId (settings.talkboxRange) << ")";
+
+    if (settings.preset == Preset::Talkbox && usesVocoder (settings))
     {
         out << ", talkbox carrier "
             << (settings.talkboxCarrier == TalkboxCarrier::Fixed       ? "fixed " + juce::String (settings.talkboxFixedHz, 1) + " Hz"

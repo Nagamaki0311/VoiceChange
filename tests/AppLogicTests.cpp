@@ -32,6 +32,7 @@ public:
     {
         runSanitizeTests();
         runMicSettingsTests();
+        runTalkboxRangeTests();
         runEqInputTests();
         runEqPresetTests();
         runPresetFromIdTests();
@@ -40,6 +41,73 @@ public:
     }
 
 private:
+    // トークボックスの音域（D-028）。設定ファイルのキー `talkboxRange` = low|high。キーなし・不正値は既定のlow。
+    void runTalkboxRangeTests()
+    {
+        beginTest ("TalkboxRange: 名前・識別子・既定値（低 = low、高 = high。既定は低）");
+        {
+            expectEquals (juce::String (vc::talkboxRangeId (vc::TalkboxRange::Low)), juce::String ("low"));
+            expectEquals (juce::String (vc::talkboxRangeId (vc::TalkboxRange::High)), juce::String ("high"));
+            expectEquals (vc::talkboxRangeDisplayName (vc::TalkboxRange::Low), juce::String::fromUTF8 ("低"));
+            expectEquals (vc::talkboxRangeDisplayName (vc::TalkboxRange::High), juce::String::fromUTF8 ("高"));
+            expect (vc::SavedSettings().talkboxRange == vc::TalkboxRange::Low, "SavedSettings default is not low");
+            expectEquals (vc::AtomicParams().talkboxRange.load(), (int) vc::TalkboxRange::Low);
+            expectEquals ((int) vc::TalkboxRange::Low, 0);
+            expectEquals ((int) vc::TalkboxRange::High, 1); // AtomicParams::talkboxRangeのint値（Engineが読む）
+
+            for (const int bad : { -1, 2, 7, 1000 })
+                expect (vc::talkboxRangeFromInt (bad) == vc::TalkboxRange::Low, "talkboxRangeFromInt (" + juce::String (bad) + ") is not low");
+
+            expect (vc::talkboxRangeFromInt (1) == vc::TalkboxRange::High && vc::talkboxRangeFromInt (0) == vc::TalkboxRange::Low, "talkboxRangeFromInt 0/1");
+        }
+
+        beginTest ("TalkboxRange: 保存（キー talkboxRange = low|high）→ 読み込みの往復、キーなし・不正値は低、大文字小文字は区別しない");
+        {
+            for (const auto range : { vc::TalkboxRange::Low, vc::TalkboxRange::High })
+            {
+                juce::PropertySet props;
+                vc::storeTalkboxRange (props, range);
+                expectEquals (props.getValue ("talkboxRange"), juce::String (range == vc::TalkboxRange::High ? "high" : "low"));
+                expect (vc::loadSettings (props).talkboxRange == range, "round trip failed");
+            }
+
+            // キーなし
+            expect (vc::loadSettings (juce::PropertySet()).talkboxRange == vc::TalkboxRange::Low, "missing key is not low");
+
+            // 不正値・手編集（大文字小文字・空白・数値・nan）
+            for (const char* text : { "", "mid", "1", "0", "nan", "highest", "高", " high" })
+            {
+                juce::PropertySet props;
+                props.setValue ("talkboxRange", text);
+                expect (vc::loadSettings (props).talkboxRange == vc::TalkboxRange::Low, juce::String ("invalid value is not low: ") + text);
+            }
+
+            for (const char* text : { "high", "HIGH", "High" })
+            {
+                juce::PropertySet props;
+                props.setValue ("talkboxRange", text);
+                expect (vc::loadSettings (props).talkboxRange == vc::TalkboxRange::High, juce::String ("not high: ") + text);
+            }
+
+            // sanitize: 不正なenum値（int経由の破損）は低。ほかの項目に影響しない。
+            vc::SavedSettings s;
+            s.talkboxRange = static_cast<vc::TalkboxRange> (7);
+            s.pitch = 5;
+            expect (vc::sanitize (s).talkboxRange == vc::TalkboxRange::Low, "sanitize did not fix an invalid range");
+            expectEquals (vc::sanitize (s).pitch, 5);
+            s.talkboxRange = vc::TalkboxRange::High;
+            expect (vc::sanitize (s).talkboxRange == vc::TalkboxRange::High, "sanitize changed a valid range");
+
+            // 音域は、ほかの設定（プリセット・マイク処理）の保存を妨げず、マイク処理の保存（storeMicSettings）で消えない。
+            juce::PropertySet props;
+            vc::storeTalkboxRange (props, vc::TalkboxRange::High);
+            props.setValue ("preset", "talkbox");
+            vc::storeMicSettings (props, vc::SavedSettings());
+            const auto loaded = vc::loadSettings (props);
+            expect (loaded.talkboxRange == vc::TalkboxRange::High && loaded.preset == vc::Preset::Talkbox, "range lost when other settings are stored");
+        }
+    }
+
     void runSanitizeTests()
     {
         beginTest ("sanitize: 範囲内の値はそのまま");

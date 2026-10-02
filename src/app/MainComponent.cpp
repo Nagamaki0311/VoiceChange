@@ -656,7 +656,7 @@ MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settings
     tooltipWindow.setLookAndFeel (&lookAndFeel);
     lookAndFeel.setEnabledFlag (&audioIO.engineParams().enabled);
 
-    setSize (460, 600);
+    setSize (460, 640);
     setTitle (juce::String::fromUTF8 ("VoiceChange"));
 
     vbCableMissing = ! containsCableInput (audioIO.getOutputNames());
@@ -685,7 +685,7 @@ MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settings
     inputCombo.onChange = [this] { deviceComboChanged (true); };
     outputCombo.onChange = [this] { deviceComboChanged (false); };
 
-    // Tab順（design.md 5章）: 入力(1) → マイク処理(2) → 出力(3) → ゲイン(4) → ピッチ(5) → リバーブ(6) → プリセット(7〜14) → トグル(15)。
+    // Tab順（design.md 5章）: 入力(1) → マイク処理(2) → 出力(3) → ゲイン(4) → ピッチ(5) → リバーブ(6) → プリセット(7〜14) → 音域(15〜16。トークボックス選択中だけ) → トグル(17)。
     inputCombo.setExplicitFocusOrder (1);
     micButton.setExplicitFocusOrder (2);
     outputCombo.setExplicitFocusOrder (3);
@@ -763,12 +763,13 @@ MainComponent::MainComponent (AudioIO& audioIOIn, juce::PropertiesFile& settings
     updateSliderAppearance (reverbSlider);
 
     createPresetButtons();
+    createRangeButtons();
 
     toggleButton.setTexts (juce::String::fromUTF8 ("エフェクト"), juce::String::fromUTF8 ("加工した声を出力中"),
                            juce::String::fromUTF8 ("原音をそのまま出力中（バイパス）"));
     toggleButton.setToggleState (ap.enabled.load(), juce::dontSendNotification);
     toggleButton.setTitle (juce::String::fromUTF8 ("エフェクト全体のON/OFF"));
-    toggleButton.setExplicitFocusOrder (15);
+    toggleButton.setExplicitFocusOrder (17);
     toggleButton.onClick = [this] { applyToggle(); };
     addAndMakeVisible (toggleButton);
 
@@ -800,7 +801,7 @@ void MainComponent::createPresetButtons()
         { Preset::Echo,     "やまびこのように声が繰り返し響く" },
         { Preset::Kerokero, "音程を半音単位に吸着させる" },
         { Preset::Robot,    "金属的な響きのロボット声にする" },
-        { Preset::Talkbox,  "声の抑揚をシンセサイザーの音色に乗せる" },
+        { Preset::Talkbox,  "声の高さではなく、決まったフレーズの音程でしゃべるボコーダー声にする" },
     };
 
     constexpr int colX[4] = { 20, 127, 234, 341 };
@@ -848,6 +849,67 @@ void MainComponent::updatePresetButtonStates()
         const int idx = (int) b->getProperties().getWithDefault ("presetIndex", -1);
         b->setToggleState (idx == current, juce::dontSendNotification);
         b->repaint();
+    }
+
+    updateRangeButtonStates();
+}
+
+// design.md 3.5節「音域の2択」。ラベルと2つのボタンの表示はトークボックス選択中だけ（場所は常に空けてあり、ほかの部品は動かない）。
+// 選択状態はAtomicParams::talkboxRange（保存済みの値で起動時に設定される）に合わせる。
+void MainComponent::createRangeButtons()
+{
+    rangeLabel.setText (juce::String::fromUTF8 ("音域"), juce::dontSendNotification);
+    rangeLabel.setFont (AppLookAndFeel::uiFont (13.0f));
+    rangeLabel.setColour (juce::Label::textColourId, juce::Colour (AppLookAndFeel::textSecondary));
+    rangeLabel.setInterceptsMouseClicks (false, false);
+    rangeLabel.setBounds (20, 382, 60, 32);
+    addChildComponent (rangeLabel);
+
+    const char* tips[2] = { "低めの音域で鳴らします（F2〜D3のフレーズ）", "1オクターブ高い音域で鳴らします（F3〜D4のフレーズ）" };
+
+    for (int i = 0; i < 2; ++i)
+    {
+        const auto range = static_cast<TalkboxRange> (i);
+        const juce::String label = talkboxRangeDisplayName (range);
+
+        auto button = std::make_unique<juce::TextButton> (label);
+        button->setClickingTogglesState (true);
+        button->setRadioGroupId (1002, juce::dontSendNotification); // プリセット（1001）とは別のグループ。UIAにラジオボタンとして公開される
+        button->setTitle (juce::String::fromUTF8 ("音域 ") + label);
+        button->setDescription (juce::String::fromUTF8 (tips[i]));
+        button->setTooltip (juce::String::fromUTF8 (tips[i]));
+        button->setExplicitFocusOrder (15 + i);
+        button->setBounds (88 + 80 * i, 382, 72, 32);
+
+        button->onClick = [this, range]
+        {
+            audioIO.engineParams().talkboxRange.store ((int) range, std::memory_order_relaxed);
+            storeTalkboxRange (settings, range);
+            updateRangeButtonStates();
+        };
+
+        addChildComponent (*button);
+        rangeButtons[(size_t) i] = std::move (button);
+    }
+
+    updateRangeButtonStates();
+}
+
+void MainComponent::updateRangeButtonStates()
+{
+    const bool talkboxSelected = audioIO.engineParams().preset.load (std::memory_order_relaxed) == (int) Preset::Talkbox;
+    const auto range = talkboxRangeFromInt (audioIO.engineParams().talkboxRange.load (std::memory_order_relaxed));
+
+    rangeLabel.setVisible (talkboxSelected);
+
+    for (size_t i = 0; i < rangeButtons.size(); ++i)
+    {
+        if (rangeButtons[i] == nullptr)
+            continue;
+
+        rangeButtons[i]->setToggleState (i == (size_t) range, juce::dontSendNotification);
+        rangeButtons[i]->setVisible (talkboxSelected);
+        rangeButtons[i]->repaint();
     }
 }
 
@@ -904,6 +966,10 @@ void MainComponent::refreshEnabledAppearance()
     updateSliderAppearance (reverbSlider);
 
     for (auto& b : presetButtons)
+        if (b != nullptr)
+            b->repaint();
+
+    for (auto& b : rangeButtons)
         if (b != nullptr)
             b->repaint();
 
@@ -1042,8 +1108,8 @@ void MainComponent::resized()
     reverbLabel.setBounds (20, 222, 60, 32);
     reverbSlider.setBounds (88, 222, 352, 32);
 
-    toggleButton.setBounds (20, 388, 420, 48);
-    statusPanel.setBounds (0, 452, 460, 148);
+    toggleButton.setBounds (20, 428, 420, 48);
+    statusPanel.setBounds (0, 492, 460, 148);
 }
 
 void MainComponent::visibilityChanged()

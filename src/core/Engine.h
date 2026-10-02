@@ -64,9 +64,9 @@ public:
 
 private:
     void processChunk (float* buf, int n) noexcept;
-    void processChain (float* buf, int n, int presetIdx, int pitchSemis, float gainDb, float reverbAmt) noexcept;
-    void processLayer2 (float* buf, int n, Effect desired, float carrierHz, float voicing) noexcept;
-    void runEffect (Effect effect, const float* in, float* out, int n, float carrierHz, float voicing) noexcept;
+    void processChain (float* buf, int n, int presetIdx, int pitchSemis, float gainDb, float reverbAmt, TalkboxRange talkboxRange) noexcept;
+    void processLayer2 (float* buf, int n, Effect desired, float pitchRatio, TalkboxRange range, float voicing) noexcept;
+    void runEffect (Effect effect, const float* in, float* out, int n, float pitchRatio, TalkboxRange range, float voicing) noexcept;
     void processReverb (float* buf, int n, float reverbAmt) noexcept;
     void applyLimiter (float* buf, int n) noexcept;
     void handleNonFinite (float* buf, int n) noexcept;

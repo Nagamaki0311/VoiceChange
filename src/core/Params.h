@@ -66,6 +66,38 @@ constexpr std::array<PresetSpec, 8> kPresets { {
     { "talkbox",  0.0f, 1.00f, Effect::Talkbox, true,  0.0f },
 } };
 
+// トークボックスの音域（D-028）。キャリアが鳴らす固定フレーズ（G2から始まる8音）の高さ。
+// UI表示名と内部識別子の対照表: 低 = Low（フレーズそのまま。F2〜D3）/ 高 = High（1オクターブ上。F3〜D4）。設定ファイルのキー `talkboxRange` の値は kTalkboxRangeIds。
+enum class TalkboxRange
+{
+    Low = 0,
+    High
+};
+
+constexpr std::array<const char*, 2> kTalkboxRangeIds { "low", "high" };
+
+inline const char* talkboxRangeId (TalkboxRange r) noexcept
+{
+    return kTalkboxRangeIds[(size_t) r];
+}
+
+// 不明な名前・キー無しは既定のLow。大文字小文字は区別しない（presetFromIdと同じ理由）。
+inline TalkboxRange talkboxRangeFromId (const juce::String& id) noexcept
+{
+    return id.equalsIgnoreCase (kTalkboxRangeIds[(size_t) TalkboxRange::High]) ? TalkboxRange::High : TalkboxRange::Low;
+}
+
+// int値（AtomicParams::talkboxRange）をTalkboxRangeへ。範囲外は既定のLow。
+inline TalkboxRange talkboxRangeFromInt (int value) noexcept
+{
+    return value == (int) TalkboxRange::High ? TalkboxRange::High : TalkboxRange::Low;
+}
+
+inline juce::String talkboxRangeDisplayName (TalkboxRange r)
+{
+    return juce::String::fromUTF8 (r == TalkboxRange::High ? "高" : "低");
+}
+
 // 層1ピッチの範囲（±半音、1半音刻み。D-027）。sanitizeとUIのスライダーが参照する。Engine・PitchShifterはこの範囲に縛られない。
 constexpr int kMaxLayer1PitchSemitones = 24;
 
@@ -245,6 +277,7 @@ struct AtomicParams
     std::atomic<int> pitch { 0 };        // ±kMaxLayer1PitchSemitones半音（層1ピッチ、1半音刻み）
     std::atomic<int> preset { 0 };       // Presetのint値
     std::atomic<bool> enabled { true };  // 全体ON/OFF（false = バイパス）
+    std::atomic<int> talkboxRange { (int) TalkboxRange::Low }; // TalkboxRangeのint値（トークボックスのキャリアの音域。トークボックス以外では使われない）
 
     // マイク処理（ノイズ除去）。全体ON/OFFの対象外（D-020）。docs/spec.md「マイク処理: ノイズ除去」。
     std::atomic<bool> nrEnabled { false };
@@ -306,6 +339,7 @@ struct SavedSettings
     Preset preset = Preset::Normal;
     bool enabled = true;
     bool trayNoticeShown = false; // 初回のトレイ格納通知を表示済みか
+    TalkboxRange talkboxRange = TalkboxRange::Low; // トークボックスの音域（キー talkboxRange = low|high）
 
     // マイク処理（T-013）。全体ON/OFFの対象外（D-020）。AtomicParamsと同じ単位（背景ノイズ・インパクトは0〜1）。
     bool nrEnabled = false;
@@ -363,6 +397,7 @@ inline SavedSettings sanitize (SavedSettings s) noexcept
     s.gainDb = juce::jlimit (-20.0f, 20.0f, s.gainDb);
     s.pitch = juce::jlimit (-kMaxLayer1PitchSemitones, kMaxLayer1PitchSemitones, s.pitch);
     s.reverb = juce::jlimit (0.0f, 1.0f, s.reverb);
+    s.talkboxRange = talkboxRangeFromInt ((int) s.talkboxRange); // 不正なenum値は既定のLow
 
     if (! std::isfinite (s.nrBackground))
         s.nrBackground = kNrBackgroundDefault;
@@ -419,6 +454,7 @@ inline SavedSettings loadSettings (const juce::PropertySet& props)
     s.preset = presetFromId (props.getValue ("preset", "normal")); // 不明な名前・キー無し→Normal
     s.enabled = props.getBoolValue ("enabled", true);
     s.trayNoticeShown = props.getBoolValue ("trayNoticeShown", false);
+    s.talkboxRange = talkboxRangeFromId (props.getValue ("talkboxRange", talkboxRangeId (TalkboxRange::Low))); // 不正な値・キー無し→Low
 
     s.nrEnabled = props.getBoolValue ("nrEnabled", s.nrEnabled);
     s.nrBackground = readClampedFloat (props, "nrBackground", s.nrBackground, 0.0f, 1.0f);
@@ -437,6 +473,12 @@ inline SavedSettings loadSettings (const juce::PropertySet& props)
     }
 
     return sanitize (s); // 範囲外の値を範囲の端へ丸める
+}
+
+// トークボックスの音域をキー `talkboxRange` へ書く（メイン画面の「音域」ボタンが押されたとき）。
+inline void storeTalkboxRange (juce::PropertySet& props, TalkboxRange range)
+{
+    props.setValue ("talkboxRange", juce::String (talkboxRangeId (range)));
 }
 
 // マイク処理の項目（ノイズ除去3項目＋EQ 2＋5×5項目）をすべて書く。値が変わらないキーは、PropertySetが変更扱いにしない。
