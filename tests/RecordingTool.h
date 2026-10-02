@@ -136,7 +136,11 @@ enum class EqPreset { Off, On, A2, A3, Sonar };
 // T-018（プリセット強化の試聴サンプル作成）で足した項目は、すべて既定で従来どおり（ノーマル・ゲイン0・ピッチ0・リバーブ0・上書きなし）。
 // 製品のプリセット表・ピッチ範囲は変えない。範囲外の移調と実験用のキャリアは、このツールの中だけで許す（試聴の候補探索用）。
 // 通称（コマンドの値）と内部識別子: follow = TalkboxCarrier::Follow / fixed = TalkboxCarrier::Fixed。
-enum class TalkboxCarrier { Follow, Fixed }; // Follow = 検出したf0に追従（製品と同じ）/ Fixed = 固定の高さ（平坦なロボット声）
+// quantized = TalkboxCarrier::Quantized（T-018第2段。検出f0を音階に量子化して補正時間ゼロの階段状に動かす）。
+// sequence = TalkboxCarrier::Sequence（T-018第2段の続き。キャリアの音程を声の高さではなく、あらかじめ決めたフレーズ（音列）に従って動かす。声は包絡と音量だけを与える）。
+enum class TalkboxCarrier { Follow, Fixed, Quantized, Sequence }; // Follow = 検出したf0に追従（製品と同じ）/ Fixed = 固定の高さ（平坦なロボット声）
+enum class TalkboxAdvance { Free, Syllable }; // フレーズの進め方（free = テンポに従って自走、syllable = 声の立ち上がり（音節）ごとに次の音へ）
+enum class TalkboxScale { Chromatic, Major, Minor }; // 量子化の音階（chromatic = 半音、major/minor = 主音（talkboxKey）からの長音階・自然短音階）
 
 struct ProcessSettings
 {
@@ -162,6 +166,30 @@ struct ProcessSettings
     float talkboxFixedHz = 110.0f;
     std::vector<float> talkboxChord { 0.0f };
     float talkboxVoicingFloor = 0.0f; // キャリアの有声度（鋸波の割合）の下限。製品は検出器の値そのまま（0 = 下限なし）。低い声で検出器が無声寄りに判定するときの確認用
+
+    // トークボックスの実験その2（T-018第2段。--talkbox-scale・--talkbox-key・--talkbox-detune・--talkbox-octave-up・--talkbox-bands・--talkbox-high-hz・
+    // --talkbox-air-db・--talkbox-consonant）。製品のTalkboxで表せない設定（デチューン・オクターブ上・バンド数・高域・強調・子音）を指定するか、talkboxVocoder = true にすると、製品のTalkboxの代わりにこのツール内のExperimentVocoder
+    // （製品と同じ帯域構成で、キャリア合成・バンド数・高域強調だけを変えられる）を使う。キャリアは和音の音ごと×デチューンごとの鋸波の和（正規化は1/sqrt(本数)）。
+    bool talkboxVocoder = false;
+    TalkboxScale talkboxScale = TalkboxScale::Chromatic;
+    int talkboxKey = 0;                              // 主音のピッチクラス（0 = C … 11 = B）。major/minorのとき
+    float talkboxSpread = 1.0f;                      // 抑揚の拡大率。検出音高の、ゆっくり追従する中心（時定数3秒）からの差をこの倍率にしてから量子化する（1 = そのまま。話し声の音高の動きは小さく、そのままだと数音にしか動かないため）
+    std::vector<float> talkboxDetuneCents { 0.0f };  // 鋸波を重ねる本数と各本のデチューン（セント）
+    std::optional<float> talkboxOctaveUpDb;          // オクターブ上の重ねのレベル（dB。未指定 = 重ねない）
+    int talkboxBands = 20;                           // バンド数。変調側・キャリア側のQはバンド間隔に合わせて(bands-1)/19倍にする
+    float talkboxHighHz = 7000.0f;                   // 最上バンドの中心周波数
+    float talkboxAirDb = 0.0f;                       // 3kHz以上の高域の強調（3kHzで0dB → 8kHz以上でこの値。対数周波数で直線）
+    float talkboxConsonant = 0.0f;                   // 2.5kHz以上のバンドのキャリアに混ぜる雑音の量。0 = 低域と同じ（下限適用後の有声度）、1 = 検出器の有声度そのまま（無声子音の摩擦音が雑音で鳴る）
+
+    // トークボックスの実験その3（固定フレーズ・キャリア。--talkbox-carrier sequence・--talkbox-seq・--talkbox-bpm・--talkbox-step・--talkbox-advance・--talkbox-glide）。
+    // 音列は、ステップごとの音（MIDI番号。C4 = 60、A4 = 440Hz = 69）の並び。1ステップに複数の音（和音）を入れてよい。--talkbox-chordは各音にさらに重ねる。
+    // キャリアの音程は検出したf0に依存しない（有声度だけ検出器を使う）。freeはテンポ（bpm × stepBeats）だけで決まり、syllableは声の立ち上がり（低域の包絡の上昇）で進む。
+    std::vector<std::vector<float>> talkboxSeq;
+    float talkboxBpm = 120.0f;
+    float talkboxStepBeats = 0.5f;                   // 1ステップの長さ（拍）。0.25 = 16分音符、0.5 = 8分音符、1 = 4分音符
+    TalkboxAdvance talkboxAdvance = TalkboxAdvance::Free;
+    float talkboxGlideMs = 0.0f;                     // 音の切り替えのグライド（MIDI音高の直線）。0 = 階段
+    bool traceSequence = false;                      // trueなら、ProcessResultへキャリア音程のサンプルごとの軌跡を残す（テスト用）
 };
 
 // このツールが受け付ける移調量とフォルマント係数の範囲（製品の範囲ではない）。
@@ -188,7 +216,16 @@ struct ProcessResult
     std::uint32_t errorFlags = 0;
     int underflowCount = 0;
     std::vector<GateBlockStat> blocks;
+
+    // 固定フレーズ・キャリア（sequence）のとき: 声の立ち上がり（音節）で次の音へ進めた位置（入力のサンプル番号。freeでも空）。
+    std::vector<int> sequenceOnsets;
+    // traceSequenceのとき、スロット（和音の音）ごとのキャリアのMIDI音高の軌跡（入力のサンプルごと。処理の時間軸。ノイズ除去ONの遅延は補正していない）。
+    std::vector<std::vector<float>> sequenceSlotMidi;
 };
+
+// 音列の文字列（例: "G2,Bb2,D3,Bb2"、"43,46,50"、和音は'+'でつなぐ "G2+Bb2+D3,Eb2+G2+Bb2"）をステップごとのMIDI番号へ。
+// 音名はC〜B＋#またはb＋オクターブ（C4 = 60）、または整数のMIDI番号。範囲はMIDI 24〜96、1〜64ステップ、1ステップ1〜6音。不正ならfalse。
+bool parseNoteSequence (const juce::String& text, std::vector<std::vector<float>>& steps);
 
 // Engine（設定のプリセット・層1。既定はノーマル、ゲイン0）に通す。ブロック長は10ms。出力は遅延を補正して入力と同じ長さにする。
 // 移調量・フォルマントの上書きとトークボックスの実験があるときは、Engineを「マイク処理」と「層1」の2つに分け、間にPitchShifter・
