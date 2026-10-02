@@ -34,7 +34,7 @@ src/core/                   GUI・デバイス非依存（juce_core / juce_audio
   ResamplingFifo.h/.cpp     SPSCリングバッファ + ドリフト補正リサンプラ
   PitchShifter.h/.cpp       Stretchラッパ + 休止⇔稼働の状態遷移 + ブロック長決定関数
   PitchDetector.h/.cpp      YIN
-  Effects.h/.cpp            Echo / RingModulator / Talkbox
+  Effects.h/.cpp            Echo / RingModulator / PhraseSequencer / Talkbox
   Engine.h/.cpp             チェーン全体・層1・プリセット切替・バイパス・NaN・統計
   ConnectionMonitor.h       デバイス異常の判定と再接続タイミング（T-007）
   StatsLog.h/.cpp           統計ログ行の整形と1MBローテーション（T-007）
@@ -161,12 +161,14 @@ float getVoicing() const noexcept;      // 0..1。RMSが閾値未満なら0
 ```cpp
 class Echo          { void prepare(double fs, int maxBlock); void reset() noexcept; void process(const float* in, float* out, int n) noexcept; };
 class RingModulator { /* 同じ形。40Hzの位相累積 */ };
-class Talkbox       { void prepare(double fs, int maxBlock); void reset() noexcept;
-                      void process(const float* modulator, float* out, int n, float carrierHz, float voicing) noexcept; };
+class PhraseSequencer { void prepare(double fs); void reset() noexcept; float next() noexcept; /* 1サンプル進めて現在の音のHz */ };
+class Talkbox       { void prepare(double fs, int maxBlock); void reset() noexcept; // resetはフレーズも先頭の音から
+                      void process(const float* modulator, float* out, int n, float pitchRatio, TalkboxRange range, float voicing) noexcept; };
 ```
 
 - Echo: `juce::dsp::DelayLine<float, None>`（最大0.35秒）、帰還路に3.5kHzのローパス。dry 1.0 + wet 0.6。`reset()`はバッファを消去し、その後20msはディレイへの書き込みにフェードインをかける（消去直後の最初のサンプルが300ms後に段差として出るのを防ぐ）。
-- Talkbox: 20バンド × 2段のバンドパス（係数はprepareで生成）を変調側とキャリア側に持つ。包絡は全波整流 + 1次ローパス（アタック5ms、リリース20ms）。キャリアはPolyBLEP鋸波と`juce::Random`の白色雑音を有声度で混ぜる。キャリア周波数は`SmoothedValue`（約5ms）で補間。固定の補正ゲインはテストで決める。
+- PhraseSequencer（D-028）: 固定の8音（G2 G2 Bb2 C3 D3 C3 Bb2 F2）を123BPM・8分音符で巡回する。k番目のステップの始まりは整数の計算 ceil(k × 60 × fs / 246) のサンプル。`next()`は1サンプルごとに呼び、ステップが変わるときだけ周波数（Hz）を再計算する（確保なし）。
+- Talkbox: 20バンド × 2段のバンドパス（係数はprepareで生成）を変調側とキャリア側に持つ。包絡は全波整流 + 1次ローパス（アタック5ms、リリース20ms）。キャリアはPhraseSequencerの現在の音（× 層1ピッチ 2^(p/12)・音域「高」なら×2）の、デチューン±10セントの鋸波2本（PolyBLEP）の和と`juce::Random`の白色雑音を有声度で混ぜる。有声度は検出器の値に下限0.8（`SmoothedValue`約5ms）、2.5kHz以上のバンドは別のキャリア（検出器の値へ0.6だけ近づける）を使うため、キャリアのバッファは2本（prepareで確保）。補正ゲインは音域ごと（`kOutputGain`）。検出した基本周波数は使わない。
 
 **Engine**
 
@@ -344,10 +346,10 @@ S8: underruns合計9以下、10分以降0、ジッタ余裕 ≤ 20ms、b〜fはt
 | K1 | ケロケロ | 450Hz正弦 → 440Hz±1%。425Hz → 415.3Hz±1%。母音f0=150Hz → 146.8Hz±1%。100msの無音を挟んでも補正量が不変 |
 | X1 | エコー | 200Hzのトーンバースト → 第1エコーが300ms±1ms・振幅比0.6±0.05、第2エコーが600ms・第1エコー比0.45±0.05。再選択で以前の残響が0 |
 | X2 | ロボット | 1kHz正弦 → 960/1040Hzにピーク、1000Hz成分が30dB以上低下 |
-| X3 | トークボックス | 母音3種×f0 3種・-20dBFSで出力RMSが入力比±3dB（固定補正ゲインは中央値から決め、READMEとspec.mdに記録）。倍音間隔が 検出f0×2^(p/12) の±1%。雑音入力で出力RMSが入力比-40dB超 |
+| X3 | トークボックス | 母音3種×f0 3種・-20dBFSで出力RMSが入力比±3dB（固定補正ゲインは中央値から決め、READMEとspec.mdに記録）。倍音間隔が 現在のフレーズの音×2^(p/12)（音域「高」は×2）の±1%で、入力の検出f0・母音によらない（D-028）。雑音入力で出力RMSが入力比-40dB超。X3b: PhraseSequencerのテンポ境界（整数サンプルの計算でドリフトなし）・音程・巡回・reset。X3c: 選択・バイパス解除・NaN回復・prepareで先頭の音から開始、音域の切替でフレーズが戻らない・1オクターブ差 |
 | E8 | 全プリセットの異常値 | 母音・雑音バースト・無音を含む10秒（-60〜0dBFS）で、NaN/Infなし、ピーク ≤ 1.0 |
 | E9 | 切替のクリック | 8×7=56通りの順序付き切替で判定器に合格。判定窓は切替から20ms + 300ms + 20msまで。デジタル無音から発声し始める瞬間も含める |
-| E10 | CPU（参考値） | 48kHz・480ブロック・10秒で、プリセットごとの処理時間÷音声時間を表で出力（失敗判定なし）。Linuxでノーマル ≥ 1% またはトークボックス等 > 5% なら問題として報告 |
+| E10 | CPU（参考値） | 48kHz・480ブロック・10秒で、プリセットごとの処理時間÷音声時間を表で出力（失敗判定なし）。Linuxでノーマル ≥ 1% またはトークボックス等 > 5% なら問題として報告（トークボックスは音域・層1ピッチ+24でも5%以下を判定。D-028） |
 | E11 | プリセットの声量補正ゲイン（D-027） | 表の値（移調・フォルマント・補正）を固定。出力のRMSが「層1のゲインで補正を打ち消した出力」に対して補正ゲイン±0.05dB、層1のゲイン+6dBはプリセットによらず+6dB±0.05dB |
 
 F1〜F3が通らなかった場合は閾値を緩めず、測定値を添えて報告する（PSOLA系への差し替え判断の材料にする）。P4と同じ方針（D-015）で、F1〜F3はf0=150Hzを合格基準とし、f0=100Hzでの特性確認（低い声でのフォルマント追従・f0ずれ）も測定してD-015の実測基準値と比較する（失敗判定なし。悪化していれば報告する）。
