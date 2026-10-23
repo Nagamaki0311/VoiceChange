@@ -29,6 +29,9 @@ const char* const kOutputGainTip = "EQの後で声の音量を上げ下げしま
 const char* const kPresetApplyTip = "。押すと5つのバンドと出力ゲインをこの設定に書き換えて、EQをONにします";
 const char* const kUndoTip = "プリセットを選ぶ前の設定（5つのバンドの値・出力ゲイン・EQのON/OFF）に戻します";
 const char* const kUndoDisabledTip = "プリセットを選んだ直後に使えます";
+const char* const kDeEssSwitchTip = "エフェクト全体をOFFにしても、ディエッサーはかかったままです。サ行の高い音だけを自動で下げます。初期値はOFFです";
+const char* const kDeEssHzTip = "歯擦音が強い周波数。2000〜9000 Hz。クリックして入力（3.4k のようにkも使えます）。ホイールと↑↓で1/12オクターブずつ";
+const char* const kDeEssMaxDbTip = "歯擦音を下げる量の上限。0.0〜12.0 dB。クリックして入力。ホイールと↑↓で0.5 dBずつ。OFFでも値は残ります";
 
 juce::String utf8 (const char* text)
 {
@@ -661,8 +664,36 @@ MicPanel::MicPanel (AudioIO& audioIOIn, juce::PropertiesFile& settingsIn)
     outputGain->onUserChange = [this] (float v) { outputGainChangedByUser (v); };
     addAndMakeVisible (*outputGain);
 
+    // ----- ディエッサー（EQの下。Tab順は35〜37） -----
+    deEssSwitch.setTexts (utf8 ("ディエッサー"), utf8 ("歯擦音（サ行）を抑えています"), utf8 ("歯擦音は抑えていません"));
+    deEssSwitch.setTitle (utf8 ("ディエッサーのON/OFF"));
+    deEssSwitch.setTooltip (utf8 (kDeEssSwitchTip));
+    deEssSwitch.setDescription (utf8 (kDeEssSwitchTip));
+    deEssSwitch.setExplicitFocusOrder (35);
+    deEssSwitch.onClick = [this] { setDeEssEnabled (deEssSwitch.getToggleState()); };
+    addAndMakeVisible (deEssSwitch);
+
+    setupLabel (deEssHzLabel, "中心周波数");
+    setupLabel (deEssMaxDbLabel, "強さ");
+    deEssMaxDbLabel.setJustificationType (juce::Justification::centredRight);
+
+    auto setupDeEssField = [this] (std::unique_ptr<NumberField>& field, EqField kind, const char* title, const char* tip, int focusOrder,
+                                   std::function<void (float)> onChange)
+    {
+        field = std::make_unique<NumberField> (kind);
+        field->setTitle (utf8 (title));
+        field->setTooltip (utf8 (tip));
+        field->setDescription (utf8 (tip));
+        field->setExplicitFocusOrder (focusOrder);
+        field->onUserChange = std::move (onChange);
+        addAndMakeVisible (*field);
+    };
+
+    setupDeEssField (deEssHzField, EqField::DeEssHz, "ディエッサーの中心周波数", kDeEssHzTip, 36, [this] (float v) { deEssHzChangedByUser (v); });
+    setupDeEssField (deEssMaxDbField, EqField::DeEssMaxDb, "ディエッサーの強さ", kDeEssMaxDbTip, 37, [this] (float v) { deEssMaxDbChangedByUser (v); });
+
     refreshAll();
-    setSize (460, 600); // resized()が全部品を使うため、最後に設定する
+    setSize (460, 704); // resized()が全部品を使うため、最後に設定する
 }
 
 MicPanel::~MicPanel()
@@ -695,6 +726,10 @@ void MicPanel::saveSettings()
     s.eqBands = eq.bands;
     s.eqOutputGainDb = eq.outputGainDb;
 
+    s.deEssEnabled = p.deEssEnabled.load (std::memory_order_relaxed);
+    s.deEssHz = p.deEssHz.load (std::memory_order_relaxed);
+    s.deEssMaxDb = p.deEssMaxDb.load (std::memory_order_relaxed);
+
     storeMicSettings (settings, s);
 }
 
@@ -710,6 +745,27 @@ void MicPanel::setEqEnabled (bool on)
     audioIO.engineParams().eqEnabled.store (on, std::memory_order_relaxed);
     saveSettings();
     refreshEqAppearance();
+}
+
+void MicPanel::setDeEssEnabled (bool on)
+{
+    audioIO.engineParams().deEssEnabled.store (on, std::memory_order_relaxed);
+    saveSettings();
+    refreshDeEssAppearance();
+}
+
+void MicPanel::deEssHzChangedByUser (float hz)
+{
+    audioIO.engineParams().deEssHz.store (hz, std::memory_order_relaxed);
+    saveSettings();
+    refreshDeEssAppearance();
+}
+
+void MicPanel::deEssMaxDbChangedByUser (float db)
+{
+    audioIO.engineParams().deEssMaxDb.store (db, std::memory_order_relaxed);
+    saveSettings();
+    refreshDeEssAppearance();
 }
 
 void MicPanel::applySlider (juce::Slider& slider, std::atomic<float>& target)
@@ -877,6 +933,21 @@ void MicPanel::refreshOutputGainAppearance()
     outputGain->setValueColour (juce::Colour (isZero ? L::textPrimary : (eq.on ? L::live : L::textSecondary)));
 }
 
+// 値の文字色: 中心周波数はONならtext.primary、OFFならtext.secondary。強さは0.0ならtext.primary、0より大きいときONならlive、OFFならtext.secondary。
+void MicPanel::refreshDeEssAppearance()
+{
+    const auto& p = audioIO.engineParams();
+    const bool on = p.deEssEnabled.load (std::memory_order_relaxed);
+    const float hz = p.deEssHz.load (std::memory_order_relaxed);
+    const float db = p.deEssMaxDb.load (std::memory_order_relaxed);
+
+    deEssSwitch.setToggleState (on, juce::dontSendNotification);
+    deEssHzField->setValue (hz);
+    deEssHzField->setValueColour (juce::Colour (on ? L::textPrimary : L::textSecondary));
+    deEssMaxDbField->setValue (db);
+    deEssMaxDbField->setValueColour (juce::Colour (db < 0.05f ? L::textPrimary : (on ? L::live : L::textSecondary)));
+}
+
 void MicPanel::refreshBandAppearance (int index)
 {
     auto& w = bands[(size_t) index];
@@ -917,6 +988,7 @@ void MicPanel::refreshAll()
 {
     refreshNrAppearance();
     refreshEqAppearance();
+    refreshDeEssAppearance();
     refreshUndoButton();
 }
 
@@ -935,6 +1007,8 @@ void MicPanel::updateShowingState()
         }
 
         outputGain->commitEdit();
+        deEssHzField->commitEdit();
+        deEssMaxDbField->commitEdit();
         clearUndo();
     }
 
@@ -988,6 +1062,12 @@ void MicPanel::resized()
 
     outputGainLabel.setBounds (72, 556, 224, 32);
     outputGain->setBounds (304, 558, 76, 28);
+
+    deEssSwitch.setBounds (20, 612, 420, 40);
+    deEssHzLabel.setBounds (20, 660, 84, 32);
+    deEssHzField->setBounds (108, 662, 84, 28);
+    deEssMaxDbLabel.setBounds (212, 660, 84, 32);
+    deEssMaxDbField->setBounds (304, 662, 76, 28);
 }
 
 void MicPanel::paint (juce::Graphics& g)
@@ -997,6 +1077,7 @@ void MicPanel::paint (juce::Graphics& g)
     g.setColour (juce::Colour (L::lineDivider));
     g.fillRect (20, 140, 420, 1);
     g.fillRect (20, 555, 420, 1); // 5つのバンドと出力ゲインの行を分ける（6本目のバンドに見せない）
+    g.fillRect (20, 600, 420, 1); // EQとディエッサーの区画を分ける
 
     // 列見出し（12pt text.secondary。y372・高さ20）。
     g.setColour (juce::Colour (L::textSecondary));
