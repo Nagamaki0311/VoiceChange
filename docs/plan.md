@@ -612,6 +612,13 @@ public:
 - 出力ゲインの値は、`--process-wav --float`と`--compare`でユーザーの録音（raw_A）の発話区間のK特性ラウドネスを測って決めた（A2・A3とも+2.0dB。実測表はprogress.md）。
 - 完了条件: ctest全件成功、`--screenshot-mic`で配置を確認、プリセット値・導出規則・ゲイン適用を壊すとテストが落ちる。
 
+#### T-019: ディエッサー（歯擦音抑制）をマイク処理に追加する（任意機能、初期値OFF）
+
+- 要件・値: docs/spec.md「マイク処理: ディエッサー」、判断はD-029。UIはdocs/design.md 10.2・10.3節（マイク処理ウィンドウは460×704）。
+- 変更対象: `src/core/MicProcessing.*`（`DeEsser`。Equalizerの後ろ。TPTのSVF2つ・二乗平均・ゲイン。確保なし）、`src/core/Engine.*`（EQの直後・バイパス判定の前で処理し、`resetMic`でリセット）、`src/core/Params.h`（定数・`sanitizeDeEssHz`/`sanitizeDeEssMaxDb`・`AtomicParams`・`SavedSettings`・保存・読込・`EqField::DeEssHz`/`DeEssMaxDb`）、`src/app/MicPanel.*`・`src/app/Main.cpp`（区画・保存値の復元）、`tests/DeEsserTests.cpp`（新規。MicTests.cppが5000行を超えているため別ファイル。カテゴリMic）、`tests/AppLogicTests.cpp`（保存・読込・sanitize・数値欄）、`tests/RecordingTool.*`（`--deess`・`--deess-hz`・`--deess-db`）、`tests/LongRunTests.cpp`（ONのまま中心周波数・強さを変える）。
+- 値の決め方: 実録音raw_AをNR+A2/A3に通した信号で、歯擦音の帯域（3.4kHz、Q 1.5）と基準（低域通過1kHz）の比を測った（母音−15〜−23dB、歯擦音+15〜+29dB）。閾値+3dB・幅6dBは、母音と歯擦音のちょうど中間より歯擦音寄りで、母音のフレームに減衰が入らないことを確かめて決めた（Pythonの試作→C++の実装で同じ結果）。リリースは50ms（目安どおり。10〜50msで、歯擦音の後の母音の3.15kHz帯の変化は−0.01〜−0.09dBと小さく、50msでも許容できた）。
+- 完了条件: ctest全件成功。DE1〜DE11（README「ディエッサーの客観指標」）が通り、変異試験（中心周波数・最大減衰・検出の基準・位置・閾値・クロスフェード・NaN回復など）で落ちる。`--screenshot-mic`で配置を確認。試聴サンプル（NR+A3＋ディエッサー 4dB/6dB）と帯域別の減衰量・声量への影響の表をユーザーへ渡す。
+
 ### 8.4 完了条件（追加計画全体）
 
 - T-009〜T-015の各完了条件を満たす。
