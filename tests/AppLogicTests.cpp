@@ -32,6 +32,7 @@ public:
     {
         runSanitizeTests();
         runMicSettingsTests();
+        runDeEssSettingsTests();
         runTalkboxRangeTests();
         runEqInputTests();
         runEqPresetTests();
@@ -41,6 +42,172 @@ public:
     }
 
 private:
+    // ディエッサー（T-019、D-029）。キー deEssEnabled / deEssHz / deEssMaxDb。キーなし = OFF・既定値（3400 Hz・6.0 dB）、範囲は2000〜9000 Hz・0〜12 dB。
+    // 数値欄（EqField::DeEssHz / DeEssMaxDb）の入力解釈・表示・刻みもここで確かめる（design.md 10.3節）。
+    void runDeEssSettingsTests()
+    {
+        using vc::EqField;
+
+        beginTest ("DeEss設定: 既定値（OFF・3400 Hz・6.0 dB）。キーがなくても、SavedSettings・AtomicParamsの既定も同じ");
+        {
+            const auto s = vc::loadSettings (juce::PropertySet());
+            expect (! s.deEssEnabled, "キーなし = OFF");
+            expectEquals (s.deEssHz, 3400.0f);
+            expectEquals (s.deEssMaxDb, 6.0f);
+            expectEquals (vc::kDeEssDefaultHz, 3400.0f);
+            expectEquals (vc::kDeEssDefaultMaxDb, 6.0f);
+            expectEquals (vc::kDeEssMinHz, 2000.0f);
+            expectEquals (vc::kDeEssMaxHz, 9000.0f);
+            expectEquals (vc::kDeEssMaxDbLimit, 12.0f);
+
+            const vc::SavedSettings defaults;
+            expect (! defaults.deEssEnabled);
+            expectEquals (defaults.deEssHz, 3400.0f);
+            expectEquals (defaults.deEssMaxDb, 6.0f);
+
+            const vc::AtomicParams atomics;
+            expect (! atomics.deEssEnabled.load());
+            expectEquals (atomics.deEssHz.load(), 3400.0f);
+            expectEquals (atomics.deEssMaxDb.load(), 6.0f);
+        }
+
+        beginTest ("DeEss設定: 保存→読み込みの往復が一致し、キー名は deEssEnabled / deEssHz / deEssMaxDb。OFFでも値は保持される");
+        {
+            vc::SavedSettings s;
+            s.deEssEnabled = true;
+            s.deEssHz = 5234.5f;
+            s.deEssMaxDb = 9.5f;
+
+            juce::PropertySet props;
+            vc::storeMicSettings (props, s);
+            expect (props.containsKey ("deEssEnabled") && props.containsKey ("deEssHz") && props.containsKey ("deEssMaxDb"), "キー名");
+            const auto out = vc::loadSettings (props);
+            expect (out.deEssEnabled);
+            expectEquals (out.deEssHz, 5234.5f);
+            expectEquals (out.deEssMaxDb, 9.5f);
+
+            s.deEssEnabled = false; // OFFにしても、値はそのまま残る
+            vc::storeMicSettings (props, s);
+            const auto off = vc::loadSettings (props);
+            expect (! off.deEssEnabled);
+            expectEquals (off.deEssHz, 5234.5f);
+            expectEquals (off.deEssMaxDb, 9.5f);
+
+            juce::PropertySet defaultsProps;
+            vc::storeMicSettings (defaultsProps, vc::SavedSettings());
+            const auto def = vc::loadSettings (defaultsProps);
+            expect (! def.deEssEnabled);
+            expectEquals (def.deEssHz, 3400.0f);
+            expectEquals (def.deEssMaxDb, 6.0f);
+        }
+
+        beginTest ("DeEss設定: 範囲外は端へ、nan/inf/不正な文字列は既定、floatを超える巨大値は端へ（読込とsanitizeの両方）");
+        {
+            const auto load = [] (const char* hz, const char* db)
+            {
+                juce::PropertySet p;
+                p.setValue ("deEssHz", hz);
+                p.setValue ("deEssMaxDb", db);
+                return vc::loadSettings (p);
+            };
+
+            expectEquals (load ("100", "50").deEssHz, 2000.0f, "周波数の下限");
+            expectEquals (load ("100", "50").deEssMaxDb, 12.0f, "強さの上限");
+            expectEquals (load ("50000", "-3").deEssHz, 9000.0f, "周波数の上限");
+            expectEquals (load ("50000", "-3").deEssMaxDb, 0.0f, "強さの下限");
+            expectEquals (load ("nan", "inf").deEssHz, 3400.0f, "nanは既定");
+            expectEquals (load ("nan", "inf").deEssMaxDb, 6.0f, "infは既定");
+            expectEquals (load ("abc", "-inf").deEssMaxDb, 6.0f, "-infは既定");
+            expectEquals (load ("1e300", "1e300").deEssHz, 9000.0f, "巨大値は端");
+            expectEquals (load ("-1e300", "-1e300").deEssMaxDb, 0.0f, "巨大な負値は端");
+
+            vc::SavedSettings bad;
+            bad.deEssHz = std::numeric_limits<float>::quiet_NaN();
+            bad.deEssMaxDb = std::numeric_limits<float>::infinity();
+            expectEquals (vc::sanitize (bad).deEssHz, 3400.0f, "sanitize: NaNは既定");
+            expectEquals (vc::sanitize (bad).deEssMaxDb, 6.0f, "sanitize: Infは既定");
+            bad.deEssHz = 1.0f;
+            bad.deEssMaxDb = 99.0f;
+            expectEquals (vc::sanitize (bad).deEssHz, 2000.0f, "sanitize: 範囲外は端");
+            expectEquals (vc::sanitize (bad).deEssMaxDb, 12.0f, "sanitize: 範囲外は端");
+
+            expectEquals (vc::sanitizeDeEssHz (-std::numeric_limits<float>::infinity()), 3400.0f);
+            expectEquals (vc::sanitizeDeEssMaxDb (std::numeric_limits<float>::quiet_NaN()), 6.0f);
+        }
+
+        beginTest ("DeEss設定: 真偽値（deEssEnabled）。PropertySetの規則（整数として0以外がON）。0・空・数値でない文字列はOFF");
+        {
+            for (const auto& [text, expected] : std::initializer_list<std::pair<const char*, bool>> { { "1", true }, { "2", true }, { "0", false }, { "abc", false }, { "", false } })
+            {
+                juce::PropertySet p;
+                p.setValue ("deEssEnabled", text);
+                expect (vc::loadSettings (p).deEssEnabled == expected, juce::String ("deEssEnabled = \"") + text + "\"");
+            }
+        }
+
+        beginTest ("DeEss数値欄: 中心周波数の入力（k付き・単位付き・全角・丸め・範囲 2000〜9000 Hz）");
+        {
+            const auto parse = [] (EqField f, const char* utf8) { return vc::parseEqInput (f, juce::String::fromUTF8 (utf8)); };
+            const auto expectValue = [this] (const std::optional<float>& got, float want, const juce::String& label)
+            {
+                expect (got.has_value(), label + " が読めなかった");
+
+                if (got.has_value())
+                    expectWithinAbsoluteError (*got, want, 0.0001f, label);
+            };
+
+            expectValue (parse (EqField::DeEssHz, "3400"), 3400.0f, "3400");
+            expectValue (parse (EqField::DeEssHz, "3.4k"), 3400.0f, "3.4k");
+            expectValue (parse (EqField::DeEssHz, "4 kHz"), 4000.0f, "4 kHz");
+            expectValue (parse (EqField::DeEssHz, "３４００Ｈｚ"), 3400.0f, "全角");
+            expectValue (parse (EqField::DeEssHz, "3400.6"), 3401.0f, "1 Hzへ丸め");
+            expectValue (parse (EqField::DeEssHz, "100"), 2000.0f, "下限");
+            expectValue (parse (EqField::DeEssHz, "20k"), 9000.0f, "上限");
+            expect (! parse (EqField::DeEssHz, "abc").has_value(), "数値でない入力はnullopt");
+            expect (! parse (EqField::DeEssMaxDb, "").has_value(), "空はnullopt");
+
+            expectEquals (vc::formatEqValue (EqField::DeEssHz, 3400.0f), juce::String ("3400 Hz"));
+            expectEquals (vc::formatEqValue (EqField::DeEssHz, 2000.4f), juce::String ("2000 Hz"));
+        }
+
+        beginTest ("DeEss数値欄: 強さの入力（符号なしの表示・0.5 dB刻みへ丸め・範囲 0〜12 dB・刻み）");
+        {
+            const auto parse = [] (const char* utf8) { return vc::parseEqInput (EqField::DeEssMaxDb, juce::String::fromUTF8 (utf8)); };
+            const auto expectValue = [this] (const std::optional<float>& got, float want, const juce::String& label)
+            {
+                expect (got.has_value(), label + " が読めなかった");
+
+                if (got.has_value())
+                    expectWithinAbsoluteError (*got, want, 0.0001f, label);
+            };
+
+            expectValue (parse ("6"), 6.0f, "6");
+            expectValue (parse ("6.0 dB"), 6.0f, "単位つき");
+            expectValue (parse ("４．５"), 4.5f, "全角");
+            expectValue (parse ("4.3"), 4.5f, "0.5 dB刻みへ丸め（4.3 → 4.5）");
+            expectValue (parse ("4.2"), 4.0f, "0.5 dB刻みへ丸め（4.2 → 4.0）");
+            expectValue (parse ("-5"), 0.0f, "負は下限0");
+            expectValue (parse ("99"), 12.0f, "上限12");
+
+            expectEquals (vc::formatEqValue (EqField::DeEssMaxDb, 6.0f), juce::String ("6.0 dB"));
+            expectEquals (vc::formatEqValue (EqField::DeEssMaxDb, 0.0f), juce::String ("0.0 dB"));
+            expectEquals (vc::formatEqValue (EqField::DeEssMaxDb, 12.0f), juce::String ("12.0 dB"));
+            expectEquals (vc::formatEqValue (EqField::DeEssMaxDb, 4.5f), juce::String ("4.5 dB"));
+
+            // ホイール・矢印キー: ±0.5 dB、端で止まる。
+            expectEquals (vc::stepEqValue (EqField::DeEssMaxDb, 6.0f, 1), 6.5f);
+            expectEquals (vc::stepEqValue (EqField::DeEssMaxDb, 6.0f, -1), 5.5f);
+            expectEquals (vc::stepEqValue (EqField::DeEssMaxDb, 12.0f, 1), 12.0f);
+            expectEquals (vc::stepEqValue (EqField::DeEssMaxDb, 0.0f, -1), 0.0f);
+
+            // 中心周波数: 1/12オクターブ（丸めた結果が変わらなければ1 Hz）。端で止まる。
+            expectEquals (vc::stepEqValue (EqField::DeEssHz, 3400.0f, 1), 3602.0f);
+            expectEquals (vc::stepEqValue (EqField::DeEssHz, 3400.0f, -1), 3209.0f);
+            expectEquals (vc::stepEqValue (EqField::DeEssHz, 9000.0f, 1), 9000.0f);
+            expectEquals (vc::stepEqValue (EqField::DeEssHz, 2000.0f, -1), 2000.0f);
+        }
+    }
+
     // トークボックスの音域（D-028）。設定ファイルのキー `talkboxRange` = low|high。キーなし・不正値は既定のlow。
     void runTalkboxRangeTests()
     {

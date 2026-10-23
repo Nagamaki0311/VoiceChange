@@ -952,4 +952,207 @@ void Equalizer::process (float* buf, int n) noexcept
     }
 }
 
+
+// ===== SECTION: DeEsser =====
+
+namespace
+{
+constexpr double kDeEssFadeSeconds = 0.020;    // ON/OFFのクロスフェード
+constexpr double kDeEssSmoothSeconds = 0.050;  // 周波数・強さの補間
+constexpr double kDeEssBandQ = 1.5;            // 検出と減衰の帯域通過のQ（中心2〜9kHzで幅は中心の約2/3）
+constexpr double kDeEssRefHz = 1000.0;         // 基準の低域通過（2次）の周波数とQ。母音の低域のエネルギーを取る
+constexpr double kDeEssRefQ = 0.7;
+constexpr double kDeEssPowerSeconds = 0.002;   // 二乗平均の時定数
+constexpr double kDeEssAttackSeconds = 0.0015;
+constexpr double kDeEssReleaseSeconds = 0.050;
+constexpr double kDeEssThresholdDb = 3.0;      // 帯域/基準の比がこれを超えると減衰を始める（母音は約-20dB、歯擦音は+15dB以上。docs/progress.md）
+constexpr double kDeEssKneeDb = 6.0;           // 閾値からこの幅で、減衰が0から最大減衰（強さ）になる
+// ponytail: 基準のパワーに足す下駄（-50dBFS相当）。無音・雑音床（NR OFFのマイクの背景雑音など）では帯域/基準の比が不定・高めになるため、雑音で減衰を動かさない。
+// 副作用として、帯域のパワーが約 -50dBFS + 閾値 より小さい歯擦音には効かない（実録音の歯擦音は-17〜-47dBFS）。改善案: 雑音床を推定して下駄にする。
+constexpr double kDeEssRefFloor = 1.0e-5;
+constexpr double kDeEssPowerEps = 1.0e-12;
+constexpr double kDeEssSnapGain = 0.9995;      // 目標が1のとき、これを超えたら1にする（以後、入力とビット一致）
+} // namespace
+
+void DeEsser::prepare (double newSampleRate)
+{
+    jassert (newSampleRate > 0.0);
+
+    sampleRate = newSampleRate;
+    maxHz = 0.45 * sampleRate;
+    fadeStep = 1.0 / (double) std::max (1, (int) std::lround (kDeEssFadeSeconds * sampleRate));
+    powerCoef = 1.0 - std::exp (-1.0 / (kDeEssPowerSeconds * sampleRate));
+    attackCoef = 1.0 - std::exp (-1.0 / (kDeEssAttackSeconds * sampleRate));
+    releaseCoef = 1.0 - std::exp (-1.0 / (kDeEssReleaseSeconds * sampleRate));
+
+    // 基準の低域通過の係数は周波数が固定なのでここで1回だけ。
+    const double g = std::tan (juce::MathConstants<double>::pi * std::min (kDeEssRefHz, maxHz) / sampleRate);
+    const double k = 1.0 / kDeEssRefQ;
+    refA1 = 1.0 / (1.0 + g * (g + k));
+    refA2 = g * refA1;
+    refA3 = g * refA2;
+
+    hz.reset (sampleRate, kDeEssSmoothSeconds);
+    maxDb.reset (sampleRate, kDeEssSmoothSeconds);
+    hz.setCurrentAndTargetValue (kDeEssDefaultHz);
+    maxDb.setCurrentAndTargetValue (kDeEssDefaultMaxDb);
+
+    runTarget = false;
+    reset();
+}
+
+void DeEsser::setTarget (bool run, float centerHz, float newMaxDb) noexcept
+{
+    runTarget = run;
+
+    const float targetHz = std::min (sanitizeDeEssHz (centerHz), (float) maxHz);
+    const float targetDb = sanitizeDeEssMaxDb (newMaxDb);
+
+    if (state == State::Resting) // 休止中は補間しない（起動時に古い値から動かさない）
+    {
+        hz.setCurrentAndTargetValue (targetHz);
+        maxDb.setCurrentAndTargetValue (targetDb);
+    }
+    else
+    {
+        hz.setTargetValue (targetHz);
+        maxDb.setTargetValue (targetDb);
+    }
+}
+
+void DeEsser::reset() noexcept
+{
+    state = State::Resting;
+    mix = 0.0;
+    phase = 0;
+    hop = 0;
+    coefficientsStale = true;
+    bpIc1 = bpIc2 = refIc1 = refIc2 = 0.0;
+    bandPower = refPower = 0.0;
+    gain = targetGain = 1.0;
+}
+
+// Restingから稼働へ。古い状態を持ち込まず、補間値（休止中は目標に合わせてある）から始めて、mixを0から20msかけて入れる。
+void DeEsser::start() noexcept
+{
+    reset();
+    state = State::FadingIn;
+}
+
+// 帯域通過の係数（TPTのステート・バリアブル・フィルタ）。bpKはピークのゲインを1にする係数。
+void DeEsser::updateCoefficients (double centerHz) noexcept
+{
+    const double g = std::tan (juce::MathConstants<double>::pi * std::min (centerHz, maxHz) / sampleRate);
+    bpK = 1.0 / kDeEssBandQ;
+    bpA1 = 1.0 / (1.0 + g * (g + bpK));
+    bpA2 = g * bpA1;
+    bpA3 = g * bpA2;
+}
+
+// 帯域/基準の比（dB）から目標ゲインを決める。
+void DeEsser::updateTarget() noexcept
+{
+    const double ratioDb = 10.0 * std::log10 ((bandPower + kDeEssPowerEps) / (refPower + kDeEssRefFloor));
+    const double fraction = juce::jlimit (0.0, 1.0, (ratioDb - kDeEssThresholdDb) / kDeEssKneeDb);
+
+    targetGain = fraction > 0.0 ? std::pow (10.0, -(double) maxDb.getCurrentValue() * fraction / 20.0) : 1.0;
+}
+
+void DeEsser::process (float* buf, int n) noexcept
+{
+    switch (state)
+    {
+        case State::Resting:
+            if (runTarget)
+                start();
+            break;
+
+        case State::FadingIn:
+        case State::Active:
+            if (! runTarget)
+                state = State::FadingOut;
+            break;
+
+        case State::FadingOut:
+            if (runTarget)
+                state = State::FadingIn;
+            break;
+    }
+
+    for (int i = 0; i < n && state != State::Resting; ++i)
+    {
+        if (phase == 0)
+        {
+            // 32サンプルのグループの先頭。補間中は、補間値から係数を計算して補間を進める（EQと同じ。補間が終わった次のグループで
+            // もう1回、目標値で計算する）。
+            const bool smoothing = hz.isSmoothing();
+
+            if (smoothing || coefficientsStale)
+                updateCoefficients ((double) hz.getCurrentValue());
+
+            if (smoothing)
+                hz.skip (kGroup);
+
+            coefficientsStale = smoothing;
+
+            if (maxDb.isSmoothing())
+                maxDb.skip (kGroup);
+        }
+
+        const double x = (double) buf[i];
+
+        // 帯域通過（bpはピークのゲイン1）と基準の低域通過。
+        const double v3 = x - bpIc2;
+        const double v1 = bpA1 * bpIc1 + bpA2 * v3;
+        const double v2 = bpIc2 + bpA2 * bpIc1 + bpA3 * v3;
+        bpIc1 = 2.0 * v1 - bpIc1;
+        bpIc2 = 2.0 * v2 - bpIc2;
+        const double band = bpK * v1;
+
+        const double r3 = x - refIc2;
+        const double r1 = refA1 * refIc1 + refA2 * r3;
+        const double r2 = refIc2 + refA2 * refIc1 + refA3 * r3;
+        refIc1 = 2.0 * r1 - refIc1;
+        refIc2 = 2.0 * r2 - refIc2;
+
+        bandPower += powerCoef * (band * band - bandPower);
+        refPower += powerCoef * (r2 * r2 - refPower);
+
+        if (hop == 0)
+            updateTarget();
+
+        hop = hop + 1 >= kHop ? 0 : hop + 1;
+
+        gain += (targetGain < gain ? attackCoef : releaseCoef) * (targetGain - gain);
+
+        if (targetGain >= 1.0 && gain > kDeEssSnapGain)
+            gain = 1.0;
+
+        buf[i] = (float) (x - mix * (1.0 - gain) * band);
+
+        phase = phase + 1 >= kGroup ? 0 : phase + 1;
+
+        if (state == State::FadingIn)
+        {
+            mix += fadeStep;
+
+            if (mix >= 1.0)
+            {
+                mix = 1.0;
+                state = State::Active;
+            }
+        }
+        else if (state == State::FadingOut)
+        {
+            mix -= fadeStep;
+
+            if (mix <= 0.0)
+            {
+                mix = 0.0;
+                state = State::Resting; // 残りは入力のまま
+            }
+        }
+    }
+}
+
 } // namespace vc

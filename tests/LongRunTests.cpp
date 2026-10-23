@@ -158,6 +158,7 @@ public:
         engine.params().gainDb.store (6.0f);
         engine.params().reverb.store (0.2f);
         engine.params().eqEnabled.store (true); // EQは常時ON。バンド1のゲインを45秒ごとに変える（T-012）
+        engine.params().deEssEnabled.store (true); // ディエッサーも常時ON（T-019）。中心周波数と強さをバンド1と同じ45秒ごとに変える
 
         const double inPeriod = (double) kBi / (kInRate * (1.0 + kPpmIn * 1.0e-6));
         const double outPeriod = (double) kBo / kOutRate;
@@ -186,6 +187,8 @@ public:
         std::uint64_t nrActiveBlocks = 0;
         constexpr std::array<float, 5> kBackgrounds { 0.7f, 0.0f, 1.0f, 0.3f, 0.5f };
         constexpr std::array<float, 5> kBand1GainsDb { 0.0f, 6.0f, -6.0f, 12.0f, -12.0f };
+        constexpr std::array<float, 5> kDeEssHzs { 3400.0f, 2000.0f, 9000.0f, 5000.0f, 3000.0f };
+        constexpr std::array<float, 4> kDeEssMaxDbs { 6.0f, 12.0f, 0.0f, 3.5f };
 
         // c/d/e用（RingBufferTests.cppのS7と同じ適用区間）。
         constexpr double kCFrom = 300.0, kDStart = 300.0, kEFrom = 600.0;
@@ -263,6 +266,8 @@ public:
             {
                 engine.params().nrBackground.store (kBackgrounds[(size_t) micParamSlot % kBackgrounds.size()]);
                 engine.params().eqBands[0].gainDb.store (kBand1GainsDb[(size_t) micParamSlot % kBand1GainsDb.size()]);
+                engine.params().deEssHz.store (kDeEssHzs[(size_t) micParamSlot % kDeEssHzs.size()]);
+                engine.params().deEssMaxDb.store (kDeEssMaxDbs[(size_t) micParamSlot % kDeEssMaxDbs.size()]);
                 lastMicParamSlot = micParamSlot;
                 ++micParamChanges;
             }

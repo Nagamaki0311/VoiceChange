@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -362,6 +363,78 @@ private:
 
     std::array<Band, kEqBands> bands;
     juce::SmoothedValue<float> outputGainDb { 0.0f }; // 出力ゲイン[dB]。50msでdB補間
+};
+
+// ===== SECTION: DeEsser =====
+// ディエッサー（歯擦音抑制。T-019）。docs/spec.md「マイク処理: ディエッサー」、D-029参照。EQの直後・層1の前に置く、ゼロ遅延のダイナミック型。
+// 構成（すべて1サンプルずつ。確保なし）:
+//   検出: 中心周波数（Q 1.5）の帯域通過の包絡と、基準 = 1kHzの低域通過（2次、Q 0.7）の包絡の比（dB）。
+//         どちらも2msの時定数で二乗を平均する。基準は母音の低域のエネルギーで、比は声量・マイク位置に依存しにくい
+//         （母音は約-20dB、歯擦音は+15dB以上。実測は docs/progress.md）。基準には-50dBFS相当の下駄を履かせ、雑音床では動かさない。
+//   減衰: 比が閾値（+3dB）を超えた分を6dBの幅で0〜最大減衰（強さ）へ割り当て、ゲインを1.5msのアタック・50msのリリースで追う。
+//         出力 = 入力 - (1 - ゲイン) × 帯域通過。帯域通過は中心でゲイン1なので、中心だけがゲインに下がるピーキングの形になる
+//         （係数を計算し直さずに1サンプルごとにゲインを変えられる）。ゲイン1では入力とビット一致。
+// ON/OFFは20msのクロスフェード（減衰分の足し引きを0から1へ）。OFFでは何もしない（ビット一致）。周波数・強さの変更は50msの補間
+// （32サンプルのグループごとに係数を更新）。時間の基準はサンプル数で、ブロックの区切りに依存しない（目標値の反映だけブロックの先頭）。
+class DeEsser
+{
+public:
+    // メッセージスレッドのみ。デバイス停止中に呼ぶ。
+    void prepare (double sampleRate);
+
+    // 音声スレッドのみ。各ブロックの先頭で呼ぶ。範囲外は端へ丸め、非有限値は既定にする（sanitizeDeEssHz / sanitizeDeEssMaxDb）。
+    void setTarget (bool run, float centerHz, float maxDb) noexcept;
+
+    // 音声スレッドのみ。その場で処理する。Restingでは何もしない（bufに触れない）。
+    void process (float* buf, int n) noexcept;
+
+    // 音声スレッドのみ。Restingへ戻し、フィルタ・包絡・ゲインを消去する（確保なし）。
+    void reset() noexcept;
+
+    // 処理中・フェード中か。テスト用。
+    bool isRunning() const noexcept { return state != State::Resting; }
+
+    // 現在の減衰量[dB]（0以上）。テスト用。
+    float getReductionDb() const noexcept { return (float) (-20.0 * std::log10 (std::max (gain, 1.0e-6))); }
+
+private:
+    enum class State
+    {
+        Resting,
+        FadingIn,
+        Active,
+        FadingOut
+    };
+
+    static constexpr int kGroup = 32; // 係数の更新周期（サンプル）
+    static constexpr int kHop = 8;    // 比から目標ゲインを計算し直す周期（サンプル。kGroupの約数）
+
+    void start() noexcept;
+    void updateCoefficients (double hz) noexcept;
+    void updateTarget() noexcept;
+
+    State state = State::Resting;
+    bool runTarget = false;
+
+    double sampleRate = 48000.0;
+    double maxHz = 21600.0;   // 0.45 × fs
+    double fadeStep = 1.0;    // 20msのクロスフェードの1サンプルあたりの増分
+    double mix = 0.0;         // 0=素通し, 1=ディエス。反転しても現在値から続けて動く
+    int phase = 0;            // グループ内の位置
+    int hop = 0;              // 目標ゲインの更新までのサンプル数
+    bool coefficientsStale = true;
+
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Multiplicative> hz { 3400.0f };
+    juce::SmoothedValue<float> maxDb { 6.0f };
+
+    // 帯域通過（TPTのステート・バリアブル・フィルタ。bpGainは1/Qで、ピークのゲインを1にする）と基準の低域通過。
+    double bpA1 = 0.0, bpA2 = 0.0, bpA3 = 0.0, bpK = 1.0;
+    double refA1 = 0.0, refA2 = 0.0, refA3 = 0.0;
+    double bpIc1 = 0.0, bpIc2 = 0.0, refIc1 = 0.0, refIc2 = 0.0;
+
+    double bandPower = 0.0, refPower = 0.0; // 二乗の平均（1次の追従）
+    double powerCoef = 1.0, attackCoef = 1.0, releaseCoef = 1.0;
+    double gain = 1.0, targetGain = 1.0;
 };
 
 } // namespace vc

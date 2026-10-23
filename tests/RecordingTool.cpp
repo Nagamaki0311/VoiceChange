@@ -1649,6 +1649,9 @@ ProcessResult processAudio (const std::vector<float>& input, double fs, const Pr
     p.nrImpact.store (s.nrImpact);
     p.eqEnabled.store (s.eqEnabled);
     p.eqOutputGainDb.store (s.eqOutputGainDb);
+    p.deEssEnabled.store (s.deEssEnabled);
+    p.deEssHz.store (s.deEssHz);
+    p.deEssMaxDb.store (s.deEssMaxDb);
 
     for (size_t i = 0; i < s.eqBands.size(); ++i)
         p.eqBands[i].store (s.eqBands[i]);
@@ -1838,12 +1841,13 @@ double rmsOf (const std::vector<float>& x, long a, long b)
 int runProcessWav (const juce::StringArray& args)
 {
     const auto parsed = parseArgs (args,
-                                   { "--bg", "--impact", "--eq", "--eq-gain", "--nr", "--settings", "--segments", "--trace", "--preset", "--gain", "--pitch", "--reverb",
+                                   { "--bg", "--impact", "--eq", "--eq-gain", "--deess", "--deess-hz", "--deess-db", "--nr", "--settings", "--segments", "--trace", "--preset", "--gain", "--pitch", "--reverb",
                                      "--semitones", "--formant", "--talkbox-carrier", "--talkbox-hz", "--talkbox-chord", "--talkbox-voicing-floor",
                                      "--talkbox-scale", "--talkbox-key", "--talkbox-spread", "--talkbox-detune", "--talkbox-octave-up", "--talkbox-bands", "--talkbox-high-hz",
                                      "--talkbox-air-db", "--talkbox-consonant", "--talkbox-seq", "--talkbox-bpm", "--talkbox-step", "--talkbox-advance", "--talkbox-glide", "--talkbox-range" },
                                    { "--float" });
     const char* usage = "usage: VoiceChangeTests --process-wav <in.wav> <out.wav> [--bg 0.65] [--impact 0.15] [--nr on|off] [--eq on|off|a2|a3|sonar] [--eq-gain -12..12]\n"
+                        "                                     [--deess on|off] [--deess-hz 2000..9000] [--deess-db 0..12]   (de-esser after the EQ; default OFF, 3400 Hz, 6 dB)\n"
                         "                                     [--settings <VoiceChange.settings>] [--segments <file>] [--trace <csv>] [--float]\n"
                         "                                     [--preset normal|echo|helium|minion|giant|kerokero|robot|talkbox] [--gain -20..20] [--pitch -36..36] [--reverb 0..1]\n"
                         "                                     [--semitones -48..48] [--formant 0.25..4]   (audition: override the preset's values; normal/helium/minion/giant/talkbox)\n"
@@ -1904,6 +1908,9 @@ int runProcessWav (const juce::StringArray& args)
         settings.eqEnabled = saved.eqEnabled;
         settings.eqBands = saved.eqBands;
         settings.eqOutputGainDb = saved.eqOutputGainDb;
+        settings.deEssEnabled = saved.deEssEnabled;
+        settings.deEssHz = saved.deEssHz;
+        settings.deEssMaxDb = saved.deEssMaxDb;
     }
 
     auto readUnit = [&] (const char* key, float& target)
@@ -1963,6 +1970,20 @@ int runProcessWav (const juce::StringArray& args)
         settings.eqOutputGainDb = (float) v;
     }
 
+    // ディエッサー。--deessがなくても--deess-hz・--deess-dbは値だけ上書きする（設定ファイルのOFFのままなら鳴らない）。
+    if (parsed.options.containsKey ("--deess"))
+    {
+        const auto v = parsed.options["--deess"].toLowerCase();
+
+        if (v != "on" && v != "off")
+        {
+            printError ("--deess must be on or off");
+            return 2;
+        }
+
+        settings.deEssEnabled = v == "on";
+    }
+
     // 層1・層2（試聴用）。--semitones・--formant・--pitchは製品の範囲（層1ピッチ±24など）を超えてよい。ツールの範囲外は終了コード2。
     if (parsed.options.containsKey ("--preset"))
     {
@@ -1991,6 +2012,16 @@ int runProcessWav (const juce::StringArray& args)
         printError (juce::String (key) + " must be a number from " + juce::String (lo) + " to " + juce::String (hi) + ": " + parsed.options[key]);
         return false;
     };
+
+    {
+        double deEssHz = settings.deEssHz, deEssDb = settings.deEssMaxDb;
+
+        if (! readNumber ("--deess-hz", kDeEssMinHz, kDeEssMaxHz, deEssHz) || ! readNumber ("--deess-db", 0.0, kDeEssMaxDbLimit, deEssDb))
+            return 2;
+
+        settings.deEssHz = (float) deEssHz;
+        settings.deEssMaxDb = (float) deEssDb;
+    }
 
     {
         double gain = settings.gainDb, pitch = settings.pitch, reverb = settings.reverb, semitones = 0.0, formant = 1.0, fixedHz = settings.talkboxFixedHz,
@@ -2284,6 +2315,11 @@ int runProcessWav (const juce::StringArray& args)
         for (const auto& b : settings.eqBands)
             out << " [" << (b.on ? "" : "off ") << eqTypeId (b.type) << " " << juce::String (b.hz, 0) << "Hz " << juce::String (b.gainDb, 1) << "dB Q"
                 << juce::String (b.q, 2) << "]";
+
+    if (settings.deEssEnabled)
+        out << ", de-esser ON " << juce::String (settings.deEssHz, 0) << "Hz max " << juce::String (settings.deEssMaxDb, 1) << "dB";
+    else
+        out << ", de-esser OFF";
 
     out << "\nengine: preset " << kPresets[(size_t) settings.preset].id << ", gain " << juce::String (settings.gainDb, 1) << " dB, layer1 pitch " << settings.pitch
         << ", reverb " << juce::String (settings.reverb, 2);
