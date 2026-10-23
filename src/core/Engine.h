@@ -15,7 +15,7 @@
 #include <vector>
 
 // ===== SECTION: Engine =====
-// 音声処理チェーン全体（マイク処理: ノイズ除去 + EQ + ピッチ検出 + ピッチシフター + 層2の効果 + 層1: リバーブ・ゲイン・リミッター）。
+// 音声処理チェーン全体（マイク処理: ノイズ除去 + EQ + ディエッサー + ピッチ検出 + ピッチシフター + 層2の効果 + 層1: リバーブ・ゲイン・リミッター）。
 // GUI・デバイスに依存しない（vc_core）。docs/spec.md「音声処理チェーン」「層1: 音響卓」、
 // docs/decisions.md D-007・D-008・D-010、docs/plan.md 2.5節「Engine」参照。
 // 層2の効果（エコー/ロボット/トークボックス）の切替は20msのクロスフェード、ケロケロの補正量は
@@ -72,13 +72,14 @@ private:
     void handleNonFinite (float* buf, int n) noexcept;
     bool checkAndHandleFinalNonFinite (float* buf, int n) noexcept;
     void resetChain() noexcept; // 層1・層2（ピッチ検出・シフター・効果・リバーブ・リミッター）。マイク処理は含まない
-    void resetMic() noexcept;   // マイク処理（ノイズ除去・EQ）
+    void resetMic() noexcept;   // マイク処理（ノイズ除去・EQ・ディエッサー）
     void updateInputPeak (const float* buf, int n) noexcept;
 
     AtomicParams atomicParams;
 
     NoiseReducer noiseReducer;
     Equalizer equalizer;
+    DeEsser deEsser;
     PitchDetector detector;
     PitchShifter shifter;
     Echo echo;

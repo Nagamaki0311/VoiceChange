@@ -186,6 +186,24 @@ constexpr std::array<EqPresetSpec, 2> kEqPresets { {
 constexpr std::array<EqBandSettings, kEqBands> kEqDefaults = kEqPresets[0].bands;
 constexpr float kEqOutputGainDefaultDb = kEqPresets[0].outputGainDb;
 
+// ===== SECTION: ディエッサー（T-019） =====
+// マイク処理のディエッサー（歯擦音抑制）。EQの直後に置く任意機能で、初期値はOFF。docs/spec.md「マイク処理: ディエッサー」、D-029参照。
+// UI表示名と内部識別子の対照表: ディエッサー = DeEsser（deEss*）/ 中心周波数 = deEssHz / 強さ = deEssMaxDb（最大減衰。歯擦音のときの下げ幅の上限）。
+// 閾値・検出の帯域幅・時定数はUIに出さない固定の内部値（MicProcessing.cppのDeEsser）。
+constexpr float kDeEssMinHz = 2000.0f, kDeEssMaxHz = 9000.0f, kDeEssDefaultHz = 3400.0f; // 中心周波数。既定はユーザーの声の歯擦音（3〜4kHz）の中心
+constexpr float kDeEssMaxDbLimit = 12.0f, kDeEssDefaultMaxDb = 6.0f;                      // 強さ（最大減衰）0〜12 dB、UIの刻みは0.5 dB
+
+// 非有限値は既定へ、範囲外は端へ丸める（juce::jlimitはNaNをそのまま返すため、先に非有限値を除く）。DeEsser::setTargetと設定ファイルのsanitizeが使う。
+inline float sanitizeDeEssHz (float hz) noexcept
+{
+    return juce::jlimit (kDeEssMinHz, kDeEssMaxHz, std::isfinite (hz) ? hz : kDeEssDefaultHz);
+}
+
+inline float sanitizeDeEssMaxDb (float db) noexcept
+{
+    return juce::jlimit (0.0f, kDeEssMaxDbLimit, std::isfinite (db) ? db : kDeEssDefaultMaxDb);
+}
+
 // int値をEqTypeへ。範囲外ならfallback。
 inline EqType eqTypeFromInt (int value, EqType fallback) noexcept
 {
@@ -289,6 +307,11 @@ struct AtomicParams
     std::array<EqBandAtomic, kEqBands> eqBands;               // 初期値はkEqDefaults（コンストラクタで設定）
     std::atomic<float> eqOutputGainDb { kEqOutputGainDefaultDb }; // EQ出力ゲイン -12〜+12dB（EQがOFFのときはかからない）
 
+    // マイク処理（ディエッサー）。EQの直後。同じく全体ON/OFFの対象外（D-020）。docs/spec.md「マイク処理: ディエッサー」。OFFでも値は保持する。
+    std::atomic<bool> deEssEnabled { false };
+    std::atomic<float> deEssHz { kDeEssDefaultHz };         // 中心周波数 2000〜9000Hz
+    std::atomic<float> deEssMaxDb { kDeEssDefaultMaxDb };   // 強さ（最大減衰）0〜12dB
+
     // UIスレッド（メッセージスレッド）のみ。EQの現在値の読み書き。丸めはしない（書き込み側が丸め済み）。
     EqState loadEq() const noexcept
     {
@@ -348,6 +371,9 @@ struct SavedSettings
     bool eqEnabled = false;
     std::array<EqBandSettings, kEqBands> eqBands = kEqDefaults;
     float eqOutputGainDb = kEqOutputGainDefaultDb;
+    bool deEssEnabled = false;
+    float deEssHz = kDeEssDefaultHz;
+    float deEssMaxDb = kDeEssDefaultMaxDb;
 };
 
 // プリセットのUI表示名(design.md、対照表は本ファイル冒頭のPreset enum定義直上のコメントを正とする)。
@@ -418,11 +444,15 @@ inline SavedSettings sanitize (SavedSettings s) noexcept
 
     s.eqOutputGainDb = juce::jlimit (-kEqMaxOutputGainDb, kEqMaxOutputGainDb, s.eqOutputGainDb);
 
+    s.deEssHz = sanitizeDeEssHz (s.deEssHz);
+    s.deEssMaxDb = sanitizeDeEssMaxDb (s.deEssMaxDb);
+
     return s;
 }
 
 // 設定ファイル（PropertiesFile。PropertySetはjuce_coreにあるため、テストからも直接使える）との読み書き。
-// キー: nrEnabled / nrBackground / nrImpact / eqEnabled / eqOutputGainDb / eqBand{1..5}{On,Type,Hz,GainDb,Q}（plan.md 8.3 T-013・T-016）。
+// キー: nrEnabled / nrBackground / nrImpact / eqEnabled / eqOutputGainDb / eqBand{1..5}{On,Type,Hz,GainDb,Q}（plan.md 8.3 T-013・T-016）/
+// deEssEnabled / deEssHz / deEssMaxDb（T-019。キーなし = OFF・既定値）。
 inline juce::String eqBandKey (int band, const char* item)
 {
     return "eqBand" + juce::String (band + 1) + item;
@@ -461,6 +491,9 @@ inline SavedSettings loadSettings (const juce::PropertySet& props)
     s.nrImpact = readClampedFloat (props, "nrImpact", s.nrImpact, 0.0f, 1.0f);
     s.eqEnabled = props.getBoolValue ("eqEnabled", s.eqEnabled);
     s.eqOutputGainDb = readClampedFloat (props, "eqOutputGainDb", s.eqOutputGainDb, -kEqMaxOutputGainDb, kEqMaxOutputGainDb);
+    s.deEssEnabled = props.getBoolValue ("deEssEnabled", s.deEssEnabled);
+    s.deEssHz = readClampedFloat (props, "deEssHz", s.deEssHz, kDeEssMinHz, kDeEssMaxHz);
+    s.deEssMaxDb = readClampedFloat (props, "deEssMaxDb", s.deEssMaxDb, 0.0f, kDeEssMaxDbLimit);
 
     for (int i = 0; i < kEqBands; ++i)
     {
@@ -481,7 +514,7 @@ inline void storeTalkboxRange (juce::PropertySet& props, TalkboxRange range)
     props.setValue ("talkboxRange", juce::String (talkboxRangeId (range)));
 }
 
-// マイク処理の項目（ノイズ除去3項目＋EQ 2＋5×5項目）をすべて書く。値が変わらないキーは、PropertySetが変更扱いにしない。
+// マイク処理の項目（ノイズ除去3項目＋EQ 2＋5×5項目＋ディエッサー3項目）をすべて書く。値が変わらないキーは、PropertySetが変更扱いにしない。
 inline void storeMicSettings (juce::PropertySet& props, const SavedSettings& s)
 {
     props.setValue ("nrEnabled", s.nrEnabled);
@@ -489,6 +522,9 @@ inline void storeMicSettings (juce::PropertySet& props, const SavedSettings& s)
     props.setValue ("nrImpact", (double) s.nrImpact);
     props.setValue ("eqEnabled", s.eqEnabled);
     props.setValue ("eqOutputGainDb", (double) s.eqOutputGainDb);
+    props.setValue ("deEssEnabled", s.deEssEnabled);
+    props.setValue ("deEssHz", (double) s.deEssHz);
+    props.setValue ("deEssMaxDb", (double) s.deEssMaxDb);
 
     for (int i = 0; i < kEqBands; ++i)
     {
@@ -509,7 +545,9 @@ enum class EqField
     Hz,
     GainDb,
     Q,
-    OutputGainDb // EQ出力ゲイン。表示・刻みはGainDbと同じで、範囲だけ±12dB
+    OutputGainDb, // EQ出力ゲイン。表示・刻みはGainDbと同じで、範囲だけ±12dB
+    DeEssHz,      // ディエッサーの中心周波数。表示・入力・刻みはHzと同じで、範囲だけ2000〜9000Hz
+    DeEssMaxDb    // ディエッサーの強さ（最大減衰）。0〜12dB、0.5dB刻み、符号なし（`6.0 dB`）
 };
 
 // 表示形式: 周波数は整数のHz（`1200 Hz`）、ゲイン（出力ゲインを含む）は小数1桁で符号付き（`+3.0 dB` / `0.0 dB` / `-4.5 dB`）、Qは小数2桁（`0.71`）。
@@ -518,7 +556,11 @@ inline juce::String formatEqValue (EqField field, float value)
     switch (field)
     {
         case EqField::Hz:
+        case EqField::DeEssHz:
             return juce::String ((int) std::lround (value)) + " Hz";
+
+        case EqField::DeEssMaxDb:
+            return juce::String (std::round ((double) value * 2.0) / 2.0, 1) + " dB";
 
         case EqField::GainDb:
         case EqField::OutputGainDb:
@@ -544,6 +586,8 @@ inline float roundEqValue (EqField field, double value) noexcept
         case EqField::Q:      return juce::jlimit (kEqMinQ, kEqMaxQ, (float) (std::round (value * 100.0) / 100.0));
         case EqField::OutputGainDb:
             return juce::jlimit (-kEqMaxOutputGainDb, kEqMaxOutputGainDb, (float) (std::round (value * 10.0) / 10.0));
+        case EqField::DeEssHz:    return juce::jlimit (kDeEssMinHz, kDeEssMaxHz, (float) std::round (value));
+        case EqField::DeEssMaxDb: return juce::jlimit (0.0f, kDeEssMaxDbLimit, (float) (std::round (value * 2.0) / 2.0)); // 0.5 dB刻み
     }
 
     return (float) value;
@@ -584,7 +628,7 @@ inline std::optional<float> parseEqInput (EqField field, const juce::String& tex
 
     double scale = 1.0;
 
-    if (field == EqField::Hz && t.endsWith ("k"))
+    if ((field == EqField::Hz || field == EqField::DeEssHz) && t.endsWith ("k"))
     {
         scale = 1000.0;
         t = t.dropLastCharacters (1);
@@ -612,15 +656,15 @@ inline std::optional<float> parseEqInput (EqField field, const juce::String& tex
 }
 
 // ホイール・矢印キー1回ぶんの変更。direction > 0で増やす。周波数とQは×2^(±1/12)（丸めた結果が変わらなければ最小刻み）、
-// ゲイン（出力ゲインを含む）は±0.5dB。範囲の端では止まる。
+// ゲイン（出力ゲイン・ディエッサーの強さを含む）は±0.5dB。範囲の端では止まる。
 inline float stepEqValue (EqField field, float current, int direction) noexcept
 {
     const double sign = direction > 0 ? 1.0 : -1.0;
 
-    if (field == EqField::GainDb || field == EqField::OutputGainDb)
+    if (field == EqField::GainDb || field == EqField::OutputGainDb || field == EqField::DeEssMaxDb)
         return roundEqValue (field, (double) current + sign * 0.5);
 
-    const double quantum = field == EqField::Hz ? 1.0 : 0.01;
+    const double quantum = field == EqField::Hz || field == EqField::DeEssHz ? 1.0 : 0.01;
     const double scaled = (double) current * std::pow (2.0, sign / 12.0);
     const double before = std::round ((double) current / quantum) * quantum;
     double next = std::round (scaled / quantum) * quantum;

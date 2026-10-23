@@ -402,7 +402,7 @@ public:
         params.enabled.store (saved.enabled, std::memory_order_relaxed);
         params.talkboxRange.store ((int) saved.talkboxRange, std::memory_order_relaxed);
 
-        // マイク処理（ノイズ除去・EQ）。全体ON/OFFの対象外（D-020）。
+        // マイク処理（ノイズ除去・EQ・ディエッサー）。全体ON/OFFの対象外（D-020）。
         params.nrEnabled.store (saved.nrEnabled, std::memory_order_relaxed);
         params.nrBackground.store (saved.nrBackground, std::memory_order_relaxed);
         params.nrImpact.store (saved.nrImpact, std::memory_order_relaxed);
@@ -411,6 +411,10 @@ public:
 
         for (size_t i = 0; i < saved.eqBands.size(); ++i)
             params.eqBands[i].store (saved.eqBands[i]);
+
+        params.deEssEnabled.store (saved.deEssEnabled, std::memory_order_relaxed);
+        params.deEssHz.store (saved.deEssHz, std::memory_order_relaxed);
+        params.deEssMaxDb.store (saved.deEssMaxDb, std::memory_order_relaxed);
 
         const auto inputNames = audioIO.getInputNames();
         const auto outputNames = audioIO.getOutputNames();

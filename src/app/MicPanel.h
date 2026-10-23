@@ -11,7 +11,7 @@
 #include <functional>
 
 // ===== SECTION: MicPanel =====
-// マイク処理ウィンドウ（ノイズ除去とEQの設定）。docs/design.md 10章が正本。460×600、非モーダルのネイティブ別ウィンドウ。
+// マイク処理ウィンドウ（ノイズ除去・EQ・ディエッサーの設定）。docs/design.md 10章が正本。460×704、非モーダルのネイティブ別ウィンドウ。
 // 変更は即座にAtomicParams（音声スレッドが読むatomic）へ反映し、設定ファイルへ保存する。書くのはメッセージスレッドだけ。
 // 色・フォント・角丸はAppLookAndFeel（design.md 3.1節）を使い、新しい色は追加しない。
 
@@ -145,6 +145,9 @@ private:
 
     void setNrEnabled (bool on);
     void setEqEnabled (bool on);
+    void setDeEssEnabled (bool on);
+    void deEssHzChangedByUser (float hz);
+    void deEssMaxDbChangedByUser (float db);
     void applySlider (juce::Slider& slider, std::atomic<float>& target);
     void bandChangedByUser (int index, const EqBandSettings& settings);
     void outputGainChangedByUser (float gainDb);
@@ -155,6 +158,7 @@ private:
     void refreshEqAppearance();
     void refreshBandAppearance (int index);
     void refreshOutputGainAppearance();
+    void refreshDeEssAppearance();
     void refreshPresetAppearance();
     void refreshUndoButton();
     void refreshAll();
@@ -167,15 +171,16 @@ private:
     AppLookAndFeel lookAndFeel;
     juce::TooltipWindow tooltipWindow { this, 500 };
 
-    ToggleSwitch nrSwitch, eqSwitch;
+    ToggleSwitch nrSwitch, eqSwitch, deEssSwitch;
     juce::Label backgroundLabel, impactLabel;
     juce::Slider backgroundSlider, impactSlider;
-    juce::Label presetLabel, outputGainLabel;
+    juce::Label presetLabel, outputGainLabel, deEssHzLabel, deEssMaxDbLabel;
     std::array<juce::TextButton, 3> presetButtons; // 添字はEqPresetIdの値（0 = EQなし、1 = A2、2 = A3）。カスタムは選べない
     juce::TextButton undoButton;
     EqGraph graph;
     std::array<Band, kEqBands> bands;
     std::unique_ptr<NumberField> outputGain;
+    std::unique_ptr<NumberField> deEssHzField, deEssMaxDbField;
 
     // 「元に戻す」の記録。プリセットを選んだ直後だけ有効（バンドの値・出力ゲインを変えた・ウィンドウを非表示にしたら無効。EQスイッチでは無効にしない）。
     EqPresetUndo undo;

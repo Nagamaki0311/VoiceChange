@@ -151,6 +151,11 @@ struct ProcessSettings
     std::array<EqBandSettings, kEqBands> eqBands = kEqDefaults;
     float eqOutputGainDb = kEqOutputGainDefaultDb;
 
+    // ディエッサー（--deess・--deess-hz・--deess-db。T-019）。既定はOFF（製品と同じ）。
+    bool deEssEnabled = false;
+    float deEssHz = kDeEssDefaultHz;
+    float deEssMaxDb = kDeEssDefaultMaxDb;
+
     // 層1・層2（--preset・--gain・--pitch・--reverb）。pitchは層1ピッチ（半音、整数）。製品の±24を超えてよい（kMaxToolPitch）。
     Preset preset = Preset::Normal;
     float gainDb = 0.0f;

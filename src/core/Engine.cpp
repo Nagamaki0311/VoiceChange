@@ -36,6 +36,7 @@ void Engine::prepare (const EngineConfig& config)
 
     noiseReducer.prepare (sampleRate, maxBlockSamples);
     equalizer.prepare (sampleRate);
+    deEsser.prepare (sampleRate);
     shifter.prepare (sampleRate, maxBlockSamples);
     detector.prepare (sampleRate, maxBlockSamples);
     echo.prepare (sampleRate, maxBlockSamples);
@@ -117,6 +118,7 @@ void Engine::resetMic() noexcept
 {
     noiseReducer.reset();
     equalizer.reset();
+    deEsser.reset();
 }
 
 void Engine::handleNonFinite (float* buf, int n) noexcept
@@ -324,7 +326,7 @@ void Engine::processChunk (float* buf, int n) noexcept
 
     updateInputPeak (buf, n);
 
-    // マイク処理（D-020: ノイズ除去 → EQ）: バイパス判定の前。全体OFFでも動き、バイパス解除でリセットしない。
+    // マイク処理（D-020: ノイズ除去 → EQ → ディエッサー）: バイパス判定の前。全体OFFでも動き、バイパス解除でリセットしない。
     // 以降のdryScratch・バイパスの素通しは、マイク処理後の信号になる。
     const float rawNrBackground = atomicParams.nrBackground.load (std::memory_order_relaxed);
     const float rawNrImpact = atomicParams.nrImpact.load (std::memory_order_relaxed);
@@ -358,6 +360,12 @@ void Engine::processChunk (float* buf, int n) noexcept
     equalizer.setTarget (atomicParams.eqEnabled.load (std::memory_order_relaxed), eqSettings,
                          atomicParams.eqOutputGainDb.load (std::memory_order_relaxed));
     equalizer.process (buf, n);
+
+    // ディエッサー（EQの直後、層1・層2の前。初期値OFF。T-019）。範囲外・非有限値はDeEsser::setTargetが丸める・既定にする。
+    deEsser.setTarget (atomicParams.deEssEnabled.load (std::memory_order_relaxed),
+                       atomicParams.deEssHz.load (std::memory_order_relaxed),
+                       atomicParams.deEssMaxDb.load (std::memory_order_relaxed));
+    deEsser.process (buf, n);
 
     if (! targetOn && chainGain <= 0.0)
     {
